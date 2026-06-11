@@ -41,14 +41,20 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 		return nil, 0, err
 	}
 	order := "s.name COLLATE NOCASE ASC,s.id ASC"
-	sortValue := strings.ToLower(q.Sort)
+	sortValue := strings.ToLower(strings.TrimSpace(q.Sort))
 	switch {
 	case strings.Contains(sortValue, "random"):
 		order = "RANDOM()"
-	case strings.Contains(sortValue, "lastmodifieddate,desc"):
-		order = "s.updated_at DESC,s.name COLLATE NOCASE ASC"
-	case strings.Contains(sortValue, "createddate,desc"):
-		order = "s.created_at DESC,s.name COLLATE NOCASE ASC"
+	case strings.HasPrefix(sortValue, "lastmodifieddate"):
+		order = `COALESCE(
+ (SELECT MAX(b.file_modified_at) FROM books b WHERE b.series_id=s.id),
+ s.file_modified_at,s.updated_at
+) ` + sortDirection(sortValue) + `,s.name COLLATE NOCASE ASC,s.id ASC`
+	case strings.HasPrefix(sortValue, "createddate"):
+		order = `COALESCE(
+ (SELECT MAX(b.file_created_at) FROM books b WHERE b.series_id=s.id),
+ s.created_at
+) ` + sortDirection(sortValue) + `,s.name COLLATE NOCASE ASC,s.id ASC`
 	case strings.Contains(sortValue, ",desc"):
 		order = "s.name COLLATE NOCASE DESC,s.id DESC"
 	}
@@ -64,6 +70,13 @@ FROM series s` + where + ` ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	defer rows.Close()
 	items, err := scanSeriesRows(rows)
 	return items, total, err
+}
+
+func sortDirection(value string) string {
+	if strings.HasSuffix(value, ",desc") {
+		return "DESC"
+	}
+	return "ASC"
 }
 
 func (s *Store) SeriesByID(ctx context.Context, id string) (Series, error) {
