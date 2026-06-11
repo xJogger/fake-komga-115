@@ -29,6 +29,7 @@ type App struct {
 	server  *http.Server
 	store   *database.Store
 	scanner *scanner.Manager
+	covers  *thumbnail.BatchManager
 	logger  *slog.Logger
 }
 
@@ -59,8 +60,12 @@ func New(_ context.Context, options Options) (*App, error) {
 		store.Close()
 		return nil, err
 	}
+	coverManager := thumbnail.NewBatchManager(
+		store, archiveService, thumbnailService, options.Logger,
+	)
 	handler := httpserver.New(
-		store, client, scanManager, cacheManager, archiveService, thumbnailService, options.Logger,
+		store, client, scanManager, cacheManager, archiveService, thumbnailService,
+		coverManager, options.Logger,
 	)
 	server := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", options.Host, options.Port),
@@ -68,7 +73,10 @@ func New(_ context.Context, options Options) (*App, error) {
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	return &App{server: server, store: store, scanner: scanManager, logger: options.Logger}, nil
+	return &App{
+		server: server, store: store, scanner: scanManager, covers: coverManager,
+		logger: options.Logger,
+	}, nil
 }
 
 func (a *App) Run() error {
@@ -83,6 +91,7 @@ func (a *App) Run() error {
 func (a *App) Shutdown(ctx context.Context) error { return a.server.Shutdown(ctx) }
 
 func (a *App) Close() error {
+	a.covers.Close()
 	a.scanner.Close()
 	return a.store.Close()
 }

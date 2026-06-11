@@ -66,9 +66,14 @@ INSERT INTO books(
 	if err != nil {
 		t.Fatal(err)
 	}
+	archiveService := archive.NewService(store, client, cacheManager, logger)
+	coverManager := thumbnail.NewBatchManager(
+		store, archiveService, thumbnailService, logger,
+	)
+	defer coverManager.Close()
 	handler := New(
 		store, client, scanManager, cacheManager,
-		archive.NewService(store, client, cacheManager, logger), thumbnailService, logger,
+		archiveService, thumbnailService, coverManager, logger,
 	).Handler()
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -85,6 +90,11 @@ INSERT INTO books(
 	}
 	if libraries[0]["oneShot"] != true {
 		t.Fatalf("one-shot library flag missing: %#v", libraries)
+	}
+	var coverJobs []map[string]any
+	getJSON(t, server.URL+"/admin/api/cover-jobs", &coverJobs)
+	if len(coverJobs) != 0 {
+		t.Fatalf("unexpected cover jobs: %#v", coverJobs)
 	}
 
 	var komgaLibraries []map[string]any

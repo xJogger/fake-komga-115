@@ -12,6 +12,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/id"
+	"github.com/xJogger/fake-komga-115/internal/thumbnail"
 )
 
 func (s *Server) adminRoutes(r chi.Router) {
@@ -30,6 +31,9 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/scans", s.listScans)
 	r.Post("/scans", s.startScan)
 	r.Post("/scans/{runID}/cancel", s.cancelScan)
+	r.Get("/cover-jobs", s.listCoverJobs)
+	r.Post("/cover-jobs", s.startCoverJob)
+	r.Post("/cover-jobs/{runID}/cancel", s.cancelCoverJob)
 	r.Get("/cache", s.cacheStats)
 	r.Delete("/cache/{cacheType}", s.clearCache)
 }
@@ -47,7 +51,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		"series":     series,
 		"books":      books,
 		"comicBytes": comicBytes,
-		"version":    "0.1.2",
+		"version":    "0.1.3",
 	})
 }
 
@@ -343,6 +347,53 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request) {
 	if err := s.scanner.Cancel(r.Context(), chi.URLParam(r, "runID")); err != nil {
+		writeError(w, 404, "NOT_FOUND", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listCoverJobs(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.covers.Runs(r.Context(), intQuery(r, "limit", 50))
+	if err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, 200, runs)
+}
+
+func (s *Server) startCoverJob(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		LibraryID string `json:"libraryId"`
+		All       bool   `json:"all"`
+		Limit     int    `json:"limit"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.LibraryID = strings.TrimSpace(request.LibraryID)
+	if request.LibraryID == "" {
+		writeError(w, 400, "INVALID_LIBRARY", "libraryId is required")
+		return
+	}
+	run, err := s.covers.Start(r.Context(), request.LibraryID, request.All, request.Limit)
+	if err != nil {
+		status := http.StatusConflict
+		code := "COVER_JOB_START_FAILED"
+		if errors.Is(err, sql.ErrNoRows) {
+			status, code = http.StatusNotFound, "NOT_FOUND"
+		} else if !errors.Is(err, thumbnail.ErrBatchAlreadyQueued) &&
+			strings.Contains(err.Error(), "limit") {
+			status, code = http.StatusBadRequest, "INVALID_LIMIT"
+		}
+		writeError(w, status, code, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, run)
+}
+
+func (s *Server) cancelCoverJob(w http.ResponseWriter, r *http.Request) {
+	if err := s.covers.Cancel(r.Context(), chi.URLParam(r, "runID")); err != nil {
 		writeError(w, 404, "NOT_FOUND", err.Error())
 		return
 	}

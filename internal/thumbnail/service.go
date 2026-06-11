@@ -166,6 +166,34 @@ func (s *Service) Get(ctx context.Context, seriesID string) (Data, bool, error) 
 	}, true, nil
 }
 
+func (s *Service) HasValid(ctx context.Context, seriesID string) (bool, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+
+	first, err := s.store.FirstBookInSeries(ctx, seriesID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	item, ok, err := s.metadata(ctx, seriesID)
+	if err != nil || !ok {
+		return false, err
+	}
+	if item.SourceBookID != first.ID || item.SourceVersion != archive.BookVersion(first) {
+		s.delete(ctx, seriesID, item)
+		return false, nil
+	}
+	if _, err := os.Stat(s.path(item.Path)); errors.Is(err, fs.ErrNotExist) {
+		s.delete(ctx, seriesID, item)
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Service) Stats(ctx context.Context) (Stats, error) {
 	var stats Stats
 	err := s.store.DB().QueryRowContext(ctx,

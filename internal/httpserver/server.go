@@ -37,6 +37,7 @@ type Server struct {
 	cache   *cache.Manager
 	archive *archive.Service
 	thumbs  *thumbnail.Service
+	covers  *thumbnail.BatchManager
 	logger  *slog.Logger
 	router  chi.Router
 
@@ -50,11 +51,12 @@ func New(
 	cacheManager *cache.Manager,
 	archiveService *archive.Service,
 	thumbnailService *thumbnail.Service,
+	coverManager *thumbnail.BatchManager,
 	logger *slog.Logger,
 ) *Server {
 	s := &Server{
 		store: store, client: client, scanner: scanManager, cache: cacheManager,
-		archive: archiveService, thumbs: thumbnailService,
+		archive: archiveService, thumbs: thumbnailService, covers: coverManager,
 		logger: logger, placeholder: makePlaceholder(),
 	}
 	s.router = s.routes()

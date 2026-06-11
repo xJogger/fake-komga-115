@@ -36,7 +36,7 @@ go build -o /tmp/fake-komga-115 ./cmd/server
 - `internal/scanner`：递归扫描、扫描状态、普通模式和 One-Shots 模式。
 - `internal/archive`：远程 ReaderAt、ZIP/RAR 索引与按页解压。
 - `internal/cache`：Range block 和已解压页面的磁盘缓存及 LRU 式淘汰。
-- `internal/thumbnail`：用户实际阅读第一页后生成系列封面。
+- `internal/thumbnail`：阅读触发的系列封面生成和手动批量封面任务。
 - `internal/httpserver`：管理 API、管理页面和 Komga 兼容 API。
 - `internal/id`：稳定、可逆的 Library/Series/Book ID。
 - `internal/natsort`：漫画文件和页面的自然排序。
@@ -65,6 +65,9 @@ go build -o /tmp/fake-komga-115 ./cmd/server
 - Range、Page、归档索引、系列封面必须可分别清理。
 - Range/Page 上限为 0 时表示不限制。
 - 封面只由 Series 第一本 Book 的第一页生成，最长边 300px，JPEG 质量 75。
+- 手动封面任务必须全局串行，已有有效封面跳过，单 Series 失败不能中断后续任务。
+- 最新 N 封面按 Series 中最新 Book 的 115 文件修改时间选择，默认 N 为 50。
+- 全库封面按钮必须保持警示样式和二次确认，并提供持久化进度与取消。
 - 缓存键必须包含足够的文件版本信息，避免文件变化后读取旧数据。
 
 ### API

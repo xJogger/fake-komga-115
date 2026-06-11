@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS books (
   FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_books_series_number ON books(series_id, number_sort);
+CREATE INDEX IF NOT EXISTS idx_books_series_modified ON books(series_id, file_modified_at);
 CREATE INDEX IF NOT EXISTS idx_books_library_name ON books(library_id, name);
 CREATE INDEX IF NOT EXISTS idx_books_seen_scan ON books(library_id, seen_scan_id);
 
@@ -153,6 +154,27 @@ CREATE TABLE IF NOT EXISTS series_thumbnails (
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE,
   FOREIGN KEY(source_book_id) REFERENCES books(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS thumbnail_runs (
+  id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  requested_limit INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  total_series INTEGER NOT NULL DEFAULT 0,
+  processed_series INTEGER NOT NULL DEFAULT 0,
+  generated_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  current_series TEXT NOT NULL DEFAULT '',
+  errors_json TEXT NOT NULL DEFAULT '[]',
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_thumbnail_runs_created ON thumbnail_runs(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS downurl_cache (
   cache_key TEXT PRIMARY KEY,

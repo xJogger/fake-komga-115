@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>fake-komga-115 管理</title>
   <style>
-    :root{color-scheme:dark;--bg:#0d1117;--card:#161b22;--line:#30363d;--muted:#8b949e;--text:#e6edf3;--accent:#2f81f7;--danger:#f85149;--ok:#3fb950}
+    :root{color-scheme:dark;--bg:#0d1117;--card:#161b22;--line:#30363d;--muted:#8b949e;--text:#e6edf3;--accent:#2f81f7;--danger:#f85149;--warning:#9e6a03;--ok:#3fb950}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
     header{position:sticky;top:0;z-index:2;background:#010409dd;backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
     header>div,main{max-width:1180px;margin:auto;padding:18px 22px}h1{font-size:20px;margin:0}h2{font-size:17px;margin:0 0 14px}
@@ -14,9 +14,9 @@
     label{display:block;color:var(--muted);margin:10px 0 5px}input,select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:6px;background:#0d1117;color:var(--text)}
     input[type=checkbox]{width:auto;margin-right:7px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.row button{flex:0 0 auto}
     button{border:1px solid #388bfd;border-radius:6px;background:var(--accent);color:white;padding:8px 12px;cursor:pointer;font-weight:600}
-    button.secondary{background:#21262d;border-color:var(--line)}button.danger{background:#da3633;border-color:var(--danger)}button:disabled{opacity:.5;cursor:not-allowed}
+    button.secondary{background:#21262d;border-color:var(--line)}button.warning{background:var(--warning);border-color:#d29922}button.danger{background:#da3633;border-color:var(--danger)}button:disabled{opacity:.5;cursor:not-allowed}
     table{width:100%;border-collapse:collapse;min-width:680px}th,td{text-align:left;border-bottom:1px solid var(--line);padding:9px 8px;vertical-align:top}th{color:var(--muted);font-weight:600}
-    code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.muted{color:var(--muted)}.ok{color:var(--ok)}.bad{color:var(--danger)}
+    code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.muted{color:var(--muted)}.ok{color:var(--ok)}.bad{color:var(--danger)}.compact{display:inline-block;width:76px;padding:7px}
     .stat{font-size:24px;font-weight:700}.message{display:none;position:fixed;right:20px;bottom:20px;max-width:520px;padding:12px 15px;border-radius:8px;background:#21262d;border:1px solid var(--line);box-shadow:0 8px 30px #0008;z-index:5}
     .progress{height:7px;background:#30363d;border-radius:9px;overflow:hidden;margin-top:6px}.progress>i{display:block;height:100%;width:35%;background:var(--accent);animation:move 1.5s infinite}
     @keyframes move{from{transform:translateX(-110%)}to{transform:translateX(300%)}}
@@ -80,6 +80,13 @@
     <table><thead><tr><th>Library</th><th>触发</th><th>状态</th><th>目录/文件</th><th>Series/Books</th><th>当前目录</th><th>时间</th><th></th></tr></thead><tbody id="scans"></tbody></table>
   </section>
 
+  <section>
+    <h2>系列封面任务</h2>
+    <p class="muted">每次只处理一个系列，从自然排序第一本漫画读取第一页并生成压缩封面；已有且仍有效的封面会跳过。全库操作可能产生大量 115 流量并长时间运行。</p>
+    <div id="activeCoverProgress"></div>
+    <table><thead><tr><th>Library / 范围</th><th>状态</th><th>进度</th><th>生成/跳过/失败</th><th>当前 Series</th><th>时间</th><th></th></tr></thead><tbody id="coverJobs"></tbody></table>
+  </section>
+
   <div class="grid">
     <section>
       <h2>自动扫描</h2>
@@ -119,6 +126,7 @@
 <div id="message" class="message"></div>
 <script>
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), enc=s=>encodeURIComponent(s).replace(/'/g,'%27');
+const coverLimits={};
 async function api(path,options={}) {
   options.headers={...(options.headers||{}),'Content-Type':'application/json'};
   const r=await fetch('/admin/api'+path,options);
@@ -144,7 +152,17 @@ async function loadLibraries(){
     <td><b>${esc(x.name)}</b>${x.oneShot?' <span class="ok">One-Shots</span>':''}<br><span class="mono muted">${esc(x.id)}</span></td><td class="mono">${esc(x.rootCid)}</td>
     <td>${x.seriesCount} Series<br>${x.bookCount} Books<br>${bytes(x.comicBytes)}</td><td>${when(x.lastScanCompletedAt)}${x.lastScanError?'<br><span class="bad">'+esc(x.lastScanError)+'</span>':''}</td>
     <td>${x.enabled?'<span class="ok">启用</span>':'<span class="muted">停用</span>'}<br>${esc(x.lastScanStatus)}</td>
-    <td><button onclick="scanLibrary('${x.id}')">扫描</button> <button class="secondary" onclick="toggleLibrary('${x.id}',decodeURIComponent('${enc(x.name)}'),${!x.enabled},${x.oneShot})">${x.enabled?'停用':'启用'}</button> <button class="secondary" onclick="toggleOneShot('${x.id}',decodeURIComponent('${enc(x.name)}'),${x.enabled},${!x.oneShot})">${x.oneShot?'普通模式':'One-Shots'}</button> <button class="danger" onclick="deleteLibrary('${x.id}')">删除</button></td>
+    <td>
+      <button onclick="scanLibrary('${x.id}')">扫描</button>
+      <button class="secondary" onclick="toggleLibrary('${x.id}',decodeURIComponent('${enc(x.name)}'),${!x.enabled},${x.oneShot})">${x.enabled?'停用':'启用'}</button>
+      <button class="secondary" onclick="toggleOneShot('${x.id}',decodeURIComponent('${enc(x.name)}'),${x.enabled},${!x.oneShot})">${x.oneShot?'普通模式':'One-Shots'}</button>
+      <button class="danger" onclick="deleteLibrary('${x.id}')">删除</button>
+      <div style="margin-top:8px;white-space:nowrap">
+        <input class="compact" id="coverLimit-${x.id}" type="number" min="1" max="10000" value="${esc(coverLimits[x.id]??50)}" oninput="coverLimits['${x.id}']=this.value" title="按更新时间处理的 Series 数量">
+        <button class="warning" onclick="startCoverJob('${x.id}',decodeURIComponent('${enc(x.name)}'),false)">⚠ 获取最新封面</button>
+        <button class="warning" onclick="startCoverJob('${x.id}',decodeURIComponent('${enc(x.name)}'),true)">⚠ 获取全库封面</button>
+      </div>
+    </td>
   </tr>`).join('');
 }
 async function loadScans(){
@@ -154,6 +172,18 @@ async function loadScans(){
   <td>${x.directoriesSeen}/${x.filesSeen}</td><td>${x.seriesSeen}/${x.booksSeen}</td><td class="mono">${esc(x.currentPath)}</td><td>${when(x.startedAt)}<br>${when(x.completedAt)}</td>
   <td>${x.status==='running'||x.status==='queued'?`<button class="danger" onclick="cancelScan('${x.id}')">取消</button>`:''}</td></tr>`).join('');
 }
+function coverStatus(x){return ({queued:'排队中',running:'运行中',success:'成功',partial:'部分失败',failed:'失败',canceled:'已取消'})[x]||x}
+async function loadCoverJobs(){
+  const rows=await api('/cover-jobs?limit=50'),active=rows.filter(x=>x.status==='running'||x.status==='queued');
+  $('#activeCoverProgress').innerHTML=active.map(x=>`<div><b>${esc(x.libraryName)}</b> · ${coverStatus(x.status)} · ${x.processedSeries}/${x.totalSeries} Series · <span class="mono">${esc(x.currentSeries)}</span><div class="progress"><i></i></div></div>`).join('');
+  $('#coverJobs').innerHTML=rows.map(x=>`<tr>
+    <td>${esc(x.libraryName)}<br><span class="muted">${x.mode==='all'?'全库':'最新 '+x.requestedLimit+' 个'}</span></td>
+    <td>${coverStatus(x.status)}${x.cancelRequested?'<br><span class="muted">正在取消</span>':''}${x.errors?.length?'<details><summary class="bad">错误摘要</summary><span class="bad">'+x.errors.map(esc).join('<br>')+'</span></details>':''}</td>
+    <td>${x.processedSeries}/${x.totalSeries}</td><td><span class="ok">${x.generatedCount}</span> / ${x.skippedCount} / <span class="${x.failedCount?'bad':''}">${x.failedCount}</span></td>
+    <td class="mono">${esc(x.currentSeries)}</td><td>${when(x.startedAt)}<br>${when(x.completedAt)}</td>
+    <td>${x.status==='running'||x.status==='queued'?`<button class="danger" onclick="cancelCoverJob('${x.id}')">取消</button>`:''}</td>
+  </tr>`).join('');
+}
 async function loadSettings(){
   const x=await api('/settings');$('#autoScan').checked=x.auto_scan_enabled==='true';$('#scanInterval').value=x.auto_scan_interval_minutes;
   $('#startupScan').checked=x.scan_on_startup==='true';$('#apiRate').value=x.api_rate_per_second;$('#prefetch').value=x.page_prefetch_count;
@@ -162,7 +192,7 @@ async function loadSettings(){
 async function loadCache(){
   const x=await api('/cache');$('#cacheStats').innerHTML=x.entries.map(e=>`${esc(e.type)}：${e.files} 个文件，${bytes(e.bytes)}`).join('<br>')+`<br>归档索引：${x.archiveIndexes}<br>系列封面：${x.seriesThumbnails.files} 个文件，${bytes(x.seriesThumbnails.bytes)}`;
 }
-async function refresh(){try{await Promise.all([loadStatus(),loadAccount(),loadLibraries(),loadScans(),loadSettings(),loadCache()])}catch(e){notice(e.message,true)}}
+async function refresh(){try{await Promise.all([loadStatus(),loadAccount(),loadLibraries(),loadScans(),loadCoverJobs(),loadSettings(),loadCache()])}catch(e){notice(e.message,true)}}
 
 $('#accountForm').onsubmit=async e=>{e.preventDefault();try{const x=await api('/account',{method:'PUT',body:JSON.stringify({refreshToken:$('#refreshToken').value,accessToken:$('#accessToken').value})});notice(`连接成功：${x.userName||x.userId}`);$('#refreshToken').value='';$('#accessToken').value='';refresh()}catch(e){notice(e.message,true)}};
 $('#testAccount').onclick=async()=>{try{const x=await api('/account/test',{method:'POST'});notice(`连接成功：${x.userName||x.userId}`)}catch(e){notice(e.message,true)}};
@@ -171,6 +201,15 @@ $('#libraryForm').onsubmit=async e=>{e.preventDefault();try{await api('/librarie
 $('#scanAll').onclick=async()=>{try{await api('/scans',{method:'POST',body:'{}'});notice('已加入扫描队列');loadScans()}catch(e){notice(e.message,true)}};
 async function scanLibrary(id){try{await api('/scans',{method:'POST',body:JSON.stringify({libraryId:id})});notice('已加入扫描队列');loadScans()}catch(e){notice(e.message,true)}}
 async function cancelScan(id){try{await api(`/scans/${id}/cancel`,{method:'POST'});notice('已请求取消');loadScans()}catch(e){notice(e.message,true)}}
+async function startCoverJob(id,name,all){
+  const input=document.getElementById('coverLimit-'+id),limit=Number(input?.value||50);
+  if(!all&&(!Number.isInteger(limit)||limit<1||limit>10000)){notice('封面数量必须是 1 到 10000 的整数',true);return}
+  const scope=all?'整个库的全部 Series':`更新时间最新的 ${limit} 个 Series`;
+  if(!confirm(`⚠ 警告：将为「${name}」${scope}获取封面。此操作会读取每个 Series 第一本漫画的第一页，可能产生较多 115 流量并占用较长时间。是否继续？`))return;
+  if(!confirm(`二次确认：确实要启动「${name}」的${all?'全库':'最新 '+limit+' 个'}封面任务吗？`))return;
+  try{await api('/cover-jobs',{method:'POST',body:JSON.stringify({libraryId:id,all,limit})});notice('封面任务已加入队列');loadCoverJobs()}catch(e){notice(e.message,true)}
+}
+async function cancelCoverJob(id){if(!confirm('确认取消这个封面任务？已生成的封面会保留。'))return;try{await api(`/cover-jobs/${id}/cancel`,{method:'POST'});notice('已请求取消封面任务');loadCoverJobs()}catch(e){notice(e.message,true)}}
 async function toggleLibrary(id,name,enabled,oneShot){try{await api(`/libraries/${id}`,{method:'PUT',body:JSON.stringify({name,enabled,oneShot})});refresh()}catch(e){notice(e.message,true)}}
 async function toggleOneShot(id,name,enabled,oneShot){if(!confirm(`切换为${oneShot?' One-Shots':'普通'}模式后需要重新扫描。扫描成功前会保留旧结构，是否继续？`))return;try{await api(`/libraries/${id}`,{method:'PUT',body:JSON.stringify({name,enabled,oneShot})});notice('模式已切换，请点击扫描应用新结构');refresh()}catch(e){notice(e.message,true)}}
 async function deleteLibrary(id){if(!confirm('删除该 Library 及本地扫描元数据？不会删除 115 文件。'))return;try{await api(`/libraries/${id}`,{method:'DELETE'});notice('已删除');refresh()}catch(e){notice(e.message,true)}}
@@ -179,7 +218,7 @@ $('#cacheSettingsForm').onsubmit=async e=>{e.preventDefault();try{const unit=102
 document.querySelectorAll('[data-clear]').forEach(b=>b.onclick=async()=>{const t=b.dataset.clear;if(!confirm(`确认清理 ${t} 缓存？`))return;try{await api(`/cache/${t}`,{method:'DELETE'});notice('缓存已清理');loadCache()}catch(e){notice(e.message,true)}});
 $('#browseButton').onclick=async()=>{try{const x=await api('/115/folders?cid='+encodeURIComponent($('#browseCid').value||'0'));$('#folderBrowser').innerHTML=(x.folders||[]).map(f=>`<div class="row" style="margin-top:6px"><span>${esc(f.name)} <code>${esc(f.id)}</code></span><button class="secondary" onclick="browseInto('${f.id}')">进入</button><button onclick="chooseFolder('${f.id}',decodeURIComponent('${enc(f.name)}'))">选择</button></div>`).join('')||'<p>没有子目录</p>'}catch(e){notice(e.message,true)}};
 function browseInto(cid){$('#browseCid').value=cid;$('#browseButton').click()}function chooseFolder(cid,name){$('#rootCid').value=cid;if(!$('#libraryName').value)$('#libraryName').value=name;notice('已填入目录')}
-refresh();setInterval(()=>{loadStatus();loadLibraries();loadScans();loadCache()},2500);
+refresh();setInterval(()=>{loadStatus();loadLibraries();loadScans();loadCoverJobs();loadCache()},2500);
 </script>
 </body>
 </html>
