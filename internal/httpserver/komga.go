@@ -268,7 +268,11 @@ func seriesDTO(item database.Series) map[string]any {
 }
 
 func bookDTO(item database.Book, series database.Series) map[string]any {
-	created, updated := item.CreatedAt.UTC().Format(time.RFC3339), item.UpdatedAt.UTC().Format(time.RFC3339)
+	createdAt := item.CreatedAt
+	if item.FileCreatedAt != nil {
+		createdAt = *item.FileCreatedAt
+	}
+	created, updated := createdAt.UTC().Format(time.RFC3339), item.UpdatedAt.UTC().Format(time.RFC3339)
 	fileModified := updated
 	if item.FileModifiedAt != nil {
 		fileModified = item.FileModifiedAt.UTC().Format(time.RFC3339)

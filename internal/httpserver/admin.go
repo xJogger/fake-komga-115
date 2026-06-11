@@ -47,7 +47,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		"series":     series,
 		"books":      books,
 		"comicBytes": comicBytes,
-		"version":    "0.1.0",
+		"version":    "0.1.1",
 	})
 }
 
