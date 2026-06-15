@@ -252,7 +252,7 @@ func buildBookFilters(q BookQuery) (string, []any) {
 }
 
 func scanSeriesRows(rows *sql.Rows) ([]Series, error) {
-	var out []Series
+	out := make([]Series, 0)
 	for rows.Next() {
 		var item Series
 		var modified sql.NullString
@@ -272,7 +272,7 @@ func scanSeriesRows(rows *sql.Rows) ([]Series, error) {
 }
 
 func scanBookRows(rows *sql.Rows) ([]Book, error) {
-	var out []Book
+	out := make([]Book, 0)
 	for rows.Next() {
 		var item Book
 		var fileCreated, fileModified sql.NullString

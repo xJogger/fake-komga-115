@@ -103,7 +103,7 @@ func (m *Manager) StartAll(ctx context.Context, trigger string) ([]database.Scan
 	if err != nil {
 		return nil, err
 	}
-	var runs []database.ScanRun
+	runs := make([]database.ScanRun, 0)
 	for _, library := range libraries {
 		run, err := m.StartLibrary(ctx, library.ID, trigger)
 		if err != nil {
@@ -193,7 +193,7 @@ ORDER BY r.created_at DESC LIMIT ?`, limit)
 		return nil, err
 	}
 	defer rows.Close()
-	var out []database.ScanRun
+	out := make([]database.ScanRun, 0)
 	for rows.Next() {
 		var run database.ScanRun
 		if err := rows.Scan(

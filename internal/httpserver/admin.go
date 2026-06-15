@@ -194,7 +194,7 @@ func (s *Server) list115Folders(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "ONEONEFIVE_LIST_FAILED", err.Error())
 		return
 	}
-	var folders []any
+	folders := make([]any, 0)
 	for _, file := range files {
 		if file.IsDir {
 			folders = append(folders, file)

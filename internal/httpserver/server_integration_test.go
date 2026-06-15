@@ -34,26 +34,7 @@ func TestMihonKomgaContract(t *testing.T) {
 	libraryID := id.Library("root")
 	seriesID := id.Series(libraryID, "series-cid")
 	bookID := id.Book(libraryID, "file-id")
-	if err := store.UpsertLibrary(ctx, database.Library{
-		ID: libraryID, Name: "Comics", RootCID: "root", Enabled: true, OneShot: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := store.DB().Exec(`
-INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,updated_at,seen_scan_id)
-VALUES(?,?,?,?,?,1,?,?,'scan')`,
-		seriesID, libraryID, "series-cid", "One Shot", "Root/One Shot.cbz", now, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().Exec(`
-INSERT INTO books(
- id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
- file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
-) VALUES(?,?,?,?,?,'001.cbz',1234,'pick','sha',?,?,1,?,?,'scan')`,
-		bookID, seriesID, libraryID, "file-id", "series-cid", now, now, now, now); err != nil {
-		t.Fatal(err)
-	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client := oneonefive.New(store, logger)
@@ -83,6 +64,38 @@ INSERT INTO books(
 	).Handler()
 	server := httptest.NewServer(handler)
 	defer server.Close()
+
+	for _, path := range []string{
+		"/admin/api/libraries",
+		"/admin/api/scans",
+		"/admin/api/cover-jobs",
+	} {
+		var empty []any
+		getJSON(t, server.URL+path, &empty)
+		if empty == nil || len(empty) != 0 {
+			t.Fatalf("fresh installation endpoint %s must return [], got %#v", path, empty)
+		}
+	}
+
+	if err := store.UpsertLibrary(ctx, database.Library{
+		ID: libraryID, Name: "Comics", RootCID: "root", Enabled: true, OneShot: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,updated_at,seen_scan_id)
+VALUES(?,?,?,?,?,1,?,?,'scan')`,
+		seriesID, libraryID, "series-cid", "One Shot", "Root/One Shot.cbz", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+INSERT INTO books(
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
+ file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
+) VALUES(?,?,?,?,?,'001.cbz',1234,'pick','sha',?,?,1,?,?,'scan')`,
+		bookID, seriesID, libraryID, "file-id", "series-cid", now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
 
 	var status map[string]any
 	getJSON(t, server.URL+"/admin/api/status", &status)

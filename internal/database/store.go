@@ -187,7 +187,7 @@ FROM libraries l`
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Library
+	out := make([]Library, 0)
 	for rows.Next() {
 		var item Library
 		if err := rows.Scan(

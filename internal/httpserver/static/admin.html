@@ -168,7 +168,7 @@ async function loadAccount(){
   const a=await api('/account');$('#accountState').textContent=`Refresh Token: ${a.hasRefreshToken?'已保存':'未保存'}；Access Token: ${a.hasAccessToken?'已保存':'未保存'}${a.updatedAt?'；更新于 '+when(a.updatedAt):''}`;
 }
 async function loadLibraries(){
-  const rows=await api('/libraries');$('#libraries').innerHTML=rows.map(x=>`<tr>
+  const rows=(await api('/libraries'))||[];$('#libraries').innerHTML=rows.map(x=>`<tr>
     <td><b>${esc(x.name)}</b>${x.oneShot?' <span class="ok">One-Shots</span>':''}<br><span class="mono muted">${esc(x.id)}</span></td><td class="mono">${esc(x.rootCid)}</td>
     <td>${x.seriesCount} Series<br>${x.bookCount} Books<br>${bytes(x.comicBytes)}</td><td>${when(x.lastScanCompletedAt)}${x.lastScanError?'<br><span class="bad">'+esc(x.lastScanError)+'</span>':''}</td>
     <td>${x.enabled?'<span class="ok">启用</span>':'<span class="muted">停用</span>'}<br>${esc(x.lastScanStatus)}</td>
@@ -186,7 +186,7 @@ async function loadLibraries(){
   </tr>`).join('');
 }
 async function loadScans(){
-  const rows=await api('/scans?limit=50'),active=rows.filter(x=>x.status==='running'||x.status==='queued');
+  const rows=(await api('/scans?limit=50'))||[],active=rows.filter(x=>x.status==='running'||x.status==='queued');
   $('#activeProgress').innerHTML=active.map(x=>`<div><b>${esc(x.libraryName)}</b> · ${esc(x.status)} · ${x.directoriesSeen} 目录 / ${x.filesSeen} 文件 · <span class="mono">${esc(x.currentPath)}</span><div class="progress"><i></i></div></div>`).join('');
   $('#scans').innerHTML=rows.map(x=>`<tr><td>${esc(x.libraryName)}</td><td>${esc(x.triggerType)}</td><td>${esc(x.status)}${x.error?'<br><span class="bad">'+esc(x.error)+'</span>':''}</td>
   <td>${x.directoriesSeen}/${x.filesSeen}</td><td>${x.seriesSeen}/${x.booksSeen}</td><td class="mono">${esc(x.currentPath)}</td><td>${when(x.startedAt)}<br>${when(x.completedAt)}</td>
@@ -194,7 +194,7 @@ async function loadScans(){
 }
 function coverStatus(x){return ({queued:'排队中',running:'运行中',success:'成功',partial:'部分失败',failed:'失败',canceled:'已取消'})[x]||x}
 async function loadCoverJobs(){
-  const rows=await api('/cover-jobs?limit=50'),active=rows.filter(x=>x.status==='running'||x.status==='queued');
+  const rows=(await api('/cover-jobs?limit=50'))||[],active=rows.filter(x=>x.status==='running'||x.status==='queued');
   $('#activeCoverProgress').innerHTML=active.map(x=>`<div><b>${esc(x.libraryName)}</b> · ${coverStatus(x.status)} · ${x.processedSeries}/${x.totalSeries} Series · <span class="mono">${esc(x.currentSeries)}</span><div class="progress"><i></i></div></div>`).join('');
   $('#coverJobs').innerHTML=rows.map(x=>`<tr>
     <td>${esc(x.libraryName)}<br><span class="muted">${x.mode==='all'?'全库':'最新 '+x.requestedLimit+' 个'}</span></td>
@@ -210,7 +210,7 @@ async function loadSettings(){
   $('#rangeCacheLimit').value=Number(gib(x.range_cache_max_bytes).toFixed(2));$('#pageCacheLimit').value=Number(gib(x.page_cache_max_bytes).toFixed(2));
 }
 async function loadCache(){
-  const x=await api('/cache');$('#cacheStats').innerHTML=x.entries.map(e=>`${esc(e.type)}：${e.files} 个文件，${bytes(e.bytes)}`).join('<br>')+`<br>归档索引：${x.archiveIndexes}<br>系列封面：${x.seriesThumbnails.files} 个文件，${bytes(x.seriesThumbnails.bytes)}`;
+  const x=await api('/cache'),entries=x.entries||[],thumbs=x.seriesThumbnails||{files:0,bytes:0};$('#cacheStats').innerHTML=entries.map(e=>`${esc(e.type)}：${e.files} 个文件，${bytes(e.bytes)}`).join('<br>')+`<br>归档索引：${x.archiveIndexes||0}<br>系列封面：${thumbs.files||0} 个文件，${bytes(thumbs.bytes||0)}`;
 }
 async function refresh(){try{await Promise.all([loadStatus(),loadAccount(),loadLibraries(),loadScans(),loadCoverJobs(),loadSettings(),loadCache()])}catch(e){notice(e.message,true)}}
 
