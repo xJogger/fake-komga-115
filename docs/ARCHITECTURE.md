@@ -201,6 +201,20 @@ SHA1 和修改时间。
 Range/Page 缓存使用 SQLite 中的 `last_access_at` 按最久未使用顺序淘汰。并发读取
 同一缓存键时由 inflight flight 合并。
 
+### 下一卷索引预读
+
+`volume_index_prefetch_enabled` 默认关闭；
+`volume_index_prefetch_remaining_pages` 默认 10，管理 API 限制为 1–100。
+
+具体页面成功返回后，HTTP 层把当前 Book、页码和总页数提交给
+`VolumeIndexPrefetcher`。达到阈值时，它按
+`number_sort, name COLLATE NOCASE, id` 查找同一 Series 的下一本 Book，并仅调用
+`ListPages` 建立 ZIP central directory 或 RAR 文件头索引，不调用 `ReadPage`。
+
+预读器只有一个 worker，因此全局串行；queued 和 active 使用 Book ID 加文件版本
+去重。One-Shots、单 Book Series、Series 最后一本以及未达到阈值的请求直接跳过。
+失败只记录不含 URL、Token 和用户路径的分类日志，不影响当前页面响应。
+
 ## 11. HTTP 层
 
 路由分为：

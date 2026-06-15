@@ -32,6 +32,7 @@ type App struct {
 	store   *database.Store
 	scanner *scanner.Manager
 	covers  *thumbnail.BatchManager
+	archive *archive.Service
 	logger  *slog.Logger
 }
 
@@ -63,6 +64,7 @@ func New(_ context.Context, options Options) (*App, error) {
 		store, filepath.Join(dataDir, "thumbnails", "series"), options.Logger,
 	)
 	if err != nil {
+		archiveService.Close()
 		scanManager.Close()
 		store.Close()
 		return nil, err
@@ -86,7 +88,7 @@ func New(_ context.Context, options Options) (*App, error) {
 	}
 	return &App{
 		server: server, store: store, scanner: scanManager, covers: coverManager,
-		logger: options.Logger,
+		archive: archiveService, logger: options.Logger,
 	}, nil
 }
 
@@ -123,5 +125,6 @@ func (a *App) Shutdown(ctx context.Context) error { return a.server.Shutdown(ctx
 func (a *App) Close() error {
 	a.covers.Close()
 	a.scanner.Close()
+	a.archive.Close()
 	return a.store.Close()
 }

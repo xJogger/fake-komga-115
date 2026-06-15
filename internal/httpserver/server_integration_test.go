@@ -49,6 +49,7 @@ func TestMihonKomgaContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	archiveService := archive.NewService(store, client, cacheManager, logger)
+	defer archiveService.Close()
 	coverManager := thumbnail.NewBatchManager(
 		store, archiveService, thumbnailService, logger,
 	)
@@ -76,6 +77,29 @@ func TestMihonKomgaContract(t *testing.T) {
 			t.Fatalf("fresh installation endpoint %s must return [], got %#v", path, empty)
 		}
 	}
+	var settings map[string]string
+	getJSON(t, server.URL+"/admin/api/settings", &settings)
+	if settings["volume_index_prefetch_enabled"] != "false" ||
+		settings["volume_index_prefetch_remaining_pages"] != "10" {
+		t.Fatalf("unexpected volume prefetch defaults: %#v", settings)
+	}
+	response := putJSON(t, server.URL+"/admin/api/settings", map[string]string{
+		"volume_index_prefetch_enabled":         "true",
+		"volume_index_prefetch_remaining_pages": "12",
+	})
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("valid volume prefetch settings status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = putJSON(t, server.URL+"/admin/api/settings", map[string]string{
+		"volume_index_prefetch_remaining_pages": "0",
+	})
+	if response.StatusCode != http.StatusBadRequest {
+		response.Body.Close()
+		t.Fatalf("invalid volume prefetch threshold status=%d", response.StatusCode)
+	}
+	response.Body.Close()
 
 	if err := store.UpsertLibrary(ctx, database.Library{
 		ID: libraryID, Name: "Comics", RootCID: "root", Enabled: true, OneShot: true,
@@ -167,7 +191,7 @@ INSERT INTO books(
 		t.Fatalf("book one-shot flag missing: %#v", bookItem)
 	}
 
-	response, err := http.Get(server.URL + "/api/v1/series/" + seriesID + "/thumbnail")
+	response, err = http.Get(server.URL + "/api/v1/series/" + seriesID + "/thumbnail")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,4 +329,22 @@ func getText(t *testing.T, url string, status int) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func putJSON(t *testing.T, url string, value any) *http.Response {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
 }

@@ -137,7 +137,7 @@ func (r *RARService) ReadPage(
 			return r.readEntry(loadCtx, book, entry, maxPageSize)
 		},
 	)
-	return PageData{Entry: entry, Data: data}, err
+	return PageData{Entry: entry, Data: data, TotalPages: len(pages)}, err
 }
 
 func (r *RARService) Prefetch(book database.Book, afterPage, count int) {

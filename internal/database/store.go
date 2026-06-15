@@ -55,18 +55,20 @@ func (s *Store) DB() *sql.DB  { return s.db }
 
 func (s *Store) ensureDefaults(ctx context.Context) error {
 	defaults := map[string]string{
-		"auto_scan_enabled":          "false",
-		"auto_scan_interval_minutes": "360",
-		"scan_on_startup":            "false",
-		"api_rate_per_second":        "1",
-		"range_block_size":           "1048576",
-		"rar_index_block_size":       "65536",
-		"rar_max_dictionary_size":    "104857600",
-		"range_cache_max_bytes":      "10737418240",
-		"page_cache_max_bytes":       "5368709120",
-		"page_prefetch_count":        "2",
-		"max_page_size":              "104857600",
-		"downurl_ttl_seconds":        "1200",
+		"auto_scan_enabled":                     "false",
+		"auto_scan_interval_minutes":            "360",
+		"scan_on_startup":                       "false",
+		"api_rate_per_second":                   "1",
+		"range_block_size":                      "1048576",
+		"rar_index_block_size":                  "65536",
+		"rar_max_dictionary_size":               "104857600",
+		"range_cache_max_bytes":                 "10737418240",
+		"page_cache_max_bytes":                  "5368709120",
+		"page_prefetch_count":                   "2",
+		"volume_index_prefetch_enabled":         "false",
+		"volume_index_prefetch_remaining_pages": "10",
+		"max_page_size":                         "104857600",
+		"downurl_ttl_seconds":                   "1200",
 	}
 	now := nowText()
 	for key, value := range defaults {

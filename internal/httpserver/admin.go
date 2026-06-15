@@ -332,7 +332,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		"auto_scan_enabled": true, "auto_scan_interval_minutes": true, "scan_on_startup": true,
 		"api_rate_per_second": true, "range_block_size": true, "range_cache_max_bytes": true,
 		"page_cache_max_bytes": true, "page_prefetch_count": true, "max_page_size": true,
-		"downurl_ttl_seconds": true, "rar_index_block_size": true,
+		"volume_index_prefetch_enabled":         true,
+		"volume_index_prefetch_remaining_pages": true,
+		"downurl_ttl_seconds":                   true, "rar_index_block_size": true,
 		"rar_max_dictionary_size": true,
 	}
 	nonNegativeIntegers := map[string]bool{
@@ -349,6 +351,24 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(value) == "" {
 			writeError(w, 400, "INVALID_SETTING", "Setting value cannot be empty: "+key)
 			return
+		}
+		if key == "volume_index_prefetch_enabled" {
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				writeError(w, 400, "INVALID_SETTING",
+					"volume_index_prefetch_enabled must be true or false")
+				return
+			}
+			request[key] = strconv.FormatBool(parsed)
+		}
+		if key == "volume_index_prefetch_remaining_pages" {
+			number, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || number < 1 || number > 100 {
+				writeError(w, 400, "INVALID_SETTING",
+					"Volume index prefetch remaining pages must be between 1 and 100.")
+				return
+			}
+			continue
 		}
 		if nonNegativeIntegers[key] {
 			number, err := strconv.ParseInt(value, 10, 64)

@@ -20,7 +20,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 翻页时才读取并解压对应图片所需的远程字节范围。
 
 > [!WARNING]
-> 当前版本是 `v0.1.6` 开发预览版。服务没有认证功能，115 Token 会明文保存在
+> 当前版本是 `v0.1.7` 开发预览版。服务没有认证功能，115 Token 会明文保存在
 > 本地 SQLite 中。仅应部署在可信局域网，不要直接暴露到公网。
 
 ## 当前功能
@@ -37,6 +37,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - ZIP `store` 和 `deflate` 页面读取
 - RAR4/RAR5 非固实、非加密、单卷页面读取
 - Range block、归档索引、解压页面缓存
+- 阅读接近当前卷末尾时，可选后台预读同一 Series 下一卷的归档索引
 - 阅读一个 Series 第一本漫画的第一页后，自动生成 Komga 风格系列封面
 - 可按 Library 手动为更新时间最新的 N 个或全库 Series 批量生成封面
 - 管理页按 Library 和全部 Library 汇总漫画归档文件容量
@@ -274,10 +275,17 @@ Range cache: 10 GiB
 Page cache: 5 GiB
 单页上限: 100 MiB
 翻页预读: 2 页
+下一卷索引预读: 默认关闭，启用后的触发阈值为剩余 10 页
 ```
 
 Range 和 Page 缓存上限可以在管理页修改，设置为 `0` 表示不限制。降低上限并保存
 后会立即淘汰最久未使用的缓存。Range、Page、归档索引和系列封面均可独立清理。
+
+管理页还可以启用“下一卷索引预读”。当前页面成功返回后，如果当前卷剩余页数
+小于或等于设定阈值，服务会在后台只建立同一 Series 中自然排序下一本 Book 的
+ZIP/RAR 索引，不读取、解压或缓存下一卷页面。默认关闭，阈值默认 10 页，可设置
+为 1–100。任务全局串行并合并重复请求；One-Shots、只有一本 Book 的 Series 和
+Series 最后一卷不会触发，失败也不会影响当前阅读。
 
 系列封面使用 JPEG，最长边为 Komga 默认的 300px，不会放大小于该尺寸的原图。
 封面文件保存在 `data/thumbnails/series`，元数据保存在 SQLite。第一本漫画发生

@@ -22,10 +22,11 @@
     code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.muted{color:var(--muted)}.ok{color:var(--ok)}.bad{color:var(--danger)}.compact{display:inline-block;width:76px;padding:7px}.break{overflow-wrap:anywhere}
     .callout{margin:0 0 14px;padding:13px 14px;border:1px solid #2563eb55;border-radius:12px;background:#2563eb0c}.callout ol{margin:8px 0 12px;padding-left:22px}.callout li+li{margin-top:5px}
     .address-list{display:grid;gap:6px;margin-top:6px}.address-list code{display:block;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);overflow-wrap:anywhere}
+    .setting-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.setting-box{padding:0 12px 12px;border:1px solid var(--line);border-radius:10px;background:#2563eb08}
     .stat{font-size:25px;font-weight:750}.message{display:none;position:fixed;right:20px;bottom:20px;max-width:520px;padding:12px 15px;border-radius:10px;background:var(--message);border:1px solid var(--line);box-shadow:var(--shadow);z-index:5}
     .progress{height:7px;background:#30363d;border-radius:9px;overflow:hidden;margin-top:6px}.progress>i{display:block;height:100%;width:35%;background:var(--accent);animation:move 1.5s infinite}
     @keyframes move{from{transform:translateX(-110%)}to{transform:translateX(300%)}}
-    @media(max-width:600px){header>div,main{padding:14px}section{padding:14px}}
+    @media(max-width:600px){header>div,main{padding:14px}section{padding:14px}.setting-grid{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -107,7 +108,7 @@
 
   <div class="grid">
     <section>
-      <h2>自动扫描</h2>
+      <h2>自动扫描与预读</h2>
       <form id="settingsForm">
         <label><input id="autoScan" type="checkbox">启用定时自动扫描</label>
         <label>扫描间隔（分钟，最小 5）</label>
@@ -115,8 +116,19 @@
         <label><input id="startupScan" type="checkbox">服务启动时扫描</label>
         <label>115 API 请求速率（次/秒）</label>
         <input id="apiRate" type="number" min="0.1" step="0.1">
-        <label>翻页预读页数</label>
-        <input id="prefetch" type="number" min="0" max="10">
+        <div class="setting-grid" style="margin-top:10px">
+          <div class="setting-box">
+            <label>翻页预读页数</label>
+            <input id="prefetch" type="number" min="0" max="10">
+            <div class="muted">提前解压并缓存当前卷后续页面；0 表示关闭。</div>
+          </div>
+          <div class="setting-box">
+            <label><input id="volumePrefetch" type="checkbox">启用下一卷索引预读</label>
+            <label>当前卷剩余多少页时触发</label>
+            <input id="volumePrefetchRemaining" type="number" min="1" max="100">
+            <div class="muted">只读取同一 Series 下一卷的归档索引，不读取或解压页面。</div>
+          </div>
+        </div>
         <button type="submit" style="margin-top:12px">保存设置</button>
       </form>
     </section>
@@ -207,6 +219,7 @@ async function loadCoverJobs(){
 async function loadSettings(){
   const x=await api('/settings');$('#autoScan').checked=x.auto_scan_enabled==='true';$('#scanInterval').value=x.auto_scan_interval_minutes;
   $('#startupScan').checked=x.scan_on_startup==='true';$('#apiRate').value=x.api_rate_per_second;$('#prefetch').value=x.page_prefetch_count;
+  $('#volumePrefetch').checked=x.volume_index_prefetch_enabled==='true';$('#volumePrefetchRemaining').value=x.volume_index_prefetch_remaining_pages||10;
   $('#rangeCacheLimit').value=Number(gib(x.range_cache_max_bytes).toFixed(2));$('#pageCacheLimit').value=Number(gib(x.page_cache_max_bytes).toFixed(2));
 }
 async function loadCache(){
@@ -233,7 +246,7 @@ async function cancelCoverJob(id){if(!confirm('确认取消这个封面任务？
 async function toggleLibrary(id,name,enabled,oneShot){try{await api(`/libraries/${id}`,{method:'PUT',body:JSON.stringify({name,enabled,oneShot})});refresh()}catch(e){notice(e.message,true)}}
 async function toggleOneShot(id,name,enabled,oneShot){if(!confirm(`切换为${oneShot?' One-Shots':'普通'}模式后需要重新扫描。扫描成功前会保留旧结构，是否继续？`))return;try{await api(`/libraries/${id}`,{method:'PUT',body:JSON.stringify({name,enabled,oneShot})});notice('模式已切换，请点击扫描应用新结构');refresh()}catch(e){notice(e.message,true)}}
 async function deleteLibrary(id){if(!confirm('删除该 Library 及本地扫描元数据？不会删除 115 文件。'))return;try{await api(`/libraries/${id}`,{method:'DELETE'});notice('已删除');refresh()}catch(e){notice(e.message,true)}}
-$('#settingsForm').onsubmit=async e=>{e.preventDefault();try{await api('/settings',{method:'PUT',body:JSON.stringify({auto_scan_enabled:String($('#autoScan').checked),auto_scan_interval_minutes:$('#scanInterval').value,scan_on_startup:String($('#startupScan').checked),api_rate_per_second:$('#apiRate').value,page_prefetch_count:$('#prefetch').value})});notice('设置已保存');loadSettings()}catch(e){notice(e.message,true)}};
+$('#settingsForm').onsubmit=async e=>{e.preventDefault();try{await api('/settings',{method:'PUT',body:JSON.stringify({auto_scan_enabled:String($('#autoScan').checked),auto_scan_interval_minutes:$('#scanInterval').value,scan_on_startup:String($('#startupScan').checked),api_rate_per_second:$('#apiRate').value,page_prefetch_count:$('#prefetch').value,volume_index_prefetch_enabled:String($('#volumePrefetch').checked),volume_index_prefetch_remaining_pages:$('#volumePrefetchRemaining').value})});notice('设置已保存');loadSettings()}catch(e){notice(e.message,true)}};
 $('#cacheSettingsForm').onsubmit=async e=>{e.preventDefault();try{const unit=1024**3;await api('/settings',{method:'PUT',body:JSON.stringify({range_cache_max_bytes:String(Math.round(Number($('#rangeCacheLimit').value)*unit)),page_cache_max_bytes:String(Math.round(Number($('#pageCacheLimit').value)*unit))})});notice('缓存上限已保存');refresh()}catch(e){notice(e.message,true)}};
 document.querySelectorAll('[data-clear]').forEach(b=>b.onclick=async()=>{const t=b.dataset.clear;if(!confirm(`确认清理 ${t} 缓存？`))return;try{await api(`/cache/${t}`,{method:'DELETE'});notice('缓存已清理');loadCache()}catch(e){notice(e.message,true)}});
 $('#browseButton').onclick=async()=>{try{const x=await api('/115/folders?cid='+encodeURIComponent($('#browseCid').value||'0'));$('#folderBrowser').innerHTML=(x.folders||[]).map(f=>`<div class="row" style="margin-top:6px"><span>${esc(f.name)} <code>${esc(f.id)}</code></span><button class="secondary" onclick="browseInto('${f.id}')">进入</button><button onclick="chooseFolder('${f.id}',decodeURIComponent('${enc(f.name)}'))">选择</button></div>`).join('')||'<p>没有子目录</p>'}catch(e){notice(e.message,true)}};

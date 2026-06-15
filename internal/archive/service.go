@@ -30,13 +30,15 @@ type PageEntry struct {
 }
 
 type PageData struct {
-	Entry PageEntry
-	Data  []byte
+	Entry      PageEntry
+	Data       []byte
+	TotalPages int
 }
 
 type Service struct {
-	zip *ZIPService
-	rar *RARService
+	zip            *ZIPService
+	rar            *RARService
+	volumePrefetch *VolumeIndexPrefetcher
 }
 
 func NewService(
@@ -45,10 +47,14 @@ func NewService(
 	cacheManager *cache.Manager,
 	logger *slog.Logger,
 ) *Service {
-	return &Service{
+	service := &Service{
 		zip: NewZIPService(store, client, cacheManager, logger),
 		rar: NewRARService(store, client, cacheManager, logger),
 	}
+	service.volumePrefetch = newVolumeIndexPrefetcher(
+		store, service.ListPages, logger,
+	)
+	return service
 }
 
 func (s *Service) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
@@ -84,6 +90,17 @@ func (s *Service) Prefetch(book database.Book, afterPage, count int) {
 	case formatRAR:
 		s.rar.Prefetch(book, afterPage, count)
 	}
+}
+
+func (s *Service) PrefetchNextVolumeIndex(
+	book database.Book,
+	pageNumber, totalPages int,
+) {
+	s.volumePrefetch.Trigger(book, pageNumber, totalPages)
+}
+
+func (s *Service) Close() {
+	s.volumePrefetch.Close()
 }
 
 func MediaType(name string) string {

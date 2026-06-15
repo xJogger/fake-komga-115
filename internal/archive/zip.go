@@ -141,10 +141,10 @@ func (z *ZIPService) ReadPage(ctx context.Context, book database.Book, pageNumbe
 				return z.readEntry(loadCtx, book, entry, maxPageSize)
 			},
 		)
-		return PageData{Entry: entry, Data: data}, err
+		return PageData{Entry: entry, Data: data, TotalPages: len(pages)}, err
 	}
 	data, err := z.readEntry(ctx, book, entry, maxPageSize)
-	return PageData{Entry: entry, Data: data}, err
+	return PageData{Entry: entry, Data: data, TotalPages: len(pages)}, err
 }
 
 func (z *ZIPService) Prefetch(book database.Book, afterPage, count int) {

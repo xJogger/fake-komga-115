@@ -95,6 +95,9 @@ VALUES(?,?,?,?,?,?,?)`,
 	if err != nil {
 		t.Fatal(err)
 	}
+	if page1.TotalPages != 2 {
+		t.Fatalf("total pages=%d, want 2", page1.TotalPages)
+	}
 	if string(page1.Data) != strings.Repeat("jpeg-data-", 30) {
 		t.Fatalf("unexpected first page")
 	}
