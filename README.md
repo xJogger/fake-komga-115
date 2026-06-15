@@ -15,7 +15,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 翻页时才读取并解压对应图片所需的远程字节范围。
 
 > [!WARNING]
-> 当前版本是 `v0.1.3` 开发预览版。服务没有认证功能，115 Token 会明文保存在
+> 当前版本是 `v0.1.4` 开发预览版。服务没有认证功能，115 Token 会明文保存在
 > 本地 SQLite 中。仅应部署在可信局域网，不要直接暴露到公网。
 
 ## 当前功能
@@ -27,6 +27,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - 只有子目录、没有直接漫画文件的目录不生成 Series
 - Library 可切换 One-Shots 模式，递归把每个漫画归档文件映射为独立 Series
 - 最新 Mihon Komga 扩展所需的 Series、Book、Pages、筛选和缩略图端点
+- Mihon WebView 的 Series、Book 信息页和友好 HTML 404 页面
 - 远程 ZIP central directory 解析
 - ZIP `store` 和 `deflate` 页面读取
 - RAR4/RAR5 非固实、非加密、单卷页面读取
@@ -174,6 +175,17 @@ API Key:  留空
 ```
 
 服务整体免认证，仅适合可信局域网。不要直接暴露到公网。
+
+## Mihon WebView 信息页
+
+Mihon 漫画条目和阅读界面的 WebView 按钮会打开本服务的本地信息页：
+
+- `/series/{seriesId}`：系列封面、所属 Library、115 相对路径、容量、时间及 Book 列表
+- `/book/{bookId}` 和 `/books/{bookId}`：Book 文件路径、大小、页数、格式和时间
+
+Book 列表可以继续进入对应 Book 信息页。普通 Book 页面不显示系列封面；
+One-Shots Book 可以复用已经存在的系列封面。打开信息页只读取 SQLite 和已有封面，
+不会请求 115 或为了封面读取漫画第一页。管理页和信息页均跟随系统深浅色主题。
 
 ## 缓存
 

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{{.Name}} · fake-komga-115</title>
+  <link rel="stylesheet" href="/assets/web.css">
+</head>
+<body>
+<main class="shell">
+  <nav class="topbar">
+    <a class="brand" href="/admin">fake-komga-115</a>
+    <a class="toplink" href="/admin">管理页面</a>
+  </nav>
+
+  <article class="card hero">
+    <div class="cover-frame">
+      <img src="{{.CoverURL}}" alt="{{.Name}} 封面">
+    </div>
+    <div>
+      <p class="eyebrow">Series</p>
+      <h1>{{.Name}}</h1>
+      <p class="subtitle">{{.LibraryName}}</p>
+      <div class="chips">
+        <span class="chip">{{.BooksCount}} 本漫画</span>
+        <span class="chip">{{.TotalSize}}</span>
+        {{if .OneShot}}<span class="chip">One-Shot</span>{{end}}
+      </div>
+      <div class="facts">
+        <div class="fact wide"><span>115 相对路径</span><strong>{{.RelativePath}}</strong></div>
+        <div class="fact"><span>加入服务</span><strong><time datetime="{{.CreatedAt}}">{{.CreatedAt}}</time></strong></div>
+        <div class="fact"><span>文件更新时间</span><strong><time datetime="{{.LastModified}}">{{.LastModified}}</time></strong></div>
+      </div>
+    </div>
+  </article>
+
+  <section class="card section">
+    <div class="section-head">
+      <h2>漫画列表</h2>
+      <span class="muted">按自然顺序</span>
+    </div>
+    {{if .Books}}
+    <div class="book-list">
+      {{range .Books}}
+      <a class="book-row" href="{{.URL}}">
+        <span>
+          <span class="book-name">{{.Name}}</span>
+          <span class="book-meta">{{.Size}} · {{.Pages}} · <time datetime="{{.LastModified}}">{{.LastModified}}</time></span>
+        </span>
+        <span class="arrow">›</span>
+      </a>
+      {{end}}
+    </div>
+    {{else}}
+    <div class="empty">这个系列当前没有漫画文件。</div>
+    {{end}}
+  </section>
+</main>
+<script>
+document.querySelectorAll('time[datetime]').forEach(x => {
+  const d = new Date(x.dateTime);
+  if (!Number.isNaN(d.valueOf())) x.textContent = d.toLocaleString();
+});
+</script>
+</body>
+</html>

@@ -197,6 +197,7 @@ Range/Page 缓存使用 SQLite 中的 `last_access_at` 按最久未使用顺序�
 路由分为：
 
 - `/admin`：内嵌管理页面。
+- `/series/{id}`、`/book/{id}`、`/books/{id}`：Mihon WebView 使用的本地信息页。
 - `/admin/api/*`：账号、Library、设置、扫描、封面任务和缓存管理。
 - `/api/v1/*`：Komga 兼容的 Library、Series、Book、Pages 和图片端点。
 - `/api/v2/series/{id}/read-progress/tachiyomi`：Mihon 所需的简化阅读进度端点。
@@ -204,6 +205,11 @@ Range/Page 缓存使用 SQLite 中的 `last_access_at` 按最久未使用顺序�
 
 Komga API 是有意裁剪的兼容层。集合、元数据和分页字段以 Mihon 实际需要为准。
 未实现的缩略图返回占位图；collection/readlist 等返回空集合。
+
+WebView 信息页只查询 SQLite，并通过现有 Series thumbnail 端点显示已缓存封面。
+普通 Book 页面不显示封面，One-Shots Book 页面可以显示已有封面；任何信息页都不
+触发 downurl、归档索引或页面读取。浏览器路由的 404 返回自适应 HTML，API 路由的
+404 仍保持 JSON。
 
 ## 12. 错误映射
 

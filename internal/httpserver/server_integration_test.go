@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func TestMihonKomgaContract(t *testing.T) {
 	if _, err := store.DB().Exec(`
 INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,updated_at,seen_scan_id)
 VALUES(?,?,?,?,?,1,?,?,'scan')`,
-		seriesID, libraryID, "series-cid", "Series", "Series", now, now); err != nil {
+		seriesID, libraryID, "series-cid", "One Shot", "Root/One Shot.cbz", now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.DB().Exec(`
@@ -170,6 +171,68 @@ INSERT INTO books(
 	if progress["booksCount"].(float64) != 1 || progress["maxNumberSort"].(float64) != 1 {
 		t.Fatalf("progress: %#v", progress)
 	}
+
+	seriesHTML := getText(t, server.URL+"/series/"+seriesID, http.StatusOK)
+	for _, expected := range []string{
+		"One Shot", "Root/One Shot.cbz", "001.cbz", "/book/" + bookID,
+	} {
+		if !strings.Contains(seriesHTML, expected) {
+			t.Fatalf("series web page missing %q", expected)
+		}
+	}
+	bookHTML := getText(t, server.URL+"/book/"+bookID, http.StatusOK)
+	for _, expected := range []string{
+		"Root/One Shot.cbz", "/series/" + seriesID, `class="cover-frame"`,
+	} {
+		if !strings.Contains(bookHTML, expected) {
+			t.Fatalf("one-shot book web page missing %q", expected)
+		}
+	}
+	aliasHTML := getText(t, server.URL+"/books/"+bookID, http.StatusOK)
+	if !strings.Contains(aliasHTML, "Root/One Shot.cbz") {
+		t.Fatal("/books/{id} alias did not render the Book page")
+	}
+
+	normalSeriesID := id.Series(libraryID, "normal-series")
+	normalBookID := id.Book(libraryID, "normal-file")
+	if _, err := store.DB().Exec(`
+INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,updated_at,seen_scan_id)
+VALUES(?,?,?,?,?,0,?,?,'scan')`,
+		normalSeriesID, libraryID, "normal-series", "Normal Series", "Root/Normal Series",
+		now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+INSERT INTO books(
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
+ file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
+) VALUES(?,?,?,?,?,'Vol 01.cbz',2048,'normal-pick','normal-sha',?,?,1,?,?,'scan')`,
+		normalBookID, normalSeriesID, libraryID, "normal-file", "normal-series",
+		now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	normalHTML := getText(t, server.URL+"/book/"+normalBookID, http.StatusOK)
+	if !strings.Contains(normalHTML, "Root/Normal Series/Vol 01.cbz") {
+		t.Fatal("normal Book page does not show the full relative path")
+	}
+	if strings.Contains(normalHTML, `class="cover-frame"`) {
+		t.Fatal("normal Book page must not show a Series cover")
+	}
+
+	notFoundHTML := getText(t, server.URL+"/missing-page", http.StatusNotFound)
+	if !strings.Contains(notFoundHTML, "没有找到这个页面") {
+		t.Fatal("browser 404 page missing friendly message")
+	}
+	response, err = http.Get(server.URL + "/api/v1/missing-page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound ||
+		!strings.HasPrefix(response.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("API 404 must remain JSON: status=%d type=%q",
+			response.StatusCode, response.Header.Get("Content-Type"))
+	}
 }
 
 func testCoverPNG(t *testing.T) []byte {
@@ -200,4 +263,21 @@ func getJSON(t *testing.T, url string, target any) {
 	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func getText(t *testing.T, url string, status int) string {
+	t.Helper()
+	response, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != status {
+		t.Fatalf("GET %s status=%d, want %d", url, response.StatusCode, status)
+	}
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

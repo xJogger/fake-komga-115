@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{{.Name}} · fake-komga-115</title>
+  <link rel="stylesheet" href="/assets/web.css">
+</head>
+<body>
+<main class="shell">
+  <nav class="topbar">
+    <a class="brand" href="/admin">fake-komga-115</a>
+    <a class="toplink" href="/admin">管理页面</a>
+  </nav>
+
+  <a class="back-link" href="{{.SeriesURL}}">← 返回 {{.SeriesName}}</a>
+  <article class="card hero{{if not .ShowCover}} no-cover{{end}}">
+    {{if .ShowCover}}
+    <div class="cover-frame">
+      <img src="{{.CoverURL}}" alt="{{.SeriesName}} 封面">
+    </div>
+    {{end}}
+    <div>
+      <p class="eyebrow">Book</p>
+      <h1>{{.Name}}</h1>
+      <p class="subtitle"><a href="{{.SeriesURL}}">{{.SeriesName}}</a> · {{.LibraryName}}</p>
+      <div class="chips">
+        <span class="chip">{{.Size}}</span>
+        <span class="chip">{{.Pages}}</span>
+        {{if .OneShot}}<span class="chip">One-Shot</span>{{end}}
+      </div>
+      <div class="facts">
+        <div class="fact wide"><span>115 相对路径</span><strong>{{.RelativePath}}</strong></div>
+        <div class="fact"><span>文件类型</span><strong>{{.MediaType}}</strong></div>
+        <div class="fact"><span>所属系列</span><strong><a href="{{.SeriesURL}}">{{.SeriesName}}</a></strong></div>
+        <div class="fact"><span>115 创建时间</span><strong><time datetime="{{.CreatedAt}}">{{.CreatedAt}}</time></strong></div>
+        <div class="fact"><span>115 修改时间</span><strong><time datetime="{{.LastModified}}">{{.LastModified}}</time></strong></div>
+      </div>
+    </div>
+  </article>
+</main>
+<script>
+document.querySelectorAll('time[datetime]').forEach(x => {
+  const d = new Date(x.dateTime);
+  if (!Number.isNaN(d.valueOf())) x.textContent = d.toLocaleString();
+});
+</script>
+</body>
+</html>

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"image"
 	"image/color"
 	"image/png"
@@ -27,7 +28,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
 )
 
-//go:embed static/admin.html
+//go:embed static/admin.html static/web_*.html static/web.css
 var staticFiles embed.FS
 
 type Server struct {
@@ -40,6 +41,7 @@ type Server struct {
 	covers  *thumbnail.BatchManager
 	logger  *slog.Logger
 	router  chi.Router
+	web     *template.Template
 
 	placeholder []byte
 }
@@ -58,6 +60,7 @@ func New(
 		store: store, client: client, scanner: scanManager, cache: cacheManager,
 		archive: archiveService, thumbs: thumbnailService, covers: coverManager,
 		logger: logger, placeholder: makePlaceholder(),
+		web: template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
 	}
 	s.router = s.routes()
 	return s
@@ -79,10 +82,18 @@ func (s *Server) routes() chi.Router {
 		http.Redirect(w, r, "/admin", http.StatusTemporaryRedirect)
 	})
 	r.Get("/admin", s.adminPage)
+	r.Get("/admin/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin", http.StatusTemporaryRedirect)
+	})
+	r.Get("/assets/web.css", s.webStyles)
+	r.Get("/series/{seriesID}", s.webSeries)
+	r.Get("/book/{bookID}", s.webBook)
+	r.Get("/books/{bookID}", s.webBook)
 	r.Route("/admin/api", s.adminRoutes)
 	r.Route("/api/v1", s.komgaRoutes)
 	r.Get("/api/v2/series/{seriesID}/read-progress/tachiyomi", s.getSeriesProgress)
 	r.Put("/api/v2/series/{seriesID}/read-progress/tachiyomi", s.putSeriesProgress)
+	r.NotFound(s.notFound)
 	return r
 }
 
