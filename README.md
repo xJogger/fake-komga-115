@@ -1,7 +1,12 @@
 # fake-komga-115
 
 [![CI](https://github.com/xJogger/fake-komga-115/actions/workflows/test.yml/badge.svg)](https://github.com/xJogger/fake-komga-115/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/xJogger/fake-komga-115?display_name=tag)](https://github.com/xJogger/fake-komga-115/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+<p align="center">
+  <img src="docs/images/readme-hero.png" alt="Mihon、fake-komga-115 与 115 云端漫画的按需读取流程" width="920">
+</p>
 
 `fake-komga-115` 是一个面向自用场景的 Komga 兼容服务。Mihon 使用 Komga
 扩展连接它，而漫画目录和 CBZ/ZIP/CBR/RAR 文件实际来自 115 Open API。
@@ -15,7 +20,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 翻页时才读取并解压对应图片所需的远程字节范围。
 
 > [!WARNING]
-> 当前版本是 `v0.1.4` 开发预览版。服务没有认证功能，115 Token 会明文保存在
+> 当前版本是 `v0.1.5` 开发预览版。服务没有认证功能，115 Token 会明文保存在
 > 本地 SQLite 中。仅应部署在可信局域网，不要直接暴露到公网。
 
 ## 当前功能
@@ -36,6 +41,8 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - 可按 Library 手动为更新时间最新的 N 个或全库 Series 批量生成封面
 - 管理页按 Library 和全部 Library 汇总漫画归档文件容量
 - 管理页面：账号、根目录、扫描与封面任务进度、自动扫描、缓存统计和清理
+- Windows 双击启动后自动打开管理页，并自动选择用户数据目录
+- GitHub Release 提供 Windows、Linux 和 macOS 的直接运行包及 SHA256 校验和
 - 整个服务免认证
 
 ## 尚不支持
@@ -48,16 +55,54 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - OPDS、Web Reader、Bangumi 元数据
 - downurl 不支持 HTTP Range 时自动下载整包
 
-## 环境
+## 支持的平台
 
-- Linux
-- Go 1.26+
+- Windows x64
+- Linux x64 / ARM64
+- macOS Intel / Apple Silicon
 - 115 Open `refresh_token`
 - 支持 Komga 扩展的 Mihon
 
 ## 快速开始
 
-克隆并启动：
+<p align="center">
+  <img src="docs/images/quick-start.png" alt="下载、授权、添加漫画目录并通过局域网连接 Mihon" width="920">
+</p>
+
+### Windows：下载后双击
+
+1. 打开 [Releases](https://github.com/xJogger/fake-komga-115/releases/latest)，下载
+   `windows_amd64.zip`。
+2. 解压整个压缩包，然后双击 `fake-komga-115.exe`。
+3. 保持控制台窗口运行；默认浏览器会自动打开管理页。关闭网页不会停止服务，
+   关闭控制台窗口才会停止服务。
+4. Windows 防火墙首次询问时，仅允许“专用网络”访问。
+
+Windows 默认把数据库、缓存和封面保存到：
+
+```text
+%LOCALAPPDATA%\fake-komga-115\data
+```
+
+管理页会显示实际数据存储路径，以及可在 Mihon 中填写的局域网地址。发布包未进行
+代码签名，Windows SmartScreen 可能显示未知发布者提示。
+
+### Linux / macOS：直接运行发布包
+
+从 [Releases](https://github.com/xJogger/fake-komga-115/releases/latest) 下载对应
+平台压缩包，解压后运行：
+
+```bash
+chmod +x fake-komga-115
+./fake-komga-115
+```
+
+Linux 和 macOS 默认不会自动打开浏览器，数据目录仍为当前目录下的 `./data`。
+打开 `http://127.0.0.1:25600/admin` 完成配置。macOS 发布包同样没有代码签名。
+
+### 从源码运行
+
+需要 Go 1.26+：
 
 ```bash
 git clone https://github.com/xJogger/fake-komga-115.git
@@ -89,6 +134,7 @@ go run ./cmd/server \
 FK115_HOST
 FK115_PORT
 FK115_DATA_DIR
+FK115_OPEN_BROWSER
 ```
 
 构建：
@@ -106,15 +152,34 @@ make build
 make run
 ```
 
-## 初始化
+### 启动参数
+
+```text
+--host           监听地址，默认 0.0.0.0
+--port           监听端口，默认 25600
+--data-dir       数据目录；Windows 默认为 %LOCALAPPDATA%\fake-komga-115\data，
+                 其他平台默认为 ./data
+--open-browser   启动成功后打开管理页；Windows 默认 true，其他平台默认 false
+--version        显示版本
+```
+
+Linux 原有部署方式不受影响。若 systemd 已显式传入 `--data-dir`，升级后继续使用
+原目录，也不会自动打开浏览器。
+
+## 初始化与授权
 
 1. 启动服务。
 2. 打开 `http://服务器地址:25600/admin`。
-3. 填入 115 Open `refresh_token`；`access_token` 可以留空。
-4. 点击“保存并测试”。
-5. 添加一个或多个 115 漫画根目录 CID。
-6. 点击“扫描全部”或单个 Library 的“扫描”按钮。
-7. 等待扫描完成。
+3. 打开 <https://api.oplist.org/>。
+4. 选择“115网盘 OAuth2 授权登录”，勾选“使用 OpenList 提供的参数”。
+5. 使用 115 账号登录并完成授权。
+6. 将页面返回的 **Refresh Token** 和 **Access Token** 复制到管理页的同名字段。
+7. 点击“保存并验证”。
+8. 添加一个或多个 115 漫画根目录 CID。
+9. 点击“扫描全部”或单个 Library 的“扫描”按钮，等待完成。
+
+`api.oplist.org` 是外部授权工具。Token 只会由本服务保存到本机数据目录中的
+SQLite；不要把 Token 发给他人，也不要截图公开。
 
 扫描默认不会自动运行。管理页可以分别启用：
 
@@ -175,6 +240,9 @@ API Key:  留空
 ```
 
 服务整体免认证，仅适合可信局域网。不要直接暴露到公网。
+
+如果服务器有多个网卡，管理页会列出检测到的局域网地址。选择与运行 Mihon 的
+手机处于同一局域网、且能从手机访问的地址。
 
 ## Mihon WebView 信息页
 
@@ -242,6 +310,15 @@ Range 和 Page 缓存上限可以在管理页修改，设置为 `0` 表示不限
 ```bash
 go test ./...
 ```
+
+发布工作流还会在推送 `v*` Tag 时构建：
+
+- Windows amd64 ZIP
+- Linux amd64 / arm64 tar.gz
+- macOS amd64 / arm64 tar.gz
+- `SHA256SUMS`
+
+所有产物由 GitHub Actions 自动放入对应 GitHub Release。
 
 测试包括自然排序、ID、MIME 类型，以及用 mock HTTP Range 服务读取远程
 store/deflate ZIP、RAR4 和压缩 RAR5 页面。

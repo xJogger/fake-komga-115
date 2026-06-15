@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            archive: zip
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and package
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          package="fake-komga-115_${tag}_${GOOS}_${GOARCH}"
+          executable="fake-komga-115"
+          if [[ "${GOOS}" == "windows" ]]; then
+            executable="${executable}.exe"
+          fi
+
+          mkdir -p "dist/${package}"
+          CGO_ENABLED=0 go build \
+            -trimpath \
+            -ldflags="-s -w -X github.com/xJogger/fake-komga-115/internal/buildinfo.Version=${tag}" \
+            -o "dist/${package}/${executable}" \
+            ./cmd/server
+          cp README.md LICENSE "dist/${package}/"
+          mkdir -p "dist/${package}/docs"
+          cp -R docs/images "dist/${package}/docs/"
+
+          if [[ "${ARCHIVE}" == "zip" ]]; then
+            (cd dist && zip -q -r "${package}.zip" "${package}")
+          else
+            tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fake-komga-115-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          sha256sum fake-komga-115_* > SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "fake-komga-115 ${GITHUB_REF_NAME}" \
+            --generate-notes

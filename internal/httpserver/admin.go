@@ -3,12 +3,15 @@ package httpserver
 import (
 	"database/sql"
 	"errors"
+	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/xJogger/fake-komga-115/internal/buildinfo"
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/id"
@@ -46,13 +49,80 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"configured": account.RefreshToken != "",
-		"libraries":  libraries,
-		"series":     series,
-		"books":      books,
-		"comicBytes": comicBytes,
-		"version":    "0.1.4",
+		"configured":     account.RefreshToken != "",
+		"libraries":      libraries,
+		"series":         series,
+		"books":          books,
+		"comicBytes":     comicBytes,
+		"version":        buildinfo.Version,
+		"dataDir":        s.runtime.DataDir,
+		"adminUrl":       localServiceURL(s.runtime.Host, s.runtime.Port),
+		"mihonAddresses": mihonAddresses(s.runtime.Host, s.runtime.Port),
 	})
+}
+
+func localServiceURL(host string, port int) string {
+	host = strings.TrimSpace(host)
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::", "[::]":
+		host = "::1"
+	}
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func mihonAddresses(host string, port int) []string {
+	host = strings.TrimSpace(host)
+	if host != "" && host != "0.0.0.0" && host != "::" && host != "[::]" {
+		return []string{localServiceURL(host, port)}
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var result []string
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 ||
+			isVirtualInterface(iface.Name) {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			ip, _, err := net.ParseCIDR(address.String())
+			if err != nil {
+				continue
+			}
+			ip = ip.To4()
+			if ip == nil || !ip.IsPrivate() {
+				continue
+			}
+			url := "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(port))
+			if _, ok := seen[url]; ok {
+				continue
+			}
+			seen[url] = struct{}{}
+			result = append(result, url)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func isVirtualInterface(name string) bool {
+	name = strings.ToLower(name)
+	for _, prefix := range []string{
+		"br-", "docker", "veth", "virbr", "vmnet", "vboxnet", "vethernet", "wsl",
+	} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {

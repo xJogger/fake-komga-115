@@ -74,7 +74,12 @@ INSERT INTO books(
 	defer coverManager.Close()
 	handler := New(
 		store, client, scanManager, cacheManager,
-		archiveService, thumbnailService, coverManager, logger,
+		archiveService, thumbnailService, coverManager,
+		RuntimeInfo{
+			DataDir: "/tmp/fake-komga-115-test-data",
+			Host:    "127.0.0.1",
+			Port:    25600,
+		}, logger,
 	).Handler()
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -83,6 +88,13 @@ INSERT INTO books(
 	getJSON(t, server.URL+"/admin/api/status", &status)
 	if status["comicBytes"].(float64) != 1234 {
 		t.Fatalf("unexpected total comic bytes: %#v", status)
+	}
+	if status["dataDir"] != "/tmp/fake-komga-115-test-data" {
+		t.Fatalf("unexpected data directory: %#v", status)
+	}
+	addresses := status["mihonAddresses"].([]any)
+	if len(addresses) != 1 || addresses[0] != "http://127.0.0.1:25600" {
+		t.Fatalf("unexpected Mihon addresses: %#v", status)
 	}
 	var libraries []map[string]any
 	getJSON(t, server.URL+"/admin/api/libraries", &libraries)

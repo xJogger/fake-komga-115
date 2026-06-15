@@ -35,10 +35,19 @@ Book metadata
 - `--host` / `FK115_HOST`
 - `--port` / `FK115_PORT`
 - `--data-dir` / `FK115_DATA_DIR`
+- `--open-browser` / `FK115_OPEN_BROWSER`
+- `--version`
 
 `internal/app.New` 依次创建 Store、Cache Manager、115 Client、Scanner、Archive
 Service、Thumbnail Service、Thumbnail Batch Manager 和 HTTP Server。关闭时先
 停止封面任务和扫描上下文，再关闭数据库。
+
+Windows 未指定数据目录时使用 `%LOCALAPPDATA%\fake-komga-115\data`，并默认在
+TCP 监听成功后打开本机管理页。Linux 和 macOS 仍默认使用 `./data` 且不主动打开
+浏览器。监听 socket 在 `App.Start` 中同步绑定，避免端口占用时仍误开浏览器。
+
+管理状态 API 会返回规范化后的绝对数据目录、版本和检测到的私有 IPv4 局域网
+地址，供管理页显示 Mihon 配置值；常见容器虚拟网卡会被忽略。
 
 ## 3. SQLite 数据模型
 
@@ -234,3 +243,13 @@ WebView 信息页只查询 SQLite，并通过现有 Series thumbnail 端点显�
 - `internal/cache`、`internal/id`、`internal/natsort` 和 `internal/thumbnail` 有单元测试。
 
 测试不需要真实 115 账号，也不应连接真实私人服务。
+
+## 14. 发布
+
+推送 `v*` Tag 会触发 `.github/workflows/release.yml`。工作流先执行测试和 vet，
+然后以 `CGO_ENABLED=0` 交叉编译 Windows amd64、Linux amd64/arm64、macOS
+amd64/arm64。每个平台产物和 README、LICENSE 一起打包，最后生成
+`SHA256SUMS` 并创建 GitHub Release。
+
+Release 构建通过 `-ldflags -X` 把 Tag 写入 `internal/buildinfo.Version`；普通
+源码构建显示开发版本。

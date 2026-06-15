@@ -15,11 +15,13 @@
     section{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;overflow:auto;box-shadow:var(--shadow);backdrop-filter:blur(14px)}
     label{display:block;color:var(--muted);margin:10px 0 5px}input,select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text)}
     input[type=checkbox]{width:auto;margin-right:7px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.row button{flex:0 0 auto}
-    button{border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:white;padding:8px 12px;cursor:pointer;font-weight:650;transition:filter .15s ease,transform .15s ease}button:hover{filter:brightness(1.07);transform:translateY(-1px)}
+    button,.button-link{display:inline-block;border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:white;padding:8px 12px;cursor:pointer;font-weight:650;text-decoration:none;transition:filter .15s ease,transform .15s ease}button:hover,.button-link:hover{filter:brightness(1.07);transform:translateY(-1px)}
     button.secondary{background:#21262d;border-color:var(--line)}button.warning{background:var(--warning);border-color:#d29922}button.danger{background:#da3633;border-color:var(--danger)}button:disabled{opacity:.5;cursor:not-allowed}
     @media(prefers-color-scheme:light){button.secondary{background:#eef2f7;color:var(--text)}}
     table{width:100%;border-collapse:collapse;min-width:680px}th,td{text-align:left;border-bottom:1px solid var(--line);padding:10px 8px;vertical-align:top}th{color:var(--muted);font-weight:650}tbody tr:hover{background:#2563eb08}
-    code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.muted{color:var(--muted)}.ok{color:var(--ok)}.bad{color:var(--danger)}.compact{display:inline-block;width:76px;padding:7px}
+    code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.muted{color:var(--muted)}.ok{color:var(--ok)}.bad{color:var(--danger)}.compact{display:inline-block;width:76px;padding:7px}.break{overflow-wrap:anywhere}
+    .callout{margin:0 0 14px;padding:13px 14px;border:1px solid #2563eb55;border-radius:12px;background:#2563eb0c}.callout ol{margin:8px 0 12px;padding-left:22px}.callout li+li{margin-top:5px}
+    .address-list{display:grid;gap:6px;margin-top:6px}.address-list code{display:block;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);overflow-wrap:anywhere}
     .stat{font-size:25px;font-weight:750}.message{display:none;position:fixed;right:20px;bottom:20px;max-width:520px;padding:12px 15px;border-radius:10px;background:var(--message);border:1px solid var(--line);box-shadow:var(--shadow);z-index:5}
     .progress{height:7px;background:#30363d;border-radius:9px;overflow:hidden;margin-top:6px}.progress>i{display:block;height:100%;width:35%;background:var(--accent);animation:move 1.5s infinite}
     @keyframes move{from{transform:translateX(-110%)}to{transform:translateX(300%)}}
@@ -39,17 +41,30 @@
         <div><div class="stat" id="statComicBytes">-</div><div class="muted">漫画容量</div></div>
       </div>
       <p id="configured" class="muted">读取中……</p>
-      <p class="muted">Mihon 地址：<code id="serverAddress"></code><br>整个服务免认证，用户名和密码留空。</p>
+      <p class="muted">版本：<code id="serviceVersion">-</code><br>数据存储路径：<code id="dataDir" class="break">-</code></p>
+      <div class="muted">Mihon 地址（请选择与手机同一局域网的地址）：<div id="serverAddresses" class="address-list"></div></div>
+      <p class="muted">整个服务免认证，Mihon 中的用户名、密码和 API Key 均留空。</p>
     </section>
     <section>
       <h2>115 Open 账号</h2>
+      <div class="callout">
+        <b>获取 Refresh Token 和 Access Token</b>
+        <ol>
+          <li>打开 115 Open 授权工具。</li>
+          <li>选择“115网盘 OAuth2 授权登录”。</li>
+          <li>勾选“使用 OpenList 提供的参数”。</li>
+          <li>使用 115 账号登录并完成授权。</li>
+          <li>把页面返回的 Refresh Token、Access Token 复制到下方，然后点击“保存并验证”。</li>
+        </ol>
+        <a class="button-link" href="https://api.oplist.org/" target="_blank" rel="noopener noreferrer">打开 api.oplist.org ↗</a>
+      </div>
       <form id="accountForm">
         <label>Refresh Token（留空表示保留现值）</label>
         <input id="refreshToken" type="password" autocomplete="off">
-        <label>Access Token（可选；填写新 Refresh Token 时留空会自动刷新）</label>
+        <label>Access Token（留空表示保留现值；填写新 Refresh Token 时可留空自动刷新）</label>
         <input id="accessToken" type="password" autocomplete="off">
         <div class="row" style="margin-top:12px">
-          <button type="submit">保存并测试</button>
+          <button type="submit">保存并验证</button>
           <button type="button" class="secondary" id="testAccount">测试现有配置</button>
           <button type="button" class="secondary" id="refreshAccount">立即刷新 Token</button>
         </div>
@@ -145,7 +160,9 @@ async function loadStatus(){
   const s=await api('/status');$('#statLibraries').textContent=s.libraries;$('#statSeries').textContent=s.series;$('#statBooks').textContent=s.books;
   $('#statComicBytes').textContent=bytes(s.comicBytes);
   $('#configured').innerHTML=s.configured?'<span class="ok">115 已配置</span>':'<span class="bad">尚未配置 115 Token</span>';
-  $('#serverAddress').textContent=location.origin;
+  $('#serviceVersion').textContent=s.version||'-';$('#dataDir').textContent=s.dataDir||'-';
+  const addresses=s.mihonAddresses?.length?s.mihonAddresses:[location.origin];
+  $('#serverAddresses').innerHTML=addresses.map(x=>`<code>${esc(x)}</code>`).join('');
 }
 async function loadAccount(){
   const a=await api('/account');$('#accountState').textContent=`Refresh Token: ${a.hasRefreshToken?'已保存':'未保存'}；Access Token: ${a.hasAccessToken?'已保存':'未保存'}${a.updatedAt?'；更新于 '+when(a.updatedAt):''}`;

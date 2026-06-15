@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/archive"
@@ -37,14 +39,19 @@ func New(_ context.Context, options Options) (*App, error) {
 	if options.Logger == nil {
 		options.Logger = slog.Default()
 	}
-	if err := os.MkdirAll(options.DataDir, 0o700); err != nil {
+	dataDir, err := filepath.Abs(options.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve data directory: %w", err)
+	}
+	dataDir = filepath.Clean(dataDir)
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
-	store, err := database.Open(filepath.Join(options.DataDir, "fake-komga-115.db"))
+	store, err := database.Open(filepath.Join(dataDir, "fake-komga-115.db"))
 	if err != nil {
 		return nil, err
 	}
-	cacheManager, err := cache.New(store, filepath.Join(options.DataDir, "cache"))
+	cacheManager, err := cache.New(store, filepath.Join(dataDir, "cache"))
 	if err != nil {
 		store.Close()
 		return nil, err
@@ -53,7 +60,7 @@ func New(_ context.Context, options Options) (*App, error) {
 	scanManager := scanner.New(store, client, options.Logger)
 	archiveService := archive.NewService(store, client, cacheManager, options.Logger)
 	thumbnailService, err := thumbnail.New(
-		store, filepath.Join(options.DataDir, "thumbnails", "series"), options.Logger,
+		store, filepath.Join(dataDir, "thumbnails", "series"), options.Logger,
 	)
 	if err != nil {
 		scanManager.Close()
@@ -65,10 +72,14 @@ func New(_ context.Context, options Options) (*App, error) {
 	)
 	handler := httpserver.New(
 		store, client, scanManager, cacheManager, archiveService, thumbnailService,
-		coverManager, options.Logger,
+		coverManager, httpserver.RuntimeInfo{
+			DataDir: dataDir,
+			Host:    options.Host,
+			Port:    options.Port,
+		}, options.Logger,
 	)
 	server := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", options.Host, options.Port),
+		Addr:              net.JoinHostPort(options.Host, strconv.Itoa(options.Port)),
 		Handler:           handler.Handler(),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       2 * time.Minute,
@@ -80,12 +91,31 @@ func New(_ context.Context, options Options) (*App, error) {
 }
 
 func (a *App) Run() error {
-	a.logger.Info("server listening", "address", a.server.Addr)
-	err := a.server.ListenAndServe()
-	if err == http.ErrServerClosed {
-		return nil
+	errCh, err := a.Start()
+	if err != nil {
+		return err
 	}
-	return err
+	return <-errCh
+}
+
+// Start binds the listening socket before returning. Callers can safely open a
+// browser after this succeeds without racing a later bind failure.
+func (a *App) Start() (<-chan error, error) {
+	listener, err := net.Listen("tcp", a.server.Addr)
+	if err != nil {
+		return nil, err
+	}
+	a.logger.Info("server listening", "address", listener.Addr().String())
+	errCh := make(chan error, 1)
+	go func() {
+		err := a.server.Serve(listener)
+		if err == http.ErrServerClosed {
+			err = nil
+		}
+		errCh <- err
+		close(errCh)
+	}()
+	return errCh, nil
 }
 
 func (a *App) Shutdown(ctx context.Context) error { return a.server.Shutdown(ctx) }

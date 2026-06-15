@@ -42,8 +42,15 @@ type Server struct {
 	logger  *slog.Logger
 	router  chi.Router
 	web     *template.Template
+	runtime RuntimeInfo
 
 	placeholder []byte
+}
+
+type RuntimeInfo struct {
+	DataDir string
+	Host    string
+	Port    int
 }
 
 func New(
@@ -54,12 +61,13 @@ func New(
 	archiveService *archive.Service,
 	thumbnailService *thumbnail.Service,
 	coverManager *thumbnail.BatchManager,
+	runtimeInfo RuntimeInfo,
 	logger *slog.Logger,
 ) *Server {
 	s := &Server{
 		store: store, client: client, scanner: scanManager, cache: cacheManager,
 		archive: archiveService, thumbs: thumbnailService, covers: coverManager,
-		logger: logger, placeholder: makePlaceholder(),
+		runtime: runtimeInfo, logger: logger, placeholder: makePlaceholder(),
 		web: template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
 	}
 	s.router = s.routes()
