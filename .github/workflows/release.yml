@@ -80,7 +80,7 @@ jobs:
           else
             tar -C dist -czf "dist/${package}.tar.gz" "${package}"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fake-komga-115-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*.${{ matrix.archive }}
@@ -90,10 +90,21 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+      - name: Check release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_file="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [[ ! -f "${notes_file}" ]]; then
+            echo "::error::Missing release notes file: ${notes_file}"
+            exit 1
+          fi
+          echo "RELEASE_NOTES_FILE=${notes_file}" >> "${GITHUB_ENV}"
       - name: Generate SHA256 checksums
         run: |
           cd dist
@@ -106,4 +117,5 @@ jobs:
             dist/* \
             --repo "${GITHUB_REPOSITORY}" \
             --title "fake-komga-115 ${GITHUB_REF_NAME}" \
-            --generate-notes
+            --notes-file "${RELEASE_NOTES_FILE}" \
+            --verify-tag

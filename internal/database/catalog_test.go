@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -125,6 +126,120 @@ INSERT INTO books(
 		if _, err := store.NextBookInSeries(ctx, book); !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("NextBookInSeries(%q) err=%v, want sql.ErrNoRows", id, err)
 		}
+	}
+}
+
+func TestSeriesReadProgressStrictlyFollowsMihon(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "library", Name: "Library", RootCID: "root", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.DB().Exec(`
+INSERT INTO series(id,library_id,cid,name,relative_path,created_at,updated_at,seen_scan_id)
+VALUES('series','library','series-cid','Series','Series',?,?,'scan')`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 5; i++ {
+		if _, err := store.DB().Exec(`
+INSERT INTO books(
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,
+ number_sort,created_at,updated_at,seen_scan_id
+) VALUES(?,?,?,?,?,?,1,?,?,?,?,'scan')`,
+			"book-"+strconv.Itoa(i), "series", "library", "file-"+strconv.Itoa(i),
+			"series-cid", "Book "+strconv.Itoa(i), "pick-"+strconv.Itoa(i),
+			float64(i), now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := store.UpdateSeriesReadProgress(ctx, "series", 3); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := store.SeriesReadProgress(ctx, "series")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.BooksReadCount != 3 || progress.BooksUnreadCount != 2 ||
+		progress.LastReadContinuousNumberSort != 3 || progress.MaxNumberSort != 5 {
+		t.Fatalf("progress after 3: %#v", progress)
+	}
+
+	if err := store.UpdateSeriesReadProgress(ctx, "series", 1); err != nil {
+		t.Fatal(err)
+	}
+	progress, err = store.SeriesReadProgress(ctx, "series")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.BooksReadCount != 1 || progress.BooksUnreadCount != 4 ||
+		progress.LastReadContinuousNumberSort != 1 {
+		t.Fatalf("progress after rollback: %#v", progress)
+	}
+
+	if _, err := store.DB().Exec(`
+INSERT INTO books(
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,
+ number_sort,created_at,updated_at,seen_scan_id
+) VALUES('book-new','series','library','file-new','series-cid','Book 0',1,'pick-new',0.5,?,?,'scan')`,
+		now, now); err != nil {
+		t.Fatal(err)
+	}
+	progress, err = store.SeriesReadProgress(ctx, "series")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.BooksReadCount != 1 || progress.LastReadContinuousNumberSort != 0 {
+		t.Fatalf("new inserted Book must be unread and break continuous progress: %#v", progress)
+	}
+}
+
+func TestBookPageProgressRecordsLastAndMaxLoadedPages(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "library", Name: "Library", RootCID: "root", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.DB().Exec(`
+INSERT INTO series(id,library_id,cid,name,relative_path,created_at,updated_at,seen_scan_id)
+VALUES('series','library','series-cid','Series','Series',?,?,'scan');
+INSERT INTO books(
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,
+ number_sort,created_at,updated_at,seen_scan_id
+) VALUES('book','series','library','file','series-cid','Book.cbz',1,'pick',1,?,?,'scan')`,
+		now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	book, err := store.BookByID(ctx, "book")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordBookPageProgress(ctx, book, 5, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordBookPageProgress(ctx, book, 2, 10); err != nil {
+		t.Fatal(err)
+	}
+	progress, ok, err := store.BookPageProgress(ctx, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || progress.LastLoadedPage != 2 || progress.MaxLoadedPage != 5 || progress.PageCount != 10 {
+		t.Fatalf("page progress: ok=%v %#v", ok, progress)
 	}
 }
 

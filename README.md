@@ -20,7 +20,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 翻页时才读取并解压对应图片所需的远程字节范围。
 
 > [!WARNING]
-> 当前版本是 `v0.1.8` 开发预览版。服务没有认证功能，115 Token 会明文保存在
+> 当前版本是 `v0.1.9` 开发预览版。服务没有认证功能，115 Token 会明文保存在
 > 本地 SQLite 中。仅应部署在可信局域网，不要直接暴露到公网。
 
 ## 当前功能
@@ -33,6 +33,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - Library 可切换 One-Shots 模式，递归把每个漫画归档文件映射为独立 Series
 - 最新 Mihon Komga 扩展所需的 Series、Book、Pages、筛选和缩略图端点
 - Mihon WebView 的 Series、Book 信息页和友好 HTML 404 页面
+- Mihon/Komga Tracker 卷级阅读进度同步，并在信息页显示推断页码进度
 - 远程 ZIP central directory 解析
 - ZIP `store` 和 `deflate` 页面读取
 - RAR4/RAR5 非固实、非加密、单卷页面读取
@@ -301,6 +302,18 @@ Book 列表可以继续进入对应 Book 信息页。普通 Book 页面不显示
 One-Shots Book 可以复用已经存在的系列封面。打开信息页只读取 SQLite 和已有封面，
 不会请求 115 或为了封面读取漫画第一页。管理页和信息页均跟随系统深浅色主题。
 
+## 阅读进度
+
+如果在 Mihon 中启用 Komga Tracker，本服务会按 Mihon 的
+`lastBookNumberSortRead` 实现标准卷级进度同步：读完某个 Book 后，Mihon 会把已读到
+的卷号同步给服务端；服务端严格以 Mihon 发来的值为准，允许进度前进或回退。这个
+同步只到 Book / Chapter 级，不包含页码。
+
+服务端还会在页面图片成功返回后记录推断页码，包括最近加载页、该 Book 的最大加载
+页、总页数和更新时间，并在 Series / Book 信息页展示。这个页码来自图片加载请求，
+可能包含 Mihon 的预读页面，因此只作为“推断进度”显示，不会影响 Mihon Tracker 的
+已读状态，也不会自动把 Book 标记为已读。
+
 ## 缓存
 
 管理页可以分别查看和清理：
@@ -371,10 +384,11 @@ go test ./...
 - macOS amd64 / arm64 tar.gz
 - `SHA256SUMS`
 
-所有二进制产物由 GitHub Actions 自动放入对应 GitHub Release。另一个 Docker
-工作流会在同一个 Tag 上构建并推送 `blacktal/fake-komga-115` 的
-`linux/amd64,linux/arm64` 多架构镜像，包含 `latest`、`vX.Y.Z`、`X.Y.Z` 和 `X.Y`
-标签。
+所有二进制产物由 GitHub Actions 自动放入对应 GitHub Release。发布 `vX.Y.Z`
+前必须提交 `docs/release-notes/vX.Y.Z.md`，Release 页面会使用该文件作为更新说明；
+文件缺失时发布工作流会失败。另一个 Docker 工作流会在同一个 Tag 上构建并推送
+`blacktal/fake-komga-115` 的 `linux/amd64,linux/arm64` 多架构镜像，包含 `latest`、
+`vX.Y.Z`、`X.Y.Z` 和 `X.Y` 标签。
 
 测试包括自然排序、ID、MIME 类型，以及用 mock HTTP Range 服务读取远程
 store/deflate ZIP、RAR4 和压缩 RAR5 页面。

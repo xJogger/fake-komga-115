@@ -220,10 +220,36 @@ INSERT INTO books(
 	if progress["booksCount"].(float64) != 1 || progress["maxNumberSort"].(float64) != 1 {
 		t.Fatalf("progress: %#v", progress)
 	}
+	response = putJSON(t, server.URL+"/api/v2/series/"+seriesID+"/read-progress/tachiyomi", map[string]any{
+		"lastBookNumberSortRead": 1,
+	})
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("progress PUT status=%d", response.StatusCode)
+	}
+	getJSON(t, server.URL+"/api/v2/series/"+seriesID+"/read-progress/tachiyomi", &progress)
+	if progress["booksReadCount"].(float64) != 1 || progress["booksUnreadCount"].(float64) != 0 ||
+		progress["lastReadContinuousNumberSort"].(float64) != 1 {
+		t.Fatalf("progress after PUT: %#v", progress)
+	}
+	response = putJSON(t, server.URL+"/api/v2/series/"+seriesID+"/read-progress/tachiyomi", map[string]any{
+		"lastBookNumberSortRead": 0,
+	})
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("progress rollback PUT status=%d", response.StatusCode)
+	}
+	if err := store.RecordBookPageProgress(ctx, book, 4, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordBookPageProgress(ctx, book, 2, 10); err != nil {
+		t.Fatal(err)
+	}
 
 	seriesHTML := getText(t, server.URL+"/series/"+seriesID, http.StatusOK)
 	for _, expected := range []string{
 		"One Shot", "Root/One Shot.cbz", "001.cbz", "/book/" + bookID,
+		"Mihon 同步进度", "推断阅读进度", "最近 第 2 / 10 页", "最大 第 4 / 10 页",
 	} {
 		if !strings.Contains(seriesHTML, expected) {
 			t.Fatalf("series web page missing %q", expected)
@@ -232,6 +258,7 @@ INSERT INTO books(
 	bookHTML := getText(t, server.URL+"/book/"+bookID, http.StatusOK)
 	for _, expected := range []string{
 		"Root/One Shot.cbz", "/series/" + seriesID, `class="cover-frame"`,
+		"推断阅读进度", "最近加载：第 2 / 10 页", "最大加载：第 4 / 10 页",
 	} {
 		if !strings.Contains(bookHTML, expected) {
 			t.Fatalf("one-shot book web page missing %q", expected)

@@ -6,6 +6,9 @@ import (
 )
 
 func applyMigrations(db *sql.DB) error {
+	if err := ensureProgressTables(db); err != nil {
+		return err
+	}
 	migrations := []struct {
 		table      string
 		column     string
@@ -31,6 +34,34 @@ func applyMigrations(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureProgressTables(db *sql.DB) error {
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS book_read_progress (
+  book_id TEXT PRIMARY KEY,
+  series_id TEXT NOT NULL,
+  completed INTEGER NOT NULL DEFAULT 1,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_book_read_progress_series ON book_read_progress(series_id, completed);
+
+CREATE TABLE IF NOT EXISTS book_page_progress (
+  book_id TEXT PRIMARY KEY,
+  series_id TEXT NOT NULL,
+  last_loaded_page INTEGER NOT NULL,
+  max_loaded_page INTEGER NOT NULL,
+  page_count INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_book_page_progress_series_updated ON book_page_progress(series_id, updated_at DESC);
+`)
+	return err
 }
 
 func columnExists(db *sql.DB, table, column string) (bool, error) {

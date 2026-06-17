@@ -29,6 +29,10 @@
       </div>
       <div class="facts">
         <div class="fact wide"><span>115 相对路径</span><strong>{{.RelativePath}}</strong></div>
+        <div class="fact wide"><span>Mihon 同步进度</span><strong>{{.ReadProgress}}</strong></div>
+        {{if .HasInferred}}
+        <div class="fact wide"><span>推断阅读进度</span><strong>最近加载：<a href="{{.InferredURL}}">{{.InferredLast}}</a><br>该书最大加载：<a href="{{.InferredURL}}">{{.InferredMax}}</a><br><small class="muted">更新时间：<time datetime="{{.InferredAt}}">{{.InferredAt}}</time>；该页码来自图片加载请求，可能包含 Mihon 预读页面。</small></strong></div>
+        {{end}}
         <div class="fact"><span>加入服务</span><strong><time datetime="{{.CreatedAt}}">{{.CreatedAt}}</time></strong></div>
         <div class="fact"><span>文件更新时间</span><strong><time datetime="{{.LastModified}}">{{.LastModified}}</time></strong></div>
       </div>
@@ -46,7 +50,7 @@
       <a class="book-row" href="{{.URL}}">
         <span>
           <span class="book-name">{{.Name}}</span>
-          <span class="book-meta">{{.Size}} · {{.Pages}} · <time datetime="{{.LastModified}}">{{.LastModified}}</time></span>
+          <span class="book-meta">{{.Size}} · {{.Pages}} · {{.ReadState}} · <time datetime="{{.LastModified}}">{{.LastModified}}</time>{{if .PageProgress}}<br>{{.PageProgress}}{{end}}</span>
         </span>
         <span class="arrow">›</span>
       </a>

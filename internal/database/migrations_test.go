@@ -55,6 +55,8 @@ CREATE TABLE series (
 	}{
 		{"libraries", "one_shot"},
 		{"series", "one_shot"},
+		{"book_read_progress", "book_id"},
+		{"book_page_progress", "last_loaded_page"},
 	} {
 		exists, err := columnExists(store.DB(), item.table, item.column)
 		if err != nil {

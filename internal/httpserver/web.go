@@ -3,6 +3,8 @@ package httpserver
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"path"
 	"strconv"
@@ -24,6 +26,12 @@ type webSeriesPage struct {
 	CreatedAt    string
 	LastModified string
 	OneShot      bool
+	ReadProgress string
+	HasInferred  bool
+	InferredLast string
+	InferredMax  string
+	InferredAt   string
+	InferredURL  string
 	Books        []webBookRow
 }
 
@@ -33,6 +41,8 @@ type webBookRow struct {
 	Size         string
 	Pages        string
 	LastModified string
+	ReadState    string
+	PageProgress string
 }
 
 type webBookPage struct {
@@ -49,6 +59,11 @@ type webBookPage struct {
 	ShowCover    bool
 	CoverURL     string
 	OneShot      bool
+	ReadState    string
+	HasProgress  bool
+	LastProgress string
+	MaxProgress  string
+	ProgressAt   string
 }
 
 func (s *Server) webStyles(w http.ResponseWriter, _ *http.Request) {
@@ -87,24 +102,54 @@ func (s *Server) webSeries(w http.ResponseWriter, r *http.Request) {
 
 	rows := make([]webBookRow, 0, len(books))
 	var totalSize int64
+	readProgress, err := s.store.SeriesReadProgress(r.Context(), series.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
+	readBooks, err := s.store.CompletedBookIDsBySeries(r.Context(), series.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
+	pageProgresses, err := s.store.BookPageProgressesBySeries(r.Context(), series.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
 	for _, book := range books {
 		totalSize += book.Size
 		rows = append(rows, webBookRow{
 			Name: book.Name, URL: "/book/" + book.ID, Size: formatBytes(book.Size),
 			Pages: pageCountText(book.PageCount), LastModified: bookModifiedTime(book),
+			ReadState:    readStateText(readBooks[book.ID]),
+			PageProgress: pageProgressInline(pageProgresses[book.ID]),
 		})
+	}
+	latestProgress, hasLatestProgress, err := s.store.LatestBookPageProgressInSeries(r.Context(), series.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
 	}
 	modified := series.UpdatedAt
 	if series.FileModifiedAt != nil {
 		modified = *series.FileModifiedAt
 	}
-	s.renderWeb(w, http.StatusOK, "web_series.html", webSeriesPage{
+	page := webSeriesPage{
 		Name: series.Name, LibraryName: library.Name, RelativePath: series.RelativePath,
 		CoverURL:   "/api/v1/series/" + series.ID + "/thumbnail",
 		BooksCount: len(books), TotalSize: formatBytes(totalSize),
 		CreatedAt: webTime(series.CreatedAt), LastModified: webTime(modified),
-		OneShot: series.OneShot, Books: rows,
-	})
+		OneShot: series.OneShot, ReadProgress: seriesReadProgressText(readProgress), Books: rows,
+	}
+	if hasLatestProgress {
+		page.HasInferred = true
+		page.InferredLast = inferredProgressText(latestProgress.BookName, latestProgress.LastLoadedPage, latestProgress.PageCount)
+		page.InferredMax = inferredProgressText(latestProgress.BookName, latestProgress.MaxLoadedPage, latestProgress.PageCount)
+		page.InferredAt = webTime(latestProgress.UpdatedAt)
+		page.InferredURL = "/book/" + latestProgress.BookID
+	}
+	s.renderWeb(w, http.StatusOK, "web_series.html", page)
 }
 
 func (s *Server) webBook(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +172,16 @@ func (s *Server) webBook(w http.ResponseWriter, r *http.Request) {
 		s.renderWebError(w, err)
 		return
 	}
+	completed, err := s.store.BookReadCompleted(r.Context(), book.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
+	pageProgress, hasPageProgress, err := s.store.BookPageProgress(r.Context(), book.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
 	created := book.CreatedAt
 	if book.FileCreatedAt != nil {
 		created = *book.FileCreatedAt
@@ -135,14 +190,22 @@ func (s *Server) webBook(w http.ResponseWriter, r *http.Request) {
 	if book.FileModifiedAt != nil {
 		modified = *book.FileModifiedAt
 	}
-	s.renderWeb(w, http.StatusOK, "web_book.html", webBookPage{
+	page := webBookPage{
 		Name: book.Name, SeriesName: series.Name, SeriesURL: "/series/" + series.ID,
 		LibraryName: library.Name, RelativePath: webBookPath(series, book),
 		Size: formatBytes(book.Size), Pages: pageCountText(book.PageCount),
 		MediaType: webArchiveType(book.Name), CreatedAt: webTime(created),
 		LastModified: webTime(modified), ShowCover: series.OneShot,
 		CoverURL: "/api/v1/series/" + series.ID + "/thumbnail", OneShot: series.OneShot,
-	})
+		ReadState: readStateText(completed),
+	}
+	if hasPageProgress {
+		page.HasProgress = true
+		page.LastProgress = pageNumberText(pageProgress.LastLoadedPage, pageProgress.PageCount)
+		page.MaxProgress = pageNumberText(pageProgress.MaxLoadedPage, pageProgress.PageCount)
+		page.ProgressAt = webTime(pageProgress.UpdatedAt)
+	}
+	s.renderWeb(w, http.StatusOK, "web_book.html", page)
 }
 
 func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
@@ -187,6 +250,54 @@ func pageCountText(count int) string {
 		return "尚未建立页面索引"
 	}
 	return strconv.Itoa(count) + " 页"
+}
+
+func readStateText(completed bool) string {
+	if completed {
+		return "已读"
+	}
+	return "未读"
+}
+
+func seriesReadProgressText(progress database.SeriesReadProgress) string {
+	if progress.BooksCount == 0 {
+		return "暂无漫画文件"
+	}
+	return fmt.Sprintf(
+		"已读 %d / %d 本，连续读到 %s",
+		progress.BooksReadCount,
+		progress.BooksCount,
+		formatNumberSort(progress.LastReadContinuousNumberSort),
+	)
+}
+
+func pageProgressInline(progress database.BookPageProgress) string {
+	if progress.BookID == "" || progress.PageCount <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"推断进度：最近 %s，最大 %s",
+		pageNumberText(progress.LastLoadedPage, progress.PageCount),
+		pageNumberText(progress.MaxLoadedPage, progress.PageCount),
+	)
+}
+
+func inferredProgressText(bookName string, pageNumber, pageCount int) string {
+	return bookName + " · " + pageNumberText(pageNumber, pageCount)
+}
+
+func pageNumberText(pageNumber, pageCount int) string {
+	if pageNumber <= 0 || pageCount <= 0 {
+		return "尚无页码"
+	}
+	return fmt.Sprintf("第 %d / %d 页", pageNumber, pageCount)
+}
+
+func formatNumberSort(value float64) string {
+	if math.Trunc(value) == value {
+		return strconv.FormatInt(int64(value), 10)
+	}
+	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 func bookModifiedTime(book database.Book) string {

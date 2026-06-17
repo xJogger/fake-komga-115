@@ -65,6 +65,8 @@ TCP 监听成功后打开本机管理页。Linux 和 macOS 仍默认使用 `./da
 - `zip_indexes`：ZIP 和 RAR 共用的页面索引 JSON。
 - `series_thumbnails`：生成封面的文件信息和源 Book 版本。
 - `thumbnail_runs`：手动封面任务的队列、进度、结果、错误摘要和取消标记。
+- `book_read_progress`：Mihon/Komga Tracker 同步得到的 Book 级已读状态。
+- `book_page_progress`：页面图片成功返回后推断出的最近加载页、最大加载页和页数。
 - `downurl_cache`：短期 downurl 和 User-Agent。
 - `cache_entries`：Range/Page 磁盘缓存的大小与访问时间。
 
@@ -217,6 +219,22 @@ Range/Page 缓存使用 SQLite 中的 `last_access_at` 按最久未使用顺序�
 去重。One-Shots、单 Book Series、Series 最后一本以及未达到阈值的请求直接跳过。
 失败只记录不含 URL、Token 和用户路径的分类日志，不影响当前页面响应。
 
+### 阅读进度
+
+Mihon 的 Komga Tracker 使用 `/api/v2/series/{seriesId}/read-progress/tachiyomi`：
+
+- `PUT` 请求体只包含 `lastBookNumberSortRead`，表示自然顺序中
+  `number_sort <= lastBookNumberSortRead` 的现有 Book 已读。服务端严格以该值覆盖
+  当前 Series 的 Book 级已读状态，允许前进和回退。
+- `GET` 返回 `booksCount`、`booksReadCount`、`booksUnreadCount`、
+  `booksInProgressCount`、`lastReadContinuousNumberSort` 和 `maxNumberSort`。
+  `booksInProgressCount` 不受推断页码影响，当前始终为 0。
+
+页面图片成功写入响应后，HTTP 层调用 `RecordBookPageProgress` 记录该 Book 的
+`last_loaded_page`、`max_loaded_page`、`page_count` 和更新时间。这个数据来自图片加载
+请求，可能被 Mihon 预读推进，因此不能用于自动标记 Book 已读，也不能反向恢复 Mihon
+本地的页码位置。
+
 ## 11. HTTP 层
 
 路由分为：
@@ -233,8 +251,10 @@ Komga API 是有意裁剪的兼容层。集合、元数据和分页字段以 Mih
 
 WebView 信息页只查询 SQLite，并通过现有 Series thumbnail 端点显示已缓存封面。
 普通 Book 页面不显示封面，One-Shots Book 页面可以显示已有封面；任何信息页都不
-触发 downurl、归档索引或页面读取。浏览器路由的 404 返回自适应 HTML，API 路由的
-404 仍保持 JSON。
+触发 downurl、归档索引或页面读取。Series / Book 信息页会显示 Mihon 同步的卷级
+已读状态，以及从页面图片请求推断出的最近加载页和最大加载页。该推断页码可能包含
+Mihon 预读页面，只用于展示，不影响 Tracker 的已读状态。浏览器路由的 404 返回
+自适应 HTML，API 路由的 404 仍保持 JSON。
 
 ## 12. 错误映射
 
@@ -273,6 +293,10 @@ README、LICENSE 一起打包，最后生成 `SHA256SUMS` 并创建 GitHub Relea
 `latest`、原始 Git Tag（如 `v0.1.8`）、不带 `v` 的完整语义版本（如 `0.1.8`）
 以及 minor 标签（如 `0.1`）。Docker Hub 凭据只来自 GitHub Actions secrets，
 不要写入仓库。
+
+GitHub Release 的正文不再只依赖自动生成说明。发布 `vX.Y.Z` 前必须提交
+`docs/release-notes/vX.Y.Z.md`；Release 工作流会检查该文件并用它作为发布说明，缺失
+时直接失败。
 
 二进制 Release 和 Docker 构建都通过 `-ldflags -X` 把 Tag 写入
 `internal/buildinfo.Version`；普通源码构建显示开发版本。

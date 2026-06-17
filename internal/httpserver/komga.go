@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -192,6 +193,9 @@ func (s *Server) komgaPageImage(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(page.Data); err != nil {
 		return
 	}
+	if err := s.store.RecordBookPageProgress(r.Context(), book, pageNumber, page.TotalPages); err != nil {
+		s.logger.Warn("record inferred page progress", "error", err, "book_id", book.ID)
+	}
 	s.thumbs.MaybeGenerate(book, pageNumber, page.Data)
 	s.archive.Prefetch(book, pageNumber, int(s.store.Int64Setting(r.Context(), "page_prefetch_count", 2)))
 	s.archive.PrefetchNextVolumeIndex(book, pageNumber, page.TotalPages)
@@ -223,19 +227,42 @@ func (s *Server) emptyList(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) getSeriesProgress(w http.ResponseWriter, r *http.Request) {
-	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
-	if err != nil {
+	seriesID := chi.URLParam(r, "seriesID")
+	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
 		writeError(w, 404, "NOT_FOUND", "Series not found.")
 		return
 	}
-	writeJSON(w, 200, map[string]any{
-		"booksCount": series.BooksCount, "booksReadCount": 0,
-		"booksUnreadCount": series.BooksCount, "booksInProgressCount": 0,
-		"lastReadContinuousNumberSort": 0.0, "maxNumberSort": float64(series.BooksCount),
-	})
+	progress, err := s.store.SeriesReadProgress(r.Context(), seriesID)
+	if err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, 200, progress)
 }
 
-func (s *Server) putSeriesProgress(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) putSeriesProgress(w http.ResponseWriter, r *http.Request) {
+	seriesID := chi.URLParam(r, "seriesID")
+	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+		writeError(w, 404, "NOT_FOUND", "Series not found.")
+		return
+	}
+	var request struct {
+		LastBookNumberSortRead float64 `json:"lastBookNumberSortRead"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	if request.LastBookNumberSortRead < 0 {
+		writeError(w, http.StatusBadRequest, "INVALID_PROGRESS", "lastBookNumberSortRead must be positive or zero.")
+		return
+	}
+	if err := s.store.UpdateSeriesReadProgress(r.Context(), seriesID, request.LastBookNumberSortRead); err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

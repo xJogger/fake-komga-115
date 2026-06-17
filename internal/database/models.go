@@ -56,6 +56,30 @@ type Book struct {
 	PageCount      int
 }
 
+type SeriesReadProgress struct {
+	BooksCount                   int     `json:"booksCount"`
+	BooksReadCount               int     `json:"booksReadCount"`
+	BooksUnreadCount             int     `json:"booksUnreadCount"`
+	BooksInProgressCount         int     `json:"booksInProgressCount"`
+	LastReadContinuousNumberSort float64 `json:"lastReadContinuousNumberSort"`
+	MaxNumberSort                float64 `json:"maxNumberSort"`
+}
+
+type BookPageProgress struct {
+	BookID         string
+	SeriesID       string
+	LastLoadedPage int
+	MaxLoadedPage  int
+	PageCount      int
+	UpdatedAt      time.Time
+}
+
+type BookPageProgressView struct {
+	BookPageProgress
+	BookName   string
+	NumberSort float64
+}
+
 type ScanRun struct {
 	ID              string  `json:"id"`
 	LibraryID       *string `json:"libraryId"`
