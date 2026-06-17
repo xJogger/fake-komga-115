@@ -1,0 +1,34 @@
+.git
+.github
+
+# Local runtime data and secrets
+data/
+**/data/
+local/
+private/
+user_info*
+docker_info
+.env
+.env.*
+*.log
+*.pid
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local build/test artifacts
+dist/
+build/
+tmp/
+coverage.out
+fake-komga-115
+fake-komga-115.exe
+server
+*.test
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

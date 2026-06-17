@@ -44,7 +44,9 @@ Service、Thumbnail Service、Thumbnail Batch Manager 和 HTTP Server。关闭�
 
 Windows 未指定数据目录时使用 `%LOCALAPPDATA%\fake-komga-115\data`，并默认在
 TCP 监听成功后打开本机管理页。Linux 和 macOS 仍默认使用 `./data` 且不主动打开
-浏览器。监听 socket 在 `App.Start` 中同步绑定，避免端口占用时仍误开浏览器。
+浏览器。Docker 镜像通过环境变量把数据目录设为 `/data`，并显式关闭自动打开浏览器；
+容器内进程以非 root 用户运行。监听 socket 在 `App.Start` 中同步绑定，避免端口占用
+时仍误开浏览器。
 
 管理状态 API 会返回规范化后的绝对数据目录、版本和检测到的私有 IPv4 局域网
 地址，供管理页显示 Mihon 配置值；常见容器虚拟网卡会被忽略。
@@ -260,10 +262,17 @@ WebView 信息页只查询 SQLite，并通过现有 Series thumbnail 端点显�
 
 ## 14. 发布
 
-推送 `v*` Tag 会触发 `.github/workflows/release.yml`。工作流先执行测试和 vet，
-然后以 `CGO_ENABLED=0` 交叉编译 Windows amd64、Linux amd64/arm64、macOS
-amd64/arm64。每个平台产物和 README、LICENSE 一起打包，最后生成
-`SHA256SUMS` 并创建 GitHub Release。
+推送 `v*` Tag 会触发两个发布工作流。
 
-Release 构建通过 `-ldflags -X` 把 Tag 写入 `internal/buildinfo.Version`；普通
-源码构建显示开发版本。
+`.github/workflows/release.yml` 先执行测试和 vet，然后以 `CGO_ENABLED=0`
+交叉编译 Windows amd64、Linux amd64/arm64、macOS amd64/arm64。每个平台产物和
+README、LICENSE 一起打包，最后生成 `SHA256SUMS` 并创建 GitHub Release。
+
+`.github/workflows/docker.yml` 使用 Docker Buildx 构建 `linux/amd64` 和
+`linux/arm64` 多架构镜像，并推送到 `blacktal/fake-komga-115`。镜像标签包括
+`latest`、原始 Git Tag（如 `v0.1.8`）、不带 `v` 的完整语义版本（如 `0.1.8`）
+以及 minor 标签（如 `0.1`）。Docker Hub 凭据只来自 GitHub Actions secrets，
+不要写入仓库。
+
+二进制 Release 和 Docker 构建都通过 `-ldflags -X` 把 Tag 写入
+`internal/buildinfo.Version`；普通源码构建显示开发版本。

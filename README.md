@@ -20,7 +20,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 翻页时才读取并解压对应图片所需的远程字节范围。
 
 > [!WARNING]
-> 当前版本是 `v0.1.7` 开发预览版。服务没有认证功能，115 Token 会明文保存在
+> 当前版本是 `v0.1.8` 开发预览版。服务没有认证功能，115 Token 会明文保存在
 > 本地 SQLite 中。仅应部署在可信局域网，不要直接暴露到公网。
 
 ## 当前功能
@@ -44,6 +44,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - 管理页面：账号、根目录、扫描与封面任务进度、自动扫描、缓存统计和清理
 - Windows 双击启动后自动打开管理页，并自动选择用户数据目录
 - GitHub Release 提供 Windows、Linux 和 macOS 的直接运行包及 SHA256 校验和
+- Docker Hub 提供 Linux amd64 / arm64 多架构镜像
 - 整个服务免认证
 
 ## 尚不支持
@@ -60,6 +61,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 
 - Windows x64
 - Linux x64 / ARM64
+- Docker Linux x64 / ARM64
 - macOS Intel / Apple Silicon
 - 115 Open `refresh_token`
 - 支持 Komga 扩展的 Mihon
@@ -100,6 +102,49 @@ chmod +x fake-komga-115
 
 Linux 和 macOS 默认不会自动打开浏览器，数据目录仍为当前目录下的 `./data`。
 打开 `http://127.0.0.1:25600/admin` 完成配置。macOS 发布包同样没有代码签名。
+
+### Docker：服务器部署
+
+Docker Hub 镜像支持 `linux/amd64` 和 `linux/arm64`。推荐使用随仓库提供的
+`docker-compose.yml`，它会创建命名卷保存数据库、缓存和封面：
+
+```bash
+mkdir fake-komga-115
+cd fake-komga-115
+curl -fsSLO https://raw.githubusercontent.com/xJogger/fake-komga-115/main/docker-compose.yml
+docker compose up -d
+```
+
+然后打开：
+
+```text
+http://服务器地址:25600/admin
+```
+
+也可以直接运行：
+
+```bash
+docker run -d \
+  --name fake-komga-115 \
+  --restart unless-stopped \
+  -p 25600:25600 \
+  -v fake-komga-115-data:/data \
+  -e TZ=Asia/Shanghai \
+  blacktal/fake-komga-115:latest
+```
+
+容器内默认参数等价于：
+
+```text
+FK115_HOST=0.0.0.0
+FK115_PORT=25600
+FK115_DATA_DIR=/data
+FK115_OPEN_BROWSER=false
+```
+
+容器以非 root 用户 `10001:10001` 运行。使用命名卷时通常不需要处理权限；如果改用
+宿主机目录绑定挂载，例如 `./data:/data`，遇到权限错误时需要让该目录可由 UID 10001
+写入。Docker 部署同样没有认证功能，只适合可信局域网。
 
 ### 从源码运行
 
@@ -326,7 +371,10 @@ go test ./...
 - macOS amd64 / arm64 tar.gz
 - `SHA256SUMS`
 
-所有产物由 GitHub Actions 自动放入对应 GitHub Release。
+所有二进制产物由 GitHub Actions 自动放入对应 GitHub Release。另一个 Docker
+工作流会在同一个 Tag 上构建并推送 `blacktal/fake-komga-115` 的
+`linux/amd64,linux/arm64` 多架构镜像，包含 `latest`、`vX.Y.Z`、`X.Y.Z` 和 `X.Y`
+标签。
 
 测试包括自然排序、ID、MIME 类型，以及用 mock HTTP Range 服务读取远程
 store/deflate ZIP、RAR4 和压缩 RAR5 页面。
@@ -399,6 +447,13 @@ cp data/fake-komga-115.db data/fake-komga-115.db.backup
 git pull
 go build -o fake-komga-115 ./cmd/server
 systemctl --user start fake-komga-115
+```
+
+Docker Compose 部署可以这样升级：
+
+```bash
+docker compose pull
+docker compose up -d
 ```
 
 ## 二次开发
