@@ -43,18 +43,16 @@ func NewRARService(
 
 func (r *RARService) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
 	version := bookVersion(book)
-	var raw string
-	err := r.store.DB().QueryRowContext(ctx,
-		`SELECT index_json FROM zip_indexes WHERE book_id=? AND version=?`, book.ID, version).Scan(&raw)
-	if err == nil {
+	if raw, ok, err := r.store.ArchiveIndexRawForVersion(ctx, book.ID, version); err != nil {
+		return nil, err
+	} else if ok {
 		var pages []PageEntry
 		if json.Unmarshal([]byte(raw), &pages) == nil {
 			return pages, nil
 		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
 	}
 
+	started := time.Now()
 	files, _, err := r.listFiles(ctx, book)
 	if err != nil {
 		return nil, err
@@ -64,7 +62,7 @@ func (r *RARService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	if err != nil {
 		return nil, err
 	}
-	if err := r.saveIndex(ctx, book, pages); err != nil {
+	if err := r.saveIndex(ctx, book, pages, time.Since(started)); err != nil {
 		return nil, err
 	}
 	r.logger.Info("rar index parsed", "book", book.ID, "pages", len(pages))
@@ -226,19 +224,15 @@ func (r *RARService) saveIndex(
 	ctx context.Context,
 	book database.Book,
 	pages []PageEntry,
+	duration time.Duration,
 ) error {
 	encoded, err := json.Marshal(pages)
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = r.store.DB().ExecContext(ctx, `
-INSERT INTO zip_indexes(book_id,version,page_count,index_json,created_at,updated_at)
-VALUES(?,?,?,?,?,?)
-ON CONFLICT(book_id) DO UPDATE SET
- version=excluded.version,page_count=excluded.page_count,index_json=excluded.index_json,updated_at=excluded.updated_at`,
-		book.ID, bookVersion(book), len(pages), string(encoded), now, now)
-	return err
+	return r.store.RecordArchiveIndexBuild(
+		ctx, book.ID, bookVersion(book), string(encoded), len(pages), duration,
+	)
 }
 
 func validateRARFile(file *rardecode.File) error {

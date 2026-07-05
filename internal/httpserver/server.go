@@ -23,6 +23,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/archive"
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
@@ -39,6 +40,7 @@ type Server struct {
 	archive *archive.Service
 	thumbs  *thumbnail.Service
 	covers  *thumbnail.BatchManager
+	tasks   *maintenance.Manager
 	logger  *slog.Logger
 	router  chi.Router
 	web     *template.Template
@@ -61,12 +63,14 @@ func New(
 	archiveService *archive.Service,
 	thumbnailService *thumbnail.Service,
 	coverManager *thumbnail.BatchManager,
+	maintenanceManager *maintenance.Manager,
 	runtimeInfo RuntimeInfo,
 	logger *slog.Logger,
 ) *Server {
 	s := &Server{
 		store: store, client: client, scanner: scanManager, cache: cacheManager,
 		archive: archiveService, thumbs: thumbnailService, covers: coverManager,
+		tasks:   maintenanceManager,
 		runtime: runtimeInfo, logger: logger, placeholder: makePlaceholder(),
 		web: template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
 	}

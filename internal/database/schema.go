@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS zip_indexes (
   version TEXT NOT NULL,
   page_count INTEGER NOT NULL,
   index_json TEXT NOT NULL,
+  index_duration_ns INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
@@ -173,11 +174,24 @@ CREATE TABLE IF NOT EXISTS series_thumbnails (
   width INTEGER NOT NULL,
   height INTEGER NOT NULL,
   size INTEGER NOT NULL,
+  generation_duration_ns INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE,
   FOREIGN KEY(source_book_id) REFERENCES books(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS book_download_stats (
+  book_id TEXT PRIMARY KEY,
+  series_id TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  duration_ns INTEGER NOT NULL DEFAULT 0,
+  samples INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_book_download_stats_series ON book_download_stats(series_id);
 
 CREATE TABLE IF NOT EXISTS thumbnail_runs (
   id TEXT PRIMARY KEY,
@@ -199,6 +213,33 @@ CREATE TABLE IF NOT EXISTS thumbnail_runs (
   FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_thumbnail_runs_created ON thumbnail_runs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS maintenance_runs (
+  id TEXT PRIMARY KEY,
+  operation TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  target_name TEXT NOT NULL DEFAULT '',
+  series_id TEXT,
+  book_id TEXT,
+  force INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  total_items INTEGER NOT NULL DEFAULT 0,
+  processed_items INTEGER NOT NULL DEFAULT 0,
+  generated_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  current_item TEXT NOT NULL DEFAULT '',
+  errors_json TEXT NOT NULL DEFAULT '[]',
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE,
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_runs_created ON maintenance_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_maintenance_runs_target ON maintenance_runs(target_type,target_id,created_at DESC);
 
 CREATE TABLE IF NOT EXISTS downurl_cache (
   cache_key TEXT PRIMARY KEY,

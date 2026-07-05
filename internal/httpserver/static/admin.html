@@ -43,6 +43,7 @@
       </div>
       <p id="configured" class="muted">读取中……</p>
       <p class="muted">版本：<code id="serviceVersion">-</code><br>数据存储路径：<code id="dataDir" class="break">-</code></p>
+      <p class="muted" id="performanceStats">性能统计读取中……</p>
       <div class="muted">Mihon 地址（请选择与手机同一局域网的地址）：<div id="serverAddresses" class="address-list"></div></div>
       <p class="muted">整个服务免认证，Mihon 中的用户名、密码和 API Key 均留空。</p>
     </section>
@@ -167,12 +168,16 @@ function notice(text,bad=false){const m=$('#message');m.textContent=text;m.style
 function when(v){return v?new Date(v).toLocaleString():'从未'}
 function bytes(n){if(!n)return '0 B';const u=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return `${n.toFixed(i?1:0)} ${u[i]}`}
 function gib(n){return Number(n||0)/(1024**3)}
+function duration(ns){ns=Number(ns||0);if(!ns)return '尚无统计';const ms=ns/1e6;if(ms<1000)return `${ms<10?ms.toFixed(1):ms.toFixed(0)} ms`;const sec=ms/1000;if(sec<60)return `${sec.toFixed(2)} s`;return `${Math.floor(sec/60)} 分 ${Math.round(sec%60)} 秒`}
+function speed(bytesValue,ns){bytesValue=Number(bytesValue||0);ns=Number(ns||0);if(!bytesValue||!ns)return '尚无统计';return `${((bytesValue/1024/1024)/(ns/1e9)).toFixed(2)} MB/s`}
 
 async function loadStatus(){
   const s=await api('/status');$('#statLibraries').textContent=s.libraries;$('#statSeries').textContent=s.series;$('#statBooks').textContent=s.books;
   $('#statComicBytes').textContent=bytes(s.comicBytes);
   $('#configured').innerHTML=s.configured?'<span class="ok">115 已配置</span>':'<span class="bad">尚未配置 115 Token</span>';
   $('#serviceVersion').textContent=s.version||'-';$('#dataDir').textContent=s.dataDir||'-';
+  const p=s.performance||{};
+  $('#performanceStats').innerHTML=`平均索引耗时：${duration(p.indexAverageDurationNs)}（${p.indexCount||0} 本）<br>平均封面耗时：${duration(p.coverAverageDurationNs)}（${p.coverCount||0} 个）<br>真实下载平均速度：${speed(p.downloadBytes,p.downloadDurationNs)}（${bytes(p.downloadBytes||0)}，${p.downloadSamples||0} 次 Range）`;
   const addresses=s.mihonAddresses?.length?s.mihonAddresses:[location.origin];
   $('#serverAddresses').innerHTML=addresses.map(x=>`<code>${esc(x)}</code>`).join('');
 }

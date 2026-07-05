@@ -93,11 +93,15 @@ func NewBatchManager(
 		if err != nil {
 			return false, err
 		}
+		started := time.Now()
 		page, err := archiveService.ReadPage(ctx, book, 1)
 		if err != nil {
 			return false, err
 		}
 		if err := service.Generate(ctx, book, page.Data); err != nil {
+			return false, err
+		}
+		if err := service.SetGenerationDuration(ctx, seriesID, time.Since(started)); err != nil {
 			return false, err
 		}
 		return true, nil

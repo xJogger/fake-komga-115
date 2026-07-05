@@ -20,7 +20,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 翻页时才读取并解压对应图片所需的远程字节范围。
 
 > [!WARNING]
-> 当前版本是 `v0.1.9` 开发预览版。服务没有认证功能，115 Token 会明文保存在
+> 当前版本是 `v0.1.10` 开发预览版。服务没有认证功能，115 Token 会明文保存在
 > 本地 SQLite 中。仅应部署在可信局域网，不要直接暴露到公网。
 
 ## 当前功能
@@ -32,7 +32,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - 只有子目录、没有直接漫画文件的目录不生成 Series
 - Library 可切换 One-Shots 模式，递归把每个漫画归档文件映射为独立 Series
 - 最新 Mihon Komga 扩展所需的 Series、Book、Pages、筛选和缩略图端点
-- Mihon WebView 的 Series、Book 信息页和友好 HTML 404 页面
+- Mihon WebView 的 Series、Book 信息页、手动维护按钮和友好 HTML 404 页面
 - Mihon/Komga Tracker 卷级阅读进度同步，并在信息页显示推断页码进度
 - 远程 ZIP central directory 解析
 - ZIP `store` 和 `deflate` 页面读取
@@ -41,6 +41,8 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - 阅读接近当前卷末尾时，可选后台预读同一 Series 下一卷的归档索引
 - 阅读一个 Series 第一本漫画的第一页后，自动生成 Komga 风格系列封面
 - 可按 Library 手动为更新时间最新的 N 个或全库 Series 批量生成封面
+- 可按 Series / Book 手动生成或强制重建系列封面和归档索引
+- 记录归档索引耗时、系列封面生成耗时和真实 Range 下载平均速度
 - 管理页按 Library 和全部 Library 汇总漫画归档文件容量
 - 管理页面：账号、根目录、扫描与封面任务进度、自动扫描、缓存统计和清理
 - Windows 双击启动后自动打开管理页，并自动选择用户数据目录
@@ -295,8 +297,10 @@ API Key:  留空
 
 Mihon 漫画条目和阅读界面的 WebView 按钮会打开本服务的本地信息页：
 
-- `/series/{seriesId}`：系列封面、所属 Library、115 相对路径、容量、时间及 Book 列表
-- `/book/{bookId}` 和 `/books/{bookId}`：Book 文件路径、大小、页数、格式和时间
+- `/series/{seriesId}`：系列封面、所属 Library、115 相对路径、容量、时间、
+  阅读/索引/下载统计及 Book 列表
+- `/book/{bookId}` 和 `/books/{bookId}`：Book 文件路径、大小、页数、格式、时间、
+  索引状态和真实下载速度
 
 Book 列表可以继续进入对应 Book 信息页。普通 Book 页面不显示系列封面；
 One-Shots Book 可以复用已经存在的系列封面。打开信息页只读取 SQLite 和已有封面，
@@ -313,6 +317,25 @@ One-Shots Book 可以复用已经存在的系列封面。打开信息页只读�
 页、总页数和更新时间，并在 Series / Book 信息页展示。这个页码来自图片加载请求，
 可能包含 Mihon 的预读页面，因此只作为“推断进度”显示，不会影响 Mihon Tracker 的
 已读状态，也不会自动把 Book 标记为已读。
+
+## 手动维护与性能统计
+
+Series 信息页提供：
+
+- 生成系列封面
+- 强制重建系列封面
+- 为该 Series 下全部 Book 生成归档索引
+- 强制重建该 Series 下全部 Book 的归档索引
+
+Book 信息页提供当前这一本的归档索引生成和强制重建。默认操作会跳过已有且仍匹配
+当前文件版本的封面或索引；强制重建按钮带警示样式和二次确认。Series 级任务在后台
+串行执行，可以在详情页查看进度并请求取消。取消不会强行中断当前正在处理的那一本，
+而是在当前条目结束后尽快停止后续条目。
+
+详情页会展示当前 Series / Book 的索引耗时、封面生成耗时和真实下载平均速度。
+管理页的服务状态区域会汇总全局平均索引耗时、平均封面耗时和真实 Range 下载平均
+速度。下载速度只统计真正从 115 downurl 成功读取的 HTTP Range 字节；缓存命中、
+等待并发合并结果和失败请求不计入。
 
 ## 缓存
 

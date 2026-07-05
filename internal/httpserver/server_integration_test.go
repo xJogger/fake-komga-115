@@ -19,6 +19,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/id"
+	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
@@ -54,9 +55,14 @@ func TestMihonKomgaContract(t *testing.T) {
 		store, archiveService, thumbnailService, logger,
 	)
 	defer coverManager.Close()
+	maintenanceManager := maintenance.New(
+		store, archiveService, thumbnailService, logger,
+	)
+	defer maintenanceManager.Close()
 	handler := New(
 		store, client, scanManager, cacheManager,
 		archiveService, thumbnailService, coverManager,
+		maintenanceManager,
 		RuntimeInfo{
 			DataDir: "/tmp/fake-komga-115-test-data",
 			Host:    "127.0.0.1",
@@ -145,6 +151,11 @@ INSERT INTO books(
 	getJSON(t, server.URL+"/admin/api/cover-jobs", &coverJobs)
 	if len(coverJobs) != 0 {
 		t.Fatalf("unexpected cover jobs: %#v", coverJobs)
+	}
+	var maintenanceJobs []map[string]any
+	getJSON(t, server.URL+"/admin/api/maintenance-jobs", &maintenanceJobs)
+	if len(maintenanceJobs) != 0 {
+		t.Fatalf("unexpected maintenance jobs: %#v", maintenanceJobs)
 	}
 
 	var komgaLibraries []map[string]any
@@ -245,11 +256,20 @@ INSERT INTO books(
 	if err := store.RecordBookPageProgress(ctx, book, 2, 10); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.RecordArchiveIndexBuild(
+		ctx, book.ID, archive.BookVersion(book), "[]", 10, 123*time.Millisecond,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordBookDownload(ctx, book, 8<<20, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	seriesHTML := getText(t, server.URL+"/series/"+seriesID, http.StatusOK)
 	for _, expected := range []string{
 		"One Shot", "Root/One Shot.cbz", "001.cbz", "/book/" + bookID,
 		"Mihon 同步进度", "推断阅读进度", "最近 第 2 / 10 页", "最大 第 4 / 10 页",
+		"归档索引统计", "平均耗时", "4.00 MB/s", "生成全部索引", "强制重建封面",
 	} {
 		if !strings.Contains(seriesHTML, expected) {
 			t.Fatalf("series web page missing %q", expected)
@@ -259,6 +279,7 @@ INSERT INTO books(
 	for _, expected := range []string{
 		"Root/One Shot.cbz", "/series/" + seriesID, `class="cover-frame"`,
 		"推断阅读进度", "最近加载：第 2 / 10 页", "最大加载：第 4 / 10 页",
+		"归档索引", "耗时：123 ms", "真实下载速度", "4.00 MB/s", "生成归档索引",
 	} {
 		if !strings.Contains(bookHTML, expected) {
 			t.Fatalf("one-shot book web page missing %q", expected)

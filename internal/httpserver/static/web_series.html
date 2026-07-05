@@ -30,6 +30,9 @@
       <div class="facts">
         <div class="fact wide"><span>115 相对路径</span><strong>{{.RelativePath}}</strong></div>
         <div class="fact wide"><span>Mihon 同步进度</span><strong>{{.ReadProgress}}</strong></div>
+        <div class="fact wide"><span>归档索引统计</span><strong>{{.IndexSummary}}</strong></div>
+        <div class="fact wide"><span>系列封面统计</span><strong>{{.CoverSummary}}</strong></div>
+        <div class="fact wide"><span>真实下载速度</span><strong>{{.DownloadStat}}</strong></div>
         {{if .HasInferred}}
         <div class="fact wide"><span>推断阅读进度</span><strong>最近加载：<a href="{{.InferredURL}}">{{.InferredLast}}</a><br>该书最大加载：<a href="{{.InferredURL}}">{{.InferredMax}}</a><br><small class="muted">更新时间：<time datetime="{{.InferredAt}}">{{.InferredAt}}</time>；该页码来自图片加载请求，可能包含 Mihon 预读页面。</small></strong></div>
         {{end}}
@@ -38,6 +41,21 @@
       </div>
     </div>
   </article>
+
+  <section class="card section">
+    <div class="section-head">
+      <h2>手动维护</h2>
+      <span class="muted">封面和索引任务会后台执行，可刷新查看进度</span>
+    </div>
+    <div class="action-grid">
+      <button class="action-button" data-op="series_thumbnail" data-force="false">生成系列封面</button>
+      <button class="action-button warning" data-op="series_thumbnail" data-force="true">⚠ 强制重建封面</button>
+      <button class="action-button" data-op="series_index" data-force="false">生成全部索引</button>
+      <button class="action-button warning" data-op="series_index" data-force="true">⚠ 强制重建全部索引</button>
+    </div>
+    <p class="muted">默认会跳过已存在且仍有效的封面或索引；强制重建会重新读取归档索引或第一页，可能产生额外 115 Range 流量。</p>
+    <div id="maintenanceJobs" class="job-list muted">读取任务中……</div>
+  </section>
 
   <section class="card section">
     <div class="section-head">
@@ -50,7 +68,7 @@
       <a class="book-row" href="{{.URL}}">
         <span>
           <span class="book-name">{{.Name}}</span>
-          <span class="book-meta">{{.Size}} · {{.Pages}} · {{.ReadState}} · <time datetime="{{.LastModified}}">{{.LastModified}}</time>{{if .PageProgress}}<br>{{.PageProgress}}{{end}}</span>
+          <span class="book-meta">{{.Size}} · {{.Pages}} · {{.ReadState}} · {{.IndexStatus}} · <time datetime="{{.LastModified}}">{{.LastModified}}</time>{{if .DownloadStat}}<br>{{.DownloadStat}}{{end}}{{if .PageProgress}}<br>{{.PageProgress}}{{end}}</span>
         </span>
         <span class="arrow">›</span>
       </a>
@@ -62,10 +80,54 @@
   </section>
 </main>
 <script>
+const targetType = 'series';
+const targetId = '{{.ID}}';
+const targetName = '{{.Name}}';
 document.querySelectorAll('time[datetime]').forEach(x => {
   const d = new Date(x.dateTime);
   if (!Number.isNaN(d.valueOf())) x.textContent = d.toLocaleString();
 });
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function adminApi(path, options={}) {
+  options.headers={...(options.headers||{}),'Content-Type':'application/json'};
+  const r=await fetch('/admin/api'+path,options);
+  if(!r.ok){let e={};try{e=await r.json()}catch{}throw new Error(e.message||`${r.status} ${r.statusText}`)}
+  return r.status===204?null:r.json();
+}
+function when(v){return v?new Date(v).toLocaleString():'-'}
+function jobStatus(x){return ({queued:'排队中',running:'运行中',success:'成功',partial:'部分失败',failed:'失败',canceled:'已取消'})[x]||x}
+function opName(x){return ({series_thumbnail:'系列封面',series_index:'系列索引',book_index:'单本索引'})[x]||x}
+async function loadMaintenanceJobs(){
+  try{
+    const rows=await adminApi(`/maintenance-jobs?targetType=${encodeURIComponent(targetType)}&targetId=${encodeURIComponent(targetId)}&limit=8`);
+    const box=document.getElementById('maintenanceJobs');
+    if(!rows.length){box.innerHTML='暂无维护任务。';return}
+    box.innerHTML=rows.map(x=>`<div class="job-card">
+      <div><b>${opName(x.operation)}</b>${x.force?' <span class="danger-text">强制</span>':''} · ${jobStatus(x.status)} · ${x.processedItems}/${x.totalItems}</div>
+      <div>${x.generatedCount} 生成 / ${x.skippedCount} 跳过 / ${x.failedCount} 失败${x.currentItem?' · 当前：<span class="mono">'+esc(x.currentItem)+'</span>':''}</div>
+      ${x.errors?.length?'<details><summary class="danger-text">错误摘要</summary>'+x.errors.map(esc).join('<br>')+'</details>':''}
+      <div>开始：${when(x.startedAt)}；完成：${when(x.completedAt)}</div>
+      ${(x.status==='queued'||x.status==='running')?`<button class="action-button danger small" onclick="cancelJob('${x.id}')">取消</button>`:''}
+    </div>`).join('');
+  }catch(e){document.getElementById('maintenanceJobs').textContent='读取任务失败：'+e.message}
+}
+async function startJob(operation, force){
+  const name=opName(operation);
+  if(force){
+    if(!confirm(`⚠ 将强制重建「${targetName}」的${name}，可能重新读取远程归档数据。是否继续？`))return;
+    if(!confirm(`二次确认：确实要强制重建${name}吗？`))return;
+  }
+  try{
+    await adminApi('/maintenance-jobs',{method:'POST',body:JSON.stringify({operation,seriesId:targetId,force})});
+    await loadMaintenanceJobs();
+  }catch(e){alert(e.message)}
+}
+async function cancelJob(id){
+  if(!confirm('确认取消这个维护任务？当前正在处理的条目可能会先完成。'))return;
+  try{await adminApi(`/maintenance-jobs/${id}/cancel`,{method:'POST'});await loadMaintenanceJobs()}catch(e){alert(e.message)}
+}
+document.querySelectorAll('[data-op]').forEach(b=>b.addEventListener('click',()=>startJob(b.dataset.op,b.dataset.force==='true')));
+loadMaintenanceJobs();setInterval(loadMaintenanceJobs,3000);
 </script>
 </body>
 </html>

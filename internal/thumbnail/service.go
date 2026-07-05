@@ -46,6 +46,17 @@ type Stats struct {
 	Bytes int64 `json:"bytes"`
 }
 
+type SeriesStats struct {
+	SourceBookID       string
+	SourceVersion      string
+	MediaType          string
+	Width              int
+	Height             int
+	Size               int
+	GenerationDuration time.Duration
+	UpdatedAt          time.Time
+}
+
 type Service struct {
 	store  *database.Store
 	root   string
@@ -84,8 +95,18 @@ func (s *Service) MaybeGenerate(book database.Book, pageNumber int, page []byte)
 }
 
 func (s *Service) Generate(ctx context.Context, book database.Book, page []byte) error {
+	return s.GenerateWithOptions(ctx, book, page, false)
+}
+
+func (s *Service) GenerateWithOptions(
+	ctx context.Context,
+	book database.Book,
+	page []byte,
+	force bool,
+) error {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
+	started := time.Now()
 
 	first, err := s.store.FirstBookInSeries(ctx, book.SeriesID)
 	if err != nil {
@@ -97,7 +118,7 @@ func (s *Service) Generate(ctx context.Context, book database.Book, page []byte)
 	version := archive.BookVersion(first)
 	if current, ok, err := s.metadata(ctx, book.SeriesID); err != nil {
 		return err
-	} else if ok && current.SourceBookID == first.ID && current.SourceVersion == version {
+	} else if !force && ok && current.SourceBookID == first.ID && current.SourceVersion == version {
 		if _, err := os.Stat(s.path(current.Path)); err == nil {
 			return nil
 		}
@@ -115,14 +136,16 @@ func (s *Service) Generate(ctx context.Context, book database.Book, page []byte)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.store.DB().ExecContext(ctx, `
 INSERT INTO series_thumbnails(
- series_id,source_book_id,source_version,path,media_type,width,height,size,created_at,updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?)
+ series_id,source_book_id,source_version,path,media_type,width,height,size,
+ generation_duration_ns,created_at,updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(series_id) DO UPDATE SET
  source_book_id=excluded.source_book_id,source_version=excluded.source_version,
  path=excluded.path,media_type=excluded.media_type,width=excluded.width,height=excluded.height,
- size=excluded.size,updated_at=excluded.updated_at`,
+ size=excluded.size,generation_duration_ns=excluded.generation_duration_ns,
+ updated_at=excluded.updated_at`,
 		book.SeriesID, first.ID, version, name, "image/jpeg", width, height,
-		len(thumbnail), now, now)
+		len(thumbnail), time.Since(started).Nanoseconds(), now, now)
 	if err != nil {
 		_ = os.Remove(s.path(name))
 		return err
@@ -132,6 +155,20 @@ ON CONFLICT(series_id) DO UPDATE SET
 		"series", book.SeriesID, "book", book.ID, "width", width, "height", height,
 	)
 	return nil
+}
+
+func (s *Service) SetGenerationDuration(
+	ctx context.Context,
+	seriesID string,
+	duration time.Duration,
+) error {
+	if duration <= 0 {
+		return nil
+	}
+	_, err := s.store.DB().ExecContext(ctx, `
+UPDATE series_thumbnails SET generation_duration_ns=? WHERE series_id=?`,
+		duration.Nanoseconds(), seriesID)
+	return err
 }
 
 func (s *Service) Get(ctx context.Context, seriesID string) (Data, bool, error) {
@@ -202,6 +239,46 @@ func (s *Service) Stats(ctx context.Context) (Stats, error) {
 	return stats, err
 }
 
+func (s *Service) SeriesStats(
+	ctx context.Context,
+	seriesID string,
+) (SeriesStats, bool, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+
+	first, err := s.store.FirstBookInSeries(ctx, seriesID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SeriesStats{}, false, nil
+	}
+	if err != nil {
+		return SeriesStats{}, false, err
+	}
+	item, ok, err := s.metadata(ctx, seriesID)
+	if err != nil || !ok {
+		return SeriesStats{}, false, err
+	}
+	if item.SourceBookID != first.ID || item.SourceVersion != archive.BookVersion(first) {
+		s.delete(ctx, seriesID, item)
+		return SeriesStats{}, false, nil
+	}
+	if _, err := os.Stat(s.path(item.Path)); errors.Is(err, fs.ErrNotExist) {
+		s.delete(ctx, seriesID, item)
+		return SeriesStats{}, false, nil
+	} else if err != nil {
+		return SeriesStats{}, false, err
+	}
+	return SeriesStats{
+		SourceBookID:       item.SourceBookID,
+		SourceVersion:      item.SourceVersion,
+		MediaType:          item.MediaType,
+		Width:              item.Width,
+		Height:             item.Height,
+		Size:               item.Size,
+		GenerationDuration: item.GenerationDuration,
+		UpdatedAt:          item.UpdatedAt,
+	}, true, nil
+}
+
 func (s *Service) Clear(ctx context.Context) error {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
@@ -216,25 +293,32 @@ func (s *Service) Clear(ctx context.Context) error {
 }
 
 type metadata struct {
-	SourceBookID  string
-	SourceVersion string
-	Path          string
-	MediaType     string
-	Width         int
-	Height        int
+	SourceBookID       string
+	SourceVersion      string
+	Path               string
+	MediaType          string
+	Width              int
+	Height             int
+	Size               int
+	GenerationDuration time.Duration
+	UpdatedAt          time.Time
 }
 
 func (s *Service) metadata(ctx context.Context, seriesID string) (metadata, bool, error) {
 	var item metadata
+	var durationNS int64
+	var updated string
 	err := s.store.DB().QueryRowContext(ctx, `
-SELECT source_book_id,source_version,path,media_type,width,height
+SELECT source_book_id,source_version,path,media_type,width,height,size,generation_duration_ns,updated_at
 FROM series_thumbnails WHERE series_id=?`, seriesID).Scan(
 		&item.SourceBookID, &item.SourceVersion, &item.Path,
-		&item.MediaType, &item.Width, &item.Height,
+		&item.MediaType, &item.Width, &item.Height, &item.Size, &durationNS, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return metadata{}, false, nil
 	}
+	item.GenerationDuration = time.Duration(durationNS)
+	item.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	return item, err == nil, err
 }
 

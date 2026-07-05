@@ -139,6 +139,7 @@ func (r *RemoteReaderAt) fetchBlock(ctx context.Context, index int64) ([]byte, e
 		request.Header.Set("User-Agent", download.UserAgent)
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 		request.Header.Set("Accept-Encoding", "identity")
+		started := time.Now()
 		response, err := r.http.Do(request)
 		if err != nil {
 			return nil, err
@@ -166,6 +167,9 @@ func (r *RemoteReaderAt) fetchBlock(ctx context.Context, index int64) ([]byte, e
 		}
 		if int64(len(data)) != expected {
 			return nil, fmt.Errorf("range request returned %d bytes, expected %d", len(data), expected)
+		}
+		if err := r.store.RecordBookDownload(ctx, r.book, expected, time.Since(started)); err != nil {
+			r.logger.Warn("record range download stats", "book", r.book.ID, "error", err)
 		}
 		r.logger.Debug("range read", "file", r.book.FileID, "offset", start, "length", expected)
 		return data, nil

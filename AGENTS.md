@@ -37,6 +37,7 @@ go build -o /tmp/fake-komga-115 ./cmd/server
 - `internal/archive`：远程 ReaderAt、ZIP/RAR 索引与按页解压。
 - `internal/cache`：Range block 和已解压页面的磁盘缓存及 LRU 式淘汰。
 - `internal/thumbnail`：阅读触发的系列封面生成和手动批量封面任务。
+- `internal/maintenance`：详情页手动封面/索引任务、进度、取消和统计触发。
 - `internal/httpserver`：管理 API、管理页面和 Komga 兼容 API。
 - `internal/id`：稳定、可逆的 Library/Series/Book ID。
 - `internal/natsort`：漫画文件和页面的自然排序。
@@ -74,7 +75,8 @@ go build -o /tmp/fake-komga-115 ./cmd/server
 
 - 保持 Komga DTO 字段名、分页结构、时间格式和 `oneshot` 语义。
 - 未实现的图片端点应返回占位图；适合空响应的集合端点返回空集合。
-- `/series/{id}`、`/book/{id}` 和 `/books/{id}` 信息页不得触发 115 或归档读取。
+- `/series/{id}`、`/book/{id}` 和 `/books/{id}` 信息页初始渲染不得触发 115 或归档读取；
+  只有用户点击手动维护按钮后才能后台生成封面或索引。
 - 普通 Book 信息页不显示封面；One-Shots 仅复用已有系列封面，不主动生成。
 - 管理页和 WebView 信息页应适配手机，并跟随系统深浅色主题。
 - 不要随意删除现有端点。新增行为需要相应集成测试。
@@ -102,6 +104,7 @@ go build -o /tmp/fake-komga-115 ./cmd/server
 - ZIP/RAR：使用本地 mock HTTP Range 服务，不依赖真实 115 账号。
 - HTTP：通过 `httptest` 验证 Mihon/Komga 所需字段。
 - 并发和缓存：优先测试重复请求合并、淘汰和版本失效。
+- 维护任务：测试默认跳过、强制重建、取消和错误摘要脱敏。
 
 ## 修改完成检查表
 

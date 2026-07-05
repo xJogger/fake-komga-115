@@ -15,6 +15,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/id"
+	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
 )
 
@@ -37,6 +38,9 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/cover-jobs", s.listCoverJobs)
 	r.Post("/cover-jobs", s.startCoverJob)
 	r.Post("/cover-jobs/{runID}/cancel", s.cancelCoverJob)
+	r.Get("/maintenance-jobs", s.listMaintenanceJobs)
+	r.Post("/maintenance-jobs", s.startMaintenanceJob)
+	r.Post("/maintenance-jobs/{runID}/cancel", s.cancelMaintenanceJob)
 	r.Get("/cache", s.cacheStats)
 	r.Delete("/cache/{cacheType}", s.clearCache)
 }
@@ -44,6 +48,11 @@ func (s *Server) adminRoutes(r chi.Router) {
 func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	account, _ := s.store.Account(r.Context())
 	libraries, series, books, comicBytes, err := s.store.Counts(r.Context())
+	if err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
+	}
+	performance, err := s.store.GlobalPerformance(r.Context())
 	if err != nil {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
@@ -58,6 +67,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		"dataDir":        s.runtime.DataDir,
 		"adminUrl":       localServiceURL(s.runtime.Host, s.runtime.Port),
 		"mihonAddresses": mihonAddresses(s.runtime.Host, s.runtime.Port),
+		"performance":    performance,
 	})
 }
 
@@ -484,6 +494,83 @@ func (s *Server) startCoverJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) cancelCoverJob(w http.ResponseWriter, r *http.Request) {
 	if err := s.covers.Cancel(r.Context(), chi.URLParam(r, "runID")); err != nil {
+		writeError(w, 404, "NOT_FOUND", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listMaintenanceJobs(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.tasks.Runs(r.Context(), maintenance.ListFilter{
+		TargetType: strings.TrimSpace(r.URL.Query().Get("targetType")),
+		TargetID:   strings.TrimSpace(r.URL.Query().Get("targetId")),
+		Limit:      intQuery(r, "limit", 20),
+	})
+	if err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, 200, runs)
+}
+
+func (s *Server) startMaintenanceJob(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Operation string `json:"operation"`
+		SeriesID  string `json:"seriesId"`
+		BookID    string `json:"bookId"`
+		Force     bool   `json:"force"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.Operation = strings.TrimSpace(request.Operation)
+	request.SeriesID = strings.TrimSpace(request.SeriesID)
+	request.BookID = strings.TrimSpace(request.BookID)
+	var (
+		run maintenance.Run
+		err error
+	)
+	switch request.Operation {
+	case maintenance.OperationBookIndex:
+		if request.BookID == "" {
+			writeError(w, http.StatusBadRequest, "INVALID_TARGET", "bookId is required")
+			return
+		}
+		run, err = s.tasks.StartBookIndex(r.Context(), request.BookID, request.Force)
+	case maintenance.OperationSeriesIndex:
+		if request.SeriesID == "" {
+			writeError(w, http.StatusBadRequest, "INVALID_TARGET", "seriesId is required")
+			return
+		}
+		run, err = s.tasks.StartSeriesIndex(r.Context(), request.SeriesID, request.Force)
+	case maintenance.OperationSeriesThumbnail:
+		if request.SeriesID == "" {
+			writeError(w, http.StatusBadRequest, "INVALID_TARGET", "seriesId is required")
+			return
+		}
+		run, err = s.tasks.StartSeriesThumbnail(r.Context(), request.SeriesID, request.Force)
+	default:
+		writeError(w, http.StatusBadRequest, "INVALID_OPERATION", "Unknown maintenance operation.")
+		return
+	}
+	if err != nil {
+		status := http.StatusConflict
+		code := "MAINTENANCE_JOB_START_FAILED"
+		if errors.Is(err, sql.ErrNoRows) {
+			status, code = http.StatusNotFound, "NOT_FOUND"
+		} else if errors.Is(err, maintenance.ErrJobAlreadyQueued) {
+			status, code = http.StatusConflict, "JOB_ALREADY_RUNNING"
+		} else if errors.Is(err, maintenance.ErrInvalidOperation) {
+			status, code = http.StatusBadRequest, "INVALID_OPERATION"
+		}
+		writeError(w, status, code, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, run)
+}
+
+func (s *Server) cancelMaintenanceJob(w http.ResponseWriter, r *http.Request) {
+	if err := s.tasks.Cancel(r.Context(), chi.URLParam(r, "runID")); err != nil {
 		writeError(w, 404, "NOT_FOUND", err.Error())
 		return
 	}

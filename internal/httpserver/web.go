@@ -13,10 +13,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/xJogger/fake-komga-115/internal/archive"
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
 type webSeriesPage struct {
+	ID           string
 	Name         string
 	LibraryName  string
 	RelativePath string
@@ -32,6 +34,9 @@ type webSeriesPage struct {
 	InferredMax  string
 	InferredAt   string
 	InferredURL  string
+	IndexSummary string
+	CoverSummary string
+	DownloadStat string
 	Books        []webBookRow
 }
 
@@ -43,27 +48,36 @@ type webBookRow struct {
 	LastModified string
 	ReadState    string
 	PageProgress string
+	IndexStatus  string
+	DownloadStat string
 }
 
 type webBookPage struct {
-	Name         string
-	SeriesName   string
-	SeriesURL    string
-	LibraryName  string
-	RelativePath string
-	Size         string
-	Pages        string
-	MediaType    string
-	CreatedAt    string
-	LastModified string
-	ShowCover    bool
-	CoverURL     string
-	OneShot      bool
-	ReadState    string
-	HasProgress  bool
-	LastProgress string
-	MaxProgress  string
-	ProgressAt   string
+	ID            string
+	Name          string
+	SeriesName    string
+	SeriesURL     string
+	LibraryName   string
+	RelativePath  string
+	Size          string
+	Pages         string
+	MediaType     string
+	CreatedAt     string
+	LastModified  string
+	ShowCover     bool
+	CoverURL      string
+	OneShot       bool
+	ReadState     string
+	HasProgress   bool
+	LastProgress  string
+	MaxProgress   string
+	ProgressAt    string
+	IndexStatus   string
+	IndexDuration string
+	IndexUpdated  string
+	DownloadStat  string
+	DownloadBytes string
+	DownloadAt    string
 }
 
 func (s *Server) webStyles(w http.ResponseWriter, _ *http.Request) {
@@ -117,14 +131,47 @@ func (s *Server) webSeries(w http.ResponseWriter, r *http.Request) {
 		s.renderWebError(w, err)
 		return
 	}
+	indexStats, err := s.store.ArchiveIndexStatsBySeries(r.Context(), series.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
+	downloadStats, err := s.store.BookDownloadStatsBySeries(r.Context(), series.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
+	currentVersions := make(map[string]string, len(books))
 	for _, book := range books {
 		totalSize += book.Size
+		version := archive.BookVersion(book)
+		currentVersions[book.ID] = version
 		rows = append(rows, webBookRow{
 			Name: book.Name, URL: "/book/" + book.ID, Size: formatBytes(book.Size),
 			Pages: pageCountText(book.PageCount), LastModified: bookModifiedTime(book),
 			ReadState:    readStateText(readBooks[book.ID]),
 			PageProgress: pageProgressInline(pageProgresses[book.ID]),
+			IndexStatus:  indexStatusInline(indexStats[book.ID], version),
+			DownloadStat: downloadStatInline(downloadStats[book.ID]),
 		})
+	}
+	performance, err := s.store.SeriesPerformance(r.Context(), series.ID, currentVersions)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
+	coverStats, hasCoverStats, err := s.thumbs.SeriesStats(r.Context(), series.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
+	performance.HasCoverDuration = false
+	performance.CoverDuration = 0
+	performance.CoverCompletedAt = time.Time{}
+	if hasCoverStats && coverStats.GenerationDuration > 0 {
+		performance.HasCoverDuration = true
+		performance.CoverDuration = coverStats.GenerationDuration
+		performance.CoverCompletedAt = coverStats.UpdatedAt
 	}
 	latestProgress, hasLatestProgress, err := s.store.LatestBookPageProgressInSeries(r.Context(), series.ID)
 	if err != nil {
@@ -136,11 +183,14 @@ func (s *Server) webSeries(w http.ResponseWriter, r *http.Request) {
 		modified = *series.FileModifiedAt
 	}
 	page := webSeriesPage{
-		Name: series.Name, LibraryName: library.Name, RelativePath: series.RelativePath,
+		ID: series.ID, Name: series.Name, LibraryName: library.Name, RelativePath: series.RelativePath,
 		CoverURL:   "/api/v1/series/" + series.ID + "/thumbnail",
 		BooksCount: len(books), TotalSize: formatBytes(totalSize),
 		CreatedAt: webTime(series.CreatedAt), LastModified: webTime(modified),
 		OneShot: series.OneShot, ReadProgress: seriesReadProgressText(readProgress), Books: rows,
+		IndexSummary: seriesIndexSummary(performance),
+		CoverSummary: seriesCoverSummary(performance),
+		DownloadStat: seriesDownloadSummary(performance),
 	}
 	if hasLatestProgress {
 		page.HasInferred = true
@@ -182,6 +232,16 @@ func (s *Server) webBook(w http.ResponseWriter, r *http.Request) {
 		s.renderWebError(w, err)
 		return
 	}
+	indexStats, hasIndexStats, err := s.store.ArchiveIndexStats(r.Context(), book.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
+	downloadStats, hasDownloadStats, err := s.store.BookDownloadStats(r.Context(), book.ID)
+	if err != nil {
+		s.renderWebError(w, err)
+		return
+	}
 	created := book.CreatedAt
 	if book.FileCreatedAt != nil {
 		created = *book.FileCreatedAt
@@ -191,13 +251,30 @@ func (s *Server) webBook(w http.ResponseWriter, r *http.Request) {
 		modified = *book.FileModifiedAt
 	}
 	page := webBookPage{
-		Name: book.Name, SeriesName: series.Name, SeriesURL: "/series/" + series.ID,
+		ID: book.ID, Name: book.Name, SeriesName: series.Name, SeriesURL: "/series/" + series.ID,
 		LibraryName: library.Name, RelativePath: webBookPath(series, book),
 		Size: formatBytes(book.Size), Pages: pageCountText(book.PageCount),
 		MediaType: webArchiveType(book.Name), CreatedAt: webTime(created),
 		LastModified: webTime(modified), ShowCover: series.OneShot,
 		CoverURL: "/api/v1/series/" + series.ID + "/thumbnail", OneShot: series.OneShot,
-		ReadState: readStateText(completed),
+		ReadState:    readStateText(completed),
+		IndexStatus:  "尚未建立当前文件版本索引",
+		DownloadStat: "尚无真实 Range 下载统计",
+	}
+	currentVersion := archive.BookVersion(book)
+	if hasIndexStats && indexStats.Version == currentVersion {
+		page.IndexStatus = fmt.Sprintf("已建立，%d 页", indexStats.PageCount)
+		if indexStats.HasDuration {
+			page.IndexDuration = formatDuration(indexStats.Duration)
+		}
+		page.IndexUpdated = webTime(indexStats.CompletedAt)
+	} else if hasIndexStats {
+		page.IndexStatus = "已有旧文件版本索引，打开页面列表或手动生成后会更新"
+	}
+	if hasDownloadStats && downloadStats.HasDownload {
+		page.DownloadStat = formatSpeed(downloadStats.Bytes, downloadStats.Duration)
+		page.DownloadBytes = formatBytes(downloadStats.Bytes)
+		page.DownloadAt = webTime(downloadStats.UpdatedAt)
 	}
 	if hasPageProgress {
 		page.HasProgress = true
@@ -282,6 +359,61 @@ func pageProgressInline(progress database.BookPageProgress) string {
 	)
 }
 
+func indexStatusInline(stats database.ArchiveIndexStats, currentVersion string) string {
+	if stats.BookID == "" {
+		return "索引：未建立"
+	}
+	if stats.Version != currentVersion {
+		return "索引：旧版本"
+	}
+	if stats.HasDuration {
+		return fmt.Sprintf("索引：%d 页，耗时 %s", stats.PageCount, formatDuration(stats.Duration))
+	}
+	return fmt.Sprintf("索引：%d 页", stats.PageCount)
+}
+
+func downloadStatInline(stats database.DownloadStats) string {
+	if !stats.HasDownload {
+		return ""
+	}
+	return "真实下载：" + formatSpeed(stats.Bytes, stats.Duration)
+}
+
+func seriesIndexSummary(stats database.SeriesPerformanceStats) string {
+	base := fmt.Sprintf("当前版本已建立 %d / %d 本", stats.IndexedBooksCount, stats.BooksCount)
+	if stats.IndexDurationCount > 0 {
+		base += "，平均耗时 " + formatDuration(stats.IndexAverage)
+	}
+	if !stats.IndexLatestAt.IsZero() {
+		base += "，最近完成 " + webTime(stats.IndexLatestAt)
+	}
+	return base
+}
+
+func seriesCoverSummary(stats database.SeriesPerformanceStats) string {
+	if !stats.HasCoverDuration {
+		return "尚无系列封面生成耗时统计"
+	}
+	out := "最近生成耗时 " + formatDuration(stats.CoverDuration)
+	if !stats.CoverCompletedAt.IsZero() {
+		out += "，完成于 " + webTime(stats.CoverCompletedAt)
+	}
+	return out
+}
+
+func seriesDownloadSummary(stats database.SeriesPerformanceStats) string {
+	if !stats.HasDownload {
+		return "尚无真实 Range 下载统计"
+	}
+	out := formatSpeed(stats.DownloadBytes, stats.DownloadDuration) +
+		"（累计 " + formatBytes(stats.DownloadBytes) + "，" +
+		strconv.FormatInt(stats.DownloadSamples, 10) + " 次 Range）"
+	if !stats.DownloadLatestAt.IsZero() {
+		out += "，最近 " + webTime(stats.DownloadLatestAt)
+	}
+	return out
+}
+
 func inferredProgressText(bookName string, pageNumber, pageCount int) string {
 	return bookName + " · " + pageNumberText(pageNumber, pageCount)
 }
@@ -298,6 +430,33 @@ func formatNumberSort(value float64) string {
 		return strconv.FormatInt(int64(value), 10)
 	}
 	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+func formatDuration(value time.Duration) string {
+	if value <= 0 {
+		return "0 ms"
+	}
+	if value < time.Second {
+		ms := float64(value) / float64(time.Millisecond)
+		if ms < 10 {
+			return fmt.Sprintf("%.1f ms", ms)
+		}
+		return fmt.Sprintf("%.0f ms", ms)
+	}
+	if value < time.Minute {
+		return fmt.Sprintf("%.2f s", float64(value)/float64(time.Second))
+	}
+	minutes := int(value / time.Minute)
+	seconds := int((value % time.Minute) / time.Second)
+	return fmt.Sprintf("%d 分 %d 秒", minutes, seconds)
+}
+
+func formatSpeed(bytes int64, duration time.Duration) string {
+	if bytes <= 0 || duration <= 0 {
+		return "尚无统计"
+	}
+	mbps := (float64(bytes) / 1024 / 1024) / duration.Seconds()
+	return fmt.Sprintf("%.2f MB/s", mbps)
 }
 
 func bookModifiedTime(book database.Book) string {

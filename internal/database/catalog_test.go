@@ -243,6 +243,69 @@ INSERT INTO books(
 	}
 }
 
+func TestPerformanceStatsRecordIndexAndDownloads(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "library", Name: "Library", RootCID: "root", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.DB().Exec(`
+INSERT INTO series(id,library_id,cid,name,relative_path,created_at,updated_at,seen_scan_id)
+VALUES('series','library','series-cid','Series','Series',?,?,'scan');
+INSERT INTO books(
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
+ number_sort,created_at,updated_at,seen_scan_id
+) VALUES('book','series','library','file','series-cid','Book.cbz',1024,'pick','sha',1,?,?,'scan')`,
+		now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	book, err := store.BookByID(ctx, "book")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordArchiveIndexBuild(
+		ctx, book.ID, "version", "[]", 12, 1500*time.Millisecond,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordBookDownload(ctx, book, 4<<20, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordBookDownload(ctx, book, 2<<20, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	index, ok, err := store.ArchiveIndexStats(ctx, book.ID)
+	if err != nil || !ok {
+		t.Fatalf("index stats ok=%v err=%v", ok, err)
+	}
+	if index.PageCount != 12 || index.Duration != 1500*time.Millisecond {
+		t.Fatalf("index stats: %#v", index)
+	}
+	download, ok, err := store.BookDownloadStats(ctx, book.ID)
+	if err != nil || !ok {
+		t.Fatalf("download stats ok=%v err=%v", ok, err)
+	}
+	if download.Bytes != 6<<20 || download.Duration != 3*time.Second || download.Samples != 2 {
+		t.Fatalf("download stats: %#v", download)
+	}
+	global, err := store.GlobalPerformance(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if global.IndexCount != 1 || global.IndexAverageDurationNs != int64(1500*time.Millisecond) ||
+		global.DownloadBytes != 6<<20 || global.DownloadDurationNs != int64(3*time.Second) ||
+		global.DownloadSamples != 2 {
+		t.Fatalf("global performance: %#v", global)
+	}
+}
+
 type catalogBookTime struct {
 	created  string
 	modified string

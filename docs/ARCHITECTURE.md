@@ -12,7 +12,8 @@ internal/httpserver
        ├── 115 Open API ───────────────── internal/oneonefive
        ├── remote ZIP/RAR reader ──────── internal/archive
        ├── range/page cache ───────────── internal/cache
-       └── cover service and jobs ─────── internal/thumbnail
+       ├── cover service and jobs ─────── internal/thumbnail
+       └── detail maintenance jobs ────── internal/maintenance
 ```
 
 服务启动时只打开 SQLite、初始化组件并启动扫描调度器。漫画内容不会在启动或扫描
@@ -39,8 +40,8 @@ Book metadata
 - `--version`
 
 `internal/app.New` 依次创建 Store、Cache Manager、115 Client、Scanner、Archive
-Service、Thumbnail Service、Thumbnail Batch Manager 和 HTTP Server。关闭时先
-停止封面任务和扫描上下文，再关闭数据库。
+Service、Thumbnail Service、Thumbnail Batch Manager、Maintenance Manager 和 HTTP
+Server。关闭时先停止详情页维护任务、封面任务和扫描上下文，再关闭数据库。
 
 Windows 未指定数据目录时使用 `%LOCALAPPDATA%\fake-komga-115\data`，并默认在
 TCP 监听成功后打开本机管理页。Linux 和 macOS 仍默认使用 `./data` 且不主动打开
@@ -62,11 +63,13 @@ TCP 监听成功后打开本机管理页。Linux 和 macOS 仍默认使用 `./da
 - `series`：Komga Series 元数据及 `seen_scan_id`。
 - `books`：115 漫画归档文件元数据及 `seen_scan_id`。
 - `scan_series_staging` / `scan_books_staging`：模式转换的临时完整快照。
-- `zip_indexes`：ZIP 和 RAR 共用的页面索引 JSON。
-- `series_thumbnails`：生成封面的文件信息和源 Book 版本。
+- `zip_indexes`：ZIP 和 RAR 共用的页面索引 JSON、页数和最近一次成功建索引耗时。
+- `series_thumbnails`：生成封面的文件信息、源 Book 版本和最近一次生成耗时。
 - `thumbnail_runs`：手动封面任务的队列、进度、结果、错误摘要和取消标记。
 - `book_read_progress`：Mihon/Komga Tracker 同步得到的 Book 级已读状态。
 - `book_page_progress`：页面图片成功返回后推断出的最近加载页、最大加载页和页数。
+- `book_download_stats`：实际从 115 downurl 成功读取 Range 的累计字节、耗时和次数。
+- `maintenance_runs`：Series / Book 信息页手动封面和索引任务的持久化进度。
 - `downurl_cache`：短期 downurl 和 User-Agent。
 - `cache_entries`：Range/Page 磁盘缓存的大小与访问时间。
 
@@ -150,6 +153,8 @@ One-Shots 使用相同语义，并且不会按扫描写入数据库的时间排�
 7. 返回 200 表示远端不支持 Range，映射为 `ErrRangeNotSupported`。
 
 完整 downurl 只存在 SQLite 和内存中，不应出现在日志或 API 返回。
+成功从远端读取的 Range block 会按 Book 累加到 `book_download_stats`。缓存命中、
+等待同一个 inflight 下载结果和失败请求不计入真实下载速度。
 
 ## 8. ZIP 页面
 
@@ -186,12 +191,15 @@ RAR 使用 `rardecode/v2` 和一个只暴露单个远程 `archive.rar` 的 `fs.F
 ### Archive index
 
 保存在 SQLite，按 `BookVersion` 失效。`BookVersion` 包含 File ID、格式、Size、
-SHA1 和修改时间。
+SHA1 和修改时间。首次建立或强制重建成功时记录本次索引耗时；直接命中已有索引
+不会更新耗时。
 
 ### Thumbnail
 
 用户请求 Series 第一本 Book 的第一页后异步生成。输入像素数有限制，输出 JPEG
 质量 75，最长边 300px。数据库记录源 Book 和版本，源变化后自动失效。
+成功生成时记录最近一次封面生成耗时。阅读触发的自动封面只统计压缩写入阶段；
+手动详情页任务和管理页批量任务会把读取第一页到写入封面的总耗时写回该字段。
 
 管理页也可以按 Library 启动后台封面任务：
 
@@ -235,13 +243,34 @@ Mihon 的 Komga Tracker 使用 `/api/v2/series/{seriesId}/read-progress/tachiyom
 请求，可能被 Mihon 预读推进，因此不能用于自动标记 Book 已读，也不能反向恢复 Mihon
 本地的页码位置。
 
+### 详情页维护任务和性能统计
+
+`internal/maintenance` 提供一个全局串行 worker，处理 Series / Book 信息页发起的
+维护任务：
+
+- `book_index`：为当前 Book 建立归档索引。
+- `series_index`：为当前 Series 的全部 Book 建立归档索引。
+- `series_thumbnail`：用当前 Series 第一本 Book 的第一页生成系列封面。
+
+默认模式会跳过当前文件版本已有的索引或有效封面；强制模式会重新读取并覆盖。
+强制按钮在前端使用警示样式和二次确认。任务进度写入 `maintenance_runs`，包括
+总数、已处理、生成、跳过、失败、当前条目、有限错误摘要和取消标记。取消不会主动
+中断当前正在处理的条目，而是在条目结束后尽快停止后续条目；服务重启会把未完成
+任务标记为失败。
+
+Series 信息页显示当前版本已建索引数量、平均索引耗时、最近索引完成时间、系列封面
+生成耗时和该 Series 下真实 Range 下载平均速度。Book 信息页显示当前 Book 的索引
+状态、索引耗时和真实 Range 下载平均速度。管理页状态区域只显示全局平均索引耗时、
+平均封面耗时和真实 Range 下载平均速度。
+
 ## 11. HTTP 层
 
 路由分为：
 
 - `/admin`：内嵌管理页面。
 - `/series/{id}`、`/book/{id}`、`/books/{id}`：Mihon WebView 使用的本地信息页。
-- `/admin/api/*`：账号、Library、设置、扫描、封面任务和缓存管理。
+- `/admin/api/*`：账号、Library、设置、扫描、封面任务、维护任务和缓存管理。
+- `/admin/api/maintenance-jobs`：详情页手动封面/索引维护任务的创建、查询和取消。
 - `/api/v1/*`：Komga 兼容的 Library、Series、Book、Pages 和图片端点。
 - `/api/v2/series/{id}/read-progress/tachiyomi`：Mihon 所需的简化阅读进度端点。
 - `/health`：健康检查。
@@ -249,12 +278,13 @@ Mihon 的 Komga Tracker 使用 `/api/v2/series/{seriesId}/read-progress/tachiyom
 Komga API 是有意裁剪的兼容层。集合、元数据和分页字段以 Mihon 实际需要为准。
 未实现的缩略图返回占位图；collection/readlist 等返回空集合。
 
-WebView 信息页只查询 SQLite，并通过现有 Series thumbnail 端点显示已缓存封面。
-普通 Book 页面不显示封面，One-Shots Book 页面可以显示已有封面；任何信息页都不
-触发 downurl、归档索引或页面读取。Series / Book 信息页会显示 Mihon 同步的卷级
+WebView 信息页初始渲染只查询 SQLite，并通过现有 Series thumbnail 端点显示已缓存
+封面。普通 Book 页面不显示封面，One-Shots Book 页面可以显示已有封面；打开信息页
+本身不触发 downurl、归档索引或页面读取。只有用户点击手动维护按钮后，后台任务才会
+按需读取归档索引或系列第一本第一页。Series / Book 信息页会显示 Mihon 同步的卷级
 已读状态，以及从页面图片请求推断出的最近加载页和最大加载页。该推断页码可能包含
-Mihon 预读页面，只用于展示，不影响 Tracker 的已读状态。浏览器路由的 404 返回
-自适应 HTML，API 路由的 404 仍保持 JSON。
+Mihon 预读页面，只用于展示，不影响 Tracker 的已读状态。浏览器路由的 404 返回自适应
+HTML，API 路由的 404 仍保持 JSON。
 
 ## 12. 错误映射
 
@@ -275,6 +305,7 @@ Mihon 预读页面，只用于展示，不影响 Tracker 的已读状态。浏�
 - `internal/httpserver/server_integration_test.go` 验证 Mihon/Komga 合同。
 - `internal/scanner/manager_test.go` 验证 One-Shots 和事务式模式转换。
 - `internal/thumbnail/batch_test.go` 验证最新 N 选择、跳过、失败继续和取消。
+- `internal/maintenance/manager_test.go` 验证详情页维护任务的生成、跳过和取消。
 - `internal/database/migrations_test.go` 从旧 schema 验证升级。
 - `internal/cache`、`internal/id`、`internal/natsort` 和 `internal/thumbnail` 有单元测试。
 
@@ -290,7 +321,7 @@ README、LICENSE 一起打包，最后生成 `SHA256SUMS` 并创建 GitHub Relea
 
 `.github/workflows/docker.yml` 使用 Docker Buildx 构建 `linux/amd64` 和
 `linux/arm64` 多架构镜像，并推送到 `blacktal/fake-komga-115`。镜像标签包括
-`latest`、原始 Git Tag（如 `v0.1.8`）、不带 `v` 的完整语义版本（如 `0.1.8`）
+`latest`、原始 Git Tag（如 `v0.1.10`）、不带 `v` 的完整语义版本（如 `0.1.10`）
 以及 minor 标签（如 `0.1`）。Docker Hub 凭据只来自 GitHub Actions secrets，
 不要写入仓库。
 

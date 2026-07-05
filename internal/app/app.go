@@ -15,6 +15,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/httpserver"
+	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
@@ -32,6 +33,7 @@ type App struct {
 	store   *database.Store
 	scanner *scanner.Manager
 	covers  *thumbnail.BatchManager
+	tasks   *maintenance.Manager
 	archive *archive.Service
 	logger  *slog.Logger
 }
@@ -72,9 +74,12 @@ func New(_ context.Context, options Options) (*App, error) {
 	coverManager := thumbnail.NewBatchManager(
 		store, archiveService, thumbnailService, options.Logger,
 	)
+	maintenanceManager := maintenance.New(
+		store, archiveService, thumbnailService, options.Logger,
+	)
 	handler := httpserver.New(
 		store, client, scanManager, cacheManager, archiveService, thumbnailService,
-		coverManager, httpserver.RuntimeInfo{
+		coverManager, maintenanceManager, httpserver.RuntimeInfo{
 			DataDir: dataDir,
 			Host:    options.Host,
 			Port:    options.Port,
@@ -88,7 +93,7 @@ func New(_ context.Context, options Options) (*App, error) {
 	}
 	return &App{
 		server: server, store: store, scanner: scanManager, covers: coverManager,
-		archive: archiveService, logger: options.Logger,
+		tasks: maintenanceManager, archive: archiveService, logger: options.Logger,
 	}, nil
 }
 
@@ -123,6 +128,7 @@ func (a *App) Start() (<-chan error, error) {
 func (a *App) Shutdown(ctx context.Context) error { return a.server.Shutdown(ctx) }
 
 func (a *App) Close() error {
+	a.tasks.Close()
 	a.covers.Close()
 	a.scanner.Close()
 	a.archive.Close()

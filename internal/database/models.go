@@ -80,6 +80,56 @@ type BookPageProgressView struct {
 	NumberSort float64
 }
 
+type ArchiveIndexStats struct {
+	BookID        string
+	Version       string
+	PageCount     int
+	Duration      time.Duration
+	CompletedAt   time.Time
+	HasDuration   bool
+	Current       bool
+	BookName      string
+	BookNumber    float64
+	BookSeriesID  string
+	BookLibraryID string
+}
+
+type DownloadStats struct {
+	BookID      string
+	SeriesID    string
+	Bytes       int64
+	Duration    time.Duration
+	Samples     int64
+	UpdatedAt   time.Time
+	HasDownload bool
+}
+
+type SeriesPerformanceStats struct {
+	BooksCount         int
+	IndexedBooksCount  int
+	IndexAverage       time.Duration
+	IndexLatestAt      time.Time
+	IndexDurationCount int
+	CoverDuration      time.Duration
+	CoverCompletedAt   time.Time
+	HasCoverDuration   bool
+	DownloadBytes      int64
+	DownloadDuration   time.Duration
+	DownloadSamples    int64
+	DownloadLatestAt   time.Time
+	HasDownload        bool
+}
+
+type GlobalPerformanceStats struct {
+	IndexCount             int64 `json:"indexCount"`
+	IndexAverageDurationNs int64 `json:"indexAverageDurationNs"`
+	CoverCount             int64 `json:"coverCount"`
+	CoverAverageDurationNs int64 `json:"coverAverageDurationNs"`
+	DownloadBytes          int64 `json:"downloadBytes"`
+	DownloadDurationNs     int64 `json:"downloadDurationNs"`
+	DownloadSamples        int64 `json:"downloadSamples"`
+}
+
 type ScanRun struct {
 	ID              string  `json:"id"`
 	LibraryID       *string `json:"libraryId"`

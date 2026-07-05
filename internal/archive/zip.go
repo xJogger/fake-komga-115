@@ -7,7 +7,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -41,18 +40,16 @@ func NewZIPService(
 
 func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
 	version := bookVersion(book)
-	var raw string
-	err := z.store.DB().QueryRowContext(ctx,
-		`SELECT index_json FROM zip_indexes WHERE book_id=? AND version=?`, book.ID, version).Scan(&raw)
-	if err == nil {
+	if raw, ok, err := z.store.ArchiveIndexRawForVersion(ctx, book.ID, version); err != nil {
+		return nil, err
+	} else if ok {
 		var pages []PageEntry
 		if json.Unmarshal([]byte(raw), &pages) == nil {
 			return pages, nil
 		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
 	}
 
+	started := time.Now()
 	readerAt := NewRemoteReaderAt(ctx, book, z.store, z.client, z.cache, z.logger)
 	reader, err := zip.NewReader(readerAt, book.Size)
 	if err != nil {
@@ -101,14 +98,9 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = z.store.DB().ExecContext(ctx, `
-INSERT INTO zip_indexes(book_id,version,page_count,index_json,created_at,updated_at)
-VALUES(?,?,?,?,?,?)
-ON CONFLICT(book_id) DO UPDATE SET
- version=excluded.version,page_count=excluded.page_count,index_json=excluded.index_json,updated_at=excluded.updated_at`,
-		book.ID, version, len(pages), string(encoded), now, now)
-	if err != nil {
+	if err := z.store.RecordArchiveIndexBuild(
+		ctx, book.ID, version, string(encoded), len(pages), time.Since(started),
+	); err != nil {
 		return nil, err
 	}
 	z.logger.Info("zip index parsed", "book", book.ID, "pages", len(pages))
