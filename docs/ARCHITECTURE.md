@@ -321,7 +321,7 @@ README、LICENSE 一起打包，最后生成 `SHA256SUMS` 并创建 GitHub Relea
 
 `.github/workflows/docker.yml` 使用 Docker Buildx 构建 `linux/amd64` 和
 `linux/arm64` 多架构镜像，并推送到 `blacktal/fake-komga-115`。镜像标签包括
-`latest`、原始 Git Tag（如 `v0.1.10`）、不带 `v` 的完整语义版本（如 `0.1.10`）
+`latest`、原始 Git Tag（如 `v0.1.11`）、不带 `v` 的完整语义版本（如 `0.1.11`）
 以及 minor 标签（如 `0.1`）。Docker Hub 凭据只来自 GitHub Actions secrets，
 不要写入仓库。
 

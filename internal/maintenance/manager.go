@@ -300,7 +300,7 @@ FROM maintenance_runs`
 		return nil, err
 	}
 	defer rows.Close()
-	var runs []Run
+	runs := make([]Run, 0)
 	for rows.Next() {
 		run, err := scanRun(rows)
 		if err != nil {
