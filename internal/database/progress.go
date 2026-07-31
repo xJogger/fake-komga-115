@@ -7,9 +7,10 @@ import (
 
 func (s *Store) SeriesReadProgress(ctx context.Context, seriesID string) (SeriesReadProgress, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT b.number_sort, CASE WHEN p.book_id IS NULL THEN 0 ELSE 1 END AS completed
+SELECT b.number_sort, CASE WHEN p.book_id IS NULL THEN 0 ELSE 1 END AS has_progress,
+ coalesce(p.completed,0)
 FROM books b
-LEFT JOIN book_read_progress p ON p.book_id=b.id AND p.completed=1
+LEFT JOIN book_read_progress p ON p.book_id=b.id
 WHERE b.series_id=?
 ORDER BY b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC`, seriesID)
 	if err != nil {
@@ -21,25 +22,30 @@ ORDER BY b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC`, seriesID)
 	continuous := true
 	for rows.Next() {
 		var numberSort float64
-		var completed bool
-		if err := rows.Scan(&numberSort, &completed); err != nil {
+		var hasProgress, completed int
+		if err := rows.Scan(&numberSort, &hasProgress, &completed); err != nil {
 			return SeriesReadProgress{}, err
 		}
 		progress.BooksCount++
 		progress.MaxNumberSort = numberSort
-		if completed {
+		switch {
+		case hasProgress != 0 && completed != 0:
 			progress.BooksReadCount++
 			if continuous {
 				progress.LastReadContinuousNumberSort = numberSort
 			}
-		} else {
+		case hasProgress != 0:
+			progress.BooksInProgressCount++
+			continuous = false
+		default:
 			continuous = false
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return SeriesReadProgress{}, err
 	}
-	progress.BooksUnreadCount = progress.BooksCount - progress.BooksReadCount
+	progress.BooksUnreadCount = progress.BooksCount -
+		progress.BooksReadCount - progress.BooksInProgressCount
 	return progress, nil
 }
 
@@ -63,15 +69,16 @@ WHERE series_id=? AND book_id IN (
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO book_read_progress(book_id,series_id,completed,completed_at,updated_at)
-SELECT id,series_id,1,?,?
+INSERT INTO book_read_progress(book_id,series_id,completed,read_date,completed_at,updated_at)
+SELECT id,series_id,1,?,?,?
 FROM books
 WHERE series_id=? AND number_sort<=?
 ON CONFLICT(book_id) DO UPDATE SET
  series_id=excluded.series_id,
  completed=1,
  completed_at=excluded.completed_at,
- updated_at=excluded.updated_at`, now, now, seriesID, lastBookNumberSortRead); err != nil {
+ read_date=excluded.read_date,
+ updated_at=excluded.updated_at`, now, now, now, seriesID, lastBookNumberSortRead); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -96,7 +103,7 @@ SELECT book_id FROM book_read_progress WHERE series_id=? AND completed=1`, serie
 }
 
 func (s *Store) BookReadCompleted(ctx context.Context, bookID string) (bool, error) {
-	var completed bool
+	var completed int
 	err := s.db.QueryRowContext(ctx, `
 SELECT completed FROM book_read_progress WHERE book_id=?`, bookID).Scan(&completed)
 	if err != nil {
@@ -105,7 +112,120 @@ SELECT completed FROM book_read_progress WHERE book_id=?`, bookID).Scan(&complet
 		}
 		return false, err
 	}
-	return completed, nil
+	return completed != 0, nil
+}
+
+func (s *Store) BookReadProgress(
+	ctx context.Context,
+	bookID string,
+) (BookReadProgress, bool, error) {
+	var progress BookReadProgress
+	var completed int
+	var page sql.NullInt64
+	var readDate, completedAt, updatedAt sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT book_id,series_id,completed,page,read_date,completed_at,updated_at
+FROM book_read_progress WHERE book_id=?`, bookID).Scan(
+		&progress.BookID, &progress.SeriesID, &completed,
+		&page, &readDate, &completedAt, &updatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return BookReadProgress{}, false, nil
+		}
+		return BookReadProgress{}, false, err
+	}
+	progress.Completed = completed != 0
+	if page.Valid {
+		value := int(page.Int64)
+		progress.Page = &value
+	}
+	progress.ReadDate = parseNullableTime(readDate)
+	progress.CompletedAt = parseNullableTime(completedAt)
+	progress.UpdatedAt = parseTime(updatedAt.String)
+	return progress, true, nil
+}
+
+func (s *Store) BookReadProgresses(
+	ctx context.Context,
+	bookIDs []string,
+) (map[string]BookReadProgress, error) {
+	out := map[string]BookReadProgress{}
+	if len(bookIDs) == 0 {
+		return out, nil
+	}
+	query := `
+SELECT book_id,series_id,completed,page,read_date,completed_at,updated_at
+FROM book_read_progress WHERE book_id IN ` + Placeholders(len(bookIDs))
+	args := make([]any, 0, len(bookIDs))
+	for _, id := range bookIDs {
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var progress BookReadProgress
+		var completed int
+		var page sql.NullInt64
+		var readDate, completedAt, updatedAt sql.NullString
+		if err := rows.Scan(
+			&progress.BookID, &progress.SeriesID, &completed,
+			&page, &readDate, &completedAt, &updatedAt,
+		); err != nil {
+			return nil, err
+		}
+		progress.Completed = completed != 0
+		if page.Valid {
+			value := int(page.Int64)
+			progress.Page = &value
+		}
+		progress.ReadDate = parseNullableTime(readDate)
+		progress.CompletedAt = parseNullableTime(completedAt)
+		progress.UpdatedAt = parseTime(updatedAt.String)
+		out[progress.BookID] = progress
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateBookReadProgress(
+	ctx context.Context,
+	book Book,
+	completed *bool,
+	page *int,
+) error {
+	now := nowText()
+	completedValue := false
+	if completed != nil {
+		completedValue = *completed
+	}
+	completedInt := 0
+	if completedValue {
+		completedInt = 1
+	}
+	var completedAt any
+	if completedValue {
+		completedAt = now
+	}
+	var pageValue any
+	if page != nil && *page > 0 {
+		pageValue = *page
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO book_read_progress(
+ book_id,series_id,completed,page,read_date,completed_at,updated_at
+) VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(book_id) DO UPDATE SET
+ series_id=excluded.series_id,
+ completed=excluded.completed,
+ page=coalesce(excluded.page, book_read_progress.page),
+ read_date=excluded.read_date,
+ completed_at=excluded.completed_at,
+ updated_at=excluded.updated_at`,
+		book.ID, book.SeriesID, completedInt, pageValue, now, completedAt, now)
+	return err
 }
 
 func (s *Store) RecordBookPageProgress(

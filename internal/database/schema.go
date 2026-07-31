@@ -11,6 +11,13 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS client_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  allow_unauthenticated INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS provider_accounts (
   provider TEXT PRIMARY KEY,
   access_token TEXT NOT NULL DEFAULT '',
@@ -146,6 +153,8 @@ CREATE TABLE IF NOT EXISTS book_read_progress (
   book_id TEXT PRIMARY KEY,
   series_id TEXT NOT NULL,
   completed INTEGER NOT NULL DEFAULT 1,
+  page INTEGER,
+  read_date TEXT,
   completed_at TEXT,
   updated_at TEXT NOT NULL,
   FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,

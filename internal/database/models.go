@@ -65,6 +65,16 @@ type SeriesReadProgress struct {
 	MaxNumberSort                float64 `json:"maxNumberSort"`
 }
 
+type BookReadProgress struct {
+	BookID      string
+	SeriesID    string
+	Completed   bool
+	Page        *int
+	ReadDate    *time.Time
+	CompletedAt *time.Time
+	UpdatedAt   time.Time
+}
+
 type BookPageProgress struct {
 	BookID         string
 	SeriesID       string

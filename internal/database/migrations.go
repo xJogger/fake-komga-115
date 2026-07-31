@@ -6,6 +6,9 @@ import (
 )
 
 func applyMigrations(db *sql.DB) error {
+	if err := ensureClientSettingsTable(db); err != nil {
+		return err
+	}
 	if err := ensureProgressTables(db); err != nil {
 		return err
 	}
@@ -40,6 +43,18 @@ func applyMigrations(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureClientSettingsTable(db *sql.DB) error {
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS client_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  allow_unauthenticated INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+`)
+	return err
 }
 
 func ensureOperationStats(db *sql.DB) error {
@@ -100,11 +115,13 @@ CREATE INDEX IF NOT EXISTS idx_maintenance_runs_target ON maintenance_runs(targe
 }
 
 func ensureProgressTables(db *sql.DB) error {
-	_, err := db.Exec(`
+	if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS book_read_progress (
   book_id TEXT PRIMARY KEY,
   series_id TEXT NOT NULL,
   completed INTEGER NOT NULL DEFAULT 1,
+  page INTEGER,
+  read_date TEXT,
   completed_at TEXT,
   updated_at TEXT NOT NULL,
   FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
@@ -123,8 +140,16 @@ CREATE TABLE IF NOT EXISTS book_page_progress (
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_book_page_progress_series_updated ON book_page_progress(series_id, updated_at DESC);
-`)
-	return err
+`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "book_read_progress", "page", "INTEGER"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "book_read_progress", "read_date", "TEXT"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func columnExists(db *sql.DB, table, column string) (bool, error) {

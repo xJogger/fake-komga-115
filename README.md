@@ -8,11 +8,11 @@
   <img src="docs/images/readme-hero.png" alt="Mihon、fake-komga-115 与 115 云端漫画的按需读取流程" width="920">
 </p>
 
-`fake-komga-115` 是一个面向自用场景的 Komga 兼容服务。Mihon 使用 Komga
-扩展连接它，而漫画目录和 CBZ/ZIP/CBR/RAR 文件实际来自 115 Open API。
+`fake-komga-115` 是一个面向自用场景的 Komga 兼容服务。Koharia 或 Mihon 使用
+Komga 兼容源连接它，而漫画目录和 CBZ/ZIP/CBR/RAR 文件实际来自 115 Open API。
 
 ```text
-Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR 页面
+Koharia / Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR 页面
 ```
 
 它不会运行真实 Komga、挂载 115 网盘或启动时下载漫画文件。扫描只读取目录和
@@ -20,7 +20,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 翻页时才读取并解压对应图片所需的远程字节范围。
 
 > [!WARNING]
-> 当前版本是 `v0.1.11` 开发预览版。服务没有认证功能，115 Token 会明文保存在
+> 当前版本是 `v1.2.0` 开发预览版。服务没有认证功能，115 Token 会明文保存在
 > 本地 SQLite 中。仅应部署在可信局域网，不要直接暴露到公网。
 
 ## 当前功能
@@ -31,9 +31,9 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - 一个含直接 CBZ/ZIP/CBR/RAR 文件的文件夹映射为一个 Series
 - 只有子目录、没有直接漫画文件的目录不生成 Series
 - Library 可切换 One-Shots 模式，递归把每个漫画归档文件映射为独立 Series
-- 最新 Mihon Komga 扩展所需的 Series、Book、Pages、筛选和缩略图端点
-- Mihon WebView 的 Series、Book 信息页、手动维护按钮和友好 HTML 404 页面
-- Mihon/Komga Tracker 卷级阅读进度同步，并在信息页显示推断页码进度
+- 最新 Mihon Komga 扩展和 Koharia 所需的 Series、Book、Pages、筛选和缩略图端点
+- Mihon / Koharia WebView 的 Series、Book 信息页、手动维护按钮和友好 HTML 404 页面
+- Mihon/Komga Tracker 卷级阅读进度同步，Koharia 页级进度同步，并在信息页显示推断页码进度
 - 远程 ZIP central directory 解析
 - ZIP `store` 和 `deflate` 页面读取
 - RAR4/RAR5 非固实、非加密、单卷页面读取
@@ -56,7 +56,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - 115 文件上传、删除、移动或重命名
 - 真实 Komga 数据库兼容
 - 多用户权限
-- 阅读进度跨设备同步
+- Mihon 原版 Komga 扩展的页级阅读进度同步
 - OPDS、Web Reader、Bangumi 元数据
 - downurl 不支持 HTTP Range 时自动下载整包
 
@@ -67,6 +67,7 @@ Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range → ZIP/RAR
 - Docker Linux x64 / ARM64
 - macOS Intel / Apple Silicon
 - 115 Open `refresh_token`
+- Koharia
 - 支持 Komga 扩展的 Mihon
 
 ## 快速开始
@@ -90,7 +91,7 @@ Windows 默认把数据库、缓存和封面保存到：
 %LOCALAPPDATA%\fake-komga-115\data
 ```
 
-管理页会显示实际数据存储路径，以及可在 Mihon 中填写的局域网地址。发布包未进行
+管理页会显示实际数据存储路径，以及可在 Koharia / Mihon 中填写的局域网地址。发布包未进行
 代码签名，Windows SmartScreen 可能显示未知发布者提示。
 
 ### Linux / macOS：直接运行发布包
@@ -241,11 +242,11 @@ SQLite；不要把 Token 发给他人，也不要截图公开。
 管理页显示的漫画容量是已识别为 Book 的 CBZ/ZIP/CBR/RAR 文件大小之和，不包含
 目录中的其他普通文件，也不会为了统计容量读取漫画内容。
 
-Mihon 中每卷漫画的日期使用扫描时已经保存的 115 文件创建时间，而不是首次扫库
-时间；升级到该行为不需要重新扫描，只需在 Mihon 中刷新章节列表。
+Koharia / Mihon 中每卷漫画的日期使用扫描时已经保存的 115 文件创建时间，而不是
+首次扫库时间；升级到该行为不需要重新扫描，只需在客户端中刷新章节列表。
 
-Mihon 的“添加时间”使用 Series 中最新一本漫画的 115 文件创建时间排序，“更新
-时间”使用最新一本漫画的 115 文件修改时间排序，均支持最新在前和最旧在前。
+Koharia / Mihon 的“添加时间”使用 Series 中最新一本漫画的 115 文件创建时间排序，
+“更新时间”使用最新一本漫画的 115 文件修改时间排序，均支持最新在前和最旧在前。
 
 ## 目录映射
 
@@ -277,9 +278,16 @@ Library 启用 One-Shots 后会忽略上述目录映射，递归扫描根目录�
 名称保留原始文件名。切换模式后需要重新扫描；转换数据先暂存，只有扫描成功才会
 替换旧结构，失败、取消或服务重启不会删除上一次完整结构。
 
-## Mihon 配置
+## 推荐客户端与配置
 
-在 Mihon 中安装 Komga 扩展，然后设置：
+推荐客户端：
+
+- **Koharia**：推荐优先尝试。使用内置 Komga 源连接本服务，可使用 Library 筛选、
+  书库分类、结构化搜索和 Book 页级进度同步。
+- **Mihon + Komga 扩展**：兼容稳定，适合只需要基础浏览、阅读和 Komga Tracker
+  卷级同步的场景。
+
+在 Koharia 或 Mihon 的 Komga 源中设置：
 
 ```text
 Address:  http://服务器地址:25600
@@ -290,12 +298,12 @@ API Key:  留空
 
 服务整体免认证，仅适合可信局域网。不要直接暴露到公网。
 
-如果服务器有多个网卡，管理页会列出检测到的局域网地址。选择与运行 Mihon 的
-手机处于同一局域网、且能从手机访问的地址。
+如果服务器有多个网卡，管理页会列出检测到的局域网地址。选择与运行客户端的手机
+处于同一局域网、且能从手机访问的地址。
 
-## Mihon WebView 信息页
+## WebView 信息页
 
-Mihon 漫画条目和阅读界面的 WebView 按钮会打开本服务的本地信息页：
+Koharia / Mihon 漫画条目和阅读界面的 WebView 按钮会打开本服务的本地信息页：
 
 - `/series/{seriesId}`：系列封面、所属 Library、115 相对路径、容量、时间、
   阅读/索引/下载统计及 Book 列表
@@ -310,13 +318,22 @@ One-Shots Book 可以复用已经存在的系列封面。打开信息页只读�
 
 如果在 Mihon 中启用 Komga Tracker，本服务会按 Mihon 的
 `lastBookNumberSortRead` 实现标准卷级进度同步：读完某个 Book 后，Mihon 会把已读到
-的卷号同步给服务端；服务端严格以 Mihon 发来的值为准，允许进度前进或回退。这个
-同步只到 Book / Chapter 级，不包含页码。
+的卷号同步给服务端；服务端严格以 Mihon 发来的值为准，允许进度前进或回退。Mihon
+原版 Komga 扩展的同步只到 Book / Chapter 级，不包含页码。
+
+Koharia 会通过 Komga Book 进度接口把当前页码同步到服务端。本服务实现
+`PATCH /api/v1/books/{bookId}/read-progress`，并在 Book DTO 中返回
+`readProgress.completed`、`readProgress.page` 和 `readProgress.readDate`。Koharia 的
+`read_status` 筛选严格以这份真实同步进度为准：
+
+- 没有记录：`UNREAD`
+- 有页码但未完成：`IN_PROGRESS`
+- `completed=true`：`READ`
 
 服务端还会在页面图片成功返回后记录推断页码，包括最近加载页、该 Book 的最大加载
 页、总页数和更新时间，并在 Series / Book 信息页展示。这个页码来自图片加载请求，
-可能包含 Mihon 的预读页面，因此只作为“推断进度”显示，不会影响 Mihon Tracker 的
-已读状态，也不会自动把 Book 标记为已读。
+可能包含 Mihon / Koharia 的预读页面，因此只作为“推断进度”显示，不会影响 Tracker
+或 Koharia 页级同步的真实已读状态，也不会自动把 Book 标记为已读。
 
 ## 手动维护与性能统计
 
@@ -505,6 +522,7 @@ docker compose up -d
 - [115 Open API](https://www.yuque.com/115yun/open)
 - [OpenList 115 Open 驱动](https://github.com/OpenListTeam/OpenList/tree/main/drivers/115_open)
 - [Komga API](https://komga.org/docs/openapi/komga-api/)
+- [Koharia](https://github.com/Mister-album/Koharia)
 - [Mihon Komga 扩展](https://github.com/keiyoushi/extensions-source/tree/main/src/all/komga)
 - [rardecode](https://github.com/nwaples/rardecode)
 

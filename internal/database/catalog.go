@@ -11,7 +11,9 @@ import (
 type SeriesQuery struct {
 	Search     string
 	LibraryIDs []string
+	ReadStatus []string
 	OneShot    *bool
+	Empty      bool
 	Page       int
 	Size       int
 	Sort       string
@@ -21,7 +23,9 @@ type BookQuery struct {
 	Search     string
 	LibraryIDs []string
 	SeriesID   string
+	ReadStatus []string
 	OneShot    *bool
+	Empty      bool
 	Page       int
 	Size       int
 	Unpaged    bool
@@ -35,7 +39,11 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 	if q.Size <= 0 || q.Size > 500 {
 		q.Size = 20
 	}
+	if q.Empty {
+		return nil, 0, nil
+	}
 	where, args := buildFilters(q.Search, q.LibraryIDs, "", q.OneShot)
+	where, args = addReadStatusFilter(where, args, q.ReadStatus, "series")
 	var total int64
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM series s`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -106,6 +114,9 @@ func (s *Store) BooksPage(ctx context.Context, q BookQuery) ([]Book, int64, erro
 	if q.Size <= 0 || q.Size > 1000 {
 		q.Size = 20
 	}
+	if q.Empty {
+		return nil, 0, nil
+	}
 	where, args := buildBookFilters(q)
 	var total int64
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM books b`+where, args...).Scan(&total); err != nil {
@@ -116,6 +127,15 @@ func (s *Store) BooksPage(ctx context.Context, q BookQuery) ([]Book, int64, erro
 	switch {
 	case strings.Contains(sortValue, "random"):
 		order = "RANDOM()"
+	case strings.HasPrefix(sortValue, "lastmodifieddate"):
+		order = "COALESCE(b.file_modified_at,b.updated_at) " +
+			sortDirection(sortValue) + ",b.name COLLATE NOCASE ASC,b.id ASC"
+	case strings.HasPrefix(sortValue, "createddate"):
+		order = "COALESCE(b.file_created_at,b.created_at) " +
+			sortDirection(sortValue) + ",b.name COLLATE NOCASE ASC,b.id ASC"
+	case strings.HasPrefix(sortValue, "metadata.title"):
+		order = "b.name COLLATE NOCASE " +
+			sortDirection(sortValue) + ",b.id " + sortDirection(sortValue)
 	case strings.Contains(sortValue, "name,desc"):
 		order = "b.name COLLATE NOCASE DESC,b.id DESC"
 	case strings.Contains(sortValue, "name,asc"):
@@ -242,6 +262,95 @@ func buildFilters(search string, libraries []string, alias string, oneShot *bool
 	return " WHERE " + strings.Join(clauses, " AND "), args
 }
 
+func addReadStatusFilter(
+	where string,
+	args []any,
+	statuses []string,
+	target string,
+) (string, []any) {
+	conditions := readStatusConditions(statuses, target)
+	if len(conditions) == 0 {
+		return where, args
+	}
+	joiner := " WHERE "
+	if strings.TrimSpace(where) != "" {
+		joiner = " AND "
+	}
+	return where + joiner + "(" + strings.Join(conditions, " OR ") + ")", args
+}
+
+func readStatusConditions(statuses []string, target string) []string {
+	seen := map[string]bool{}
+	var conditions []string
+	for _, raw := range statuses {
+		status := strings.ToUpper(strings.TrimSpace(raw))
+		if seen[status] {
+			continue
+		}
+		seen[status] = true
+		switch target {
+		case "series":
+			switch status {
+			case "READ":
+				conditions = append(conditions, "("+seriesReadCondition()+")")
+			case "IN_PROGRESS":
+				conditions = append(conditions, "("+seriesInProgressCondition()+")")
+			case "UNREAD":
+				conditions = append(conditions, "("+seriesUnreadCondition()+")")
+			}
+		case "book":
+			switch status {
+			case "READ":
+				conditions = append(conditions,
+					`EXISTS (SELECT 1 FROM book_read_progress p WHERE p.book_id=b.id AND p.completed=1)`)
+			case "IN_PROGRESS":
+				conditions = append(conditions,
+					`EXISTS (SELECT 1 FROM book_read_progress p WHERE p.book_id=b.id AND p.completed=0)`)
+			case "UNREAD":
+				conditions = append(conditions,
+					`NOT EXISTS (SELECT 1 FROM book_read_progress p WHERE p.book_id=b.id)`)
+			}
+		}
+	}
+	return conditions
+}
+
+func seriesReadCondition() string {
+	return `EXISTS (SELECT 1 FROM books read_book WHERE read_book.series_id=s.id)
+AND NOT EXISTS (
+ SELECT 1 FROM books not_read_book
+ WHERE not_read_book.series_id=s.id
+ AND NOT EXISTS (
+  SELECT 1 FROM book_read_progress read_progress
+  WHERE read_progress.book_id=not_read_book.id AND read_progress.completed=1
+ )
+)`
+}
+
+func seriesInProgressCondition() string {
+	return `EXISTS (
+ SELECT 1 FROM books progressed_book
+ JOIN book_read_progress progressed ON progressed.book_id=progressed_book.id
+ WHERE progressed_book.series_id=s.id
+)
+AND EXISTS (
+ SELECT 1 FROM books incomplete_book
+ WHERE incomplete_book.series_id=s.id
+ AND NOT EXISTS (
+  SELECT 1 FROM book_read_progress completed_progress
+  WHERE completed_progress.book_id=incomplete_book.id AND completed_progress.completed=1
+ )
+)`
+}
+
+func seriesUnreadCondition() string {
+	return `NOT EXISTS (
+ SELECT 1 FROM books progressed_book
+ JOIN book_read_progress progressed ON progressed.book_id=progressed_book.id
+ WHERE progressed_book.series_id=s.id
+)`
+}
+
 func buildBookFilters(q BookQuery) (string, []any) {
 	clauses := []string{
 		"EXISTS (SELECT 1 FROM libraries enabled_library WHERE enabled_library.id=b.library_id AND enabled_library.enabled=1)",
@@ -266,6 +375,9 @@ func buildBookFilters(q BookQuery) (string, []any) {
 		clauses = append(clauses,
 			"EXISTS (SELECT 1 FROM series oneshot_series WHERE oneshot_series.id=b.series_id AND oneshot_series.one_shot=?)")
 		args = append(args, *q.OneShot)
+	}
+	if conditions := readStatusConditions(q.ReadStatus, "book"); len(conditions) > 0 {
+		clauses = append(clauses, "("+strings.Join(conditions, " OR ")+")")
 	}
 	if len(clauses) == 0 {
 		return "", args

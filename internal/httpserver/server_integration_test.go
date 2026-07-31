@@ -163,6 +163,37 @@ INSERT INTO books(
 	if len(komgaLibraries) != 1 || komgaLibraries[0]["oneshotsDirectory"] != "." {
 		t.Fatalf("unexpected Komga library: %#v", komgaLibraries)
 	}
+	var me map[string]any
+	getJSON(t, server.URL+"/api/v1/users/me", &me)
+	if me["id"] != "local" {
+		t.Fatalf("unexpected Komga user: %#v", me)
+	}
+	var clientSettings map[string]map[string]any
+	getJSON(t, server.URL+"/api/v1/client-settings/user/list", &clientSettings)
+	if len(clientSettings) != 0 {
+		t.Fatalf("fresh client settings must be empty: %#v", clientSettings)
+	}
+	response = patchJSON(t, server.URL+"/api/v1/client-settings/user", map[string]any{
+		"koharia.manga." + seriesID + ".viewerFlags": map[string]any{"value": "42"},
+		"webui.libraries": map[string]any{
+			"value": `{"` + libraryID + `":{"order":7}}`,
+		},
+	})
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("client settings PATCH status=%d", response.StatusCode)
+	}
+	getJSON(t, server.URL+"/api/v1/client-settings/user/list", &clientSettings)
+	if clientSettings["koharia.manga."+seriesID+".viewerFlags"]["value"] != "42" {
+		t.Fatalf("client settings missing Koharia value: %#v", clientSettings)
+	}
+	response = patchJSON(t, server.URL+"/api/v1/client-settings/user", map[string]any{
+		"other.token": map[string]any{"value": "secret"},
+	})
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("sensitive client setting status=%d", response.StatusCode)
+	}
 
 	var seriesPage map[string]any
 	getJSON(t, server.URL+"/api/v1/series?page=0&size=1", &seriesPage)
@@ -200,6 +231,102 @@ INSERT INTO books(
 	}
 	if bookItem["oneshot"] != true {
 		t.Fatalf("book one-shot flag missing: %#v", bookItem)
+	}
+	if bookItem["readProgress"] != nil {
+		t.Fatalf("fresh book must not have readProgress: %#v", bookItem)
+	}
+	var structuredSeriesPage map[string]any
+	response = postJSON(t, server.URL+"/api/v1/series/list?page=0&size=10&sort=metadata.titleSort,asc", map[string]any{
+		"condition": map[string]any{
+			"allOf": []any{
+				map[string]any{"deleted": map[string]any{"operator": "isFalse"}},
+				map[string]any{"anyOf": []any{
+					map[string]any{"libraryId": map[string]any{"operator": "is", "value": libraryID}},
+				}},
+				map[string]any{"oneShot": map[string]any{"operator": "isTrue"}},
+			},
+		},
+		"fullTextSearch": "One",
+	})
+	decodeResponseJSON(t, response, &structuredSeriesPage)
+	if structuredSeriesPage["totalElements"].(float64) != 1 {
+		t.Fatalf("structured series search failed: %#v", structuredSeriesPage)
+	}
+	var structuredBookPage map[string]any
+	response = postJSON(t, server.URL+"/api/v1/books/list?page=0&size=10&sort=metadata.title,asc", map[string]any{
+		"condition": map[string]any{
+			"allOf": []any{
+				map[string]any{"deleted": map[string]any{"operator": "isFalse"}},
+				map[string]any{"anyOf": []any{
+					map[string]any{"libraryId": map[string]any{"operator": "is", "value": libraryID}},
+				}},
+			},
+		},
+		"fullTextSearch": "001",
+	})
+	decodeResponseJSON(t, response, &structuredBookPage)
+	if structuredBookPage["totalElements"].(float64) != 1 {
+		t.Fatalf("structured book search failed: %#v", structuredBookPage)
+	}
+	response = postJSON(t, server.URL+"/api/v1/series/list?page=0&size=10", map[string]any{
+		"condition": map[string]any{
+			"allOf": []any{
+				map[string]any{"anyOf": []any{
+					map[string]any{"genre": map[string]any{"operator": "is", "value": "missing"}},
+				}},
+			},
+		},
+	})
+	decodeResponseJSON(t, response, &structuredSeriesPage)
+	if structuredSeriesPage["totalElements"].(float64) != 0 {
+		t.Fatalf("unsupported structured filter must return empty results: %#v", structuredSeriesPage)
+	}
+
+	response = patchJSON(t, server.URL+"/api/v1/books/"+bookID+"/read-progress", map[string]any{
+		"page": 3,
+	})
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("book page progress PATCH status=%d", response.StatusCode)
+	}
+	var bookDetail map[string]any
+	getJSON(t, server.URL+"/api/v1/books/"+bookID, &bookDetail)
+	readProgress := bookDetail["readProgress"].(map[string]any)
+	if readProgress["completed"] != false || readProgress["page"].(float64) != 3 {
+		t.Fatalf("book readProgress after page sync: %#v", readProgress)
+	}
+	getJSON(t, server.URL+"/api/v1/books?read_status=IN_PROGRESS&unpaged=true&deleted=false", &bookPage)
+	if bookPage["totalElements"].(float64) != 1 {
+		t.Fatalf("book read_status IN_PROGRESS failed: %#v", bookPage)
+	}
+	getJSON(t, server.URL+"/api/v1/books?read_status=UNREAD&unpaged=true&deleted=false", &bookPage)
+	if bookPage["totalElements"].(float64) != 0 {
+		t.Fatalf("book read_status UNREAD failed: %#v", bookPage)
+	}
+	response = postJSON(t, server.URL+"/api/v1/books/list?page=0&size=10", map[string]any{
+		"condition": map[string]any{
+			"allOf": []any{
+				map[string]any{"anyOf": []any{
+					map[string]any{"readStatus": map[string]any{"operator": "is", "value": "IN_PROGRESS"}},
+				}},
+			},
+		},
+	})
+	decodeResponseJSON(t, response, &structuredBookPage)
+	if structuredBookPage["totalElements"].(float64) != 1 {
+		t.Fatalf("structured book readStatus failed: %#v", structuredBookPage)
+	}
+	response = patchJSON(t, server.URL+"/api/v1/books/"+bookID+"/read-progress", map[string]any{
+		"page":      10,
+		"completed": true,
+	})
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("book completed progress PATCH status=%d", response.StatusCode)
+	}
+	getJSON(t, server.URL+"/api/v1/series?read_status=READ", &seriesPage)
+	if seriesPage["totalElements"].(float64) != 1 {
+		t.Fatalf("series read_status READ failed: %#v", seriesPage)
 	}
 
 	response, err = http.Get(server.URL + "/api/v1/series/" + seriesID + "/thumbnail")
@@ -362,6 +489,17 @@ func getJSON(t *testing.T, url string, target any) {
 	}
 }
 
+func decodeResponseJSON(t *testing.T, response *http.Response, target any) {
+	t.Helper()
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("%s %s status=%d", response.Request.Method, response.Request.URL, response.StatusCode)
+	}
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func getText(t *testing.T, url string, status int) string {
 	t.Helper()
 	response, err := http.Get(url)
@@ -380,12 +518,24 @@ func getText(t *testing.T, url string, status int) string {
 }
 
 func putJSON(t *testing.T, url string, value any) *http.Response {
+	return requestJSON(t, http.MethodPut, url, value)
+}
+
+func postJSON(t *testing.T, url string, value any) *http.Response {
+	return requestJSON(t, http.MethodPost, url, value)
+}
+
+func patchJSON(t *testing.T, url string, value any) *http.Response {
+	return requestJSON(t, http.MethodPatch, url, value)
+}
+
+func requestJSON(t *testing.T, method, url string, value any) *http.Response {
 	t.Helper()
 	data, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(data))
+	request, err := http.NewRequest(method, url, bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}

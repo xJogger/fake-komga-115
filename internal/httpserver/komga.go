@@ -20,18 +20,26 @@ import (
 
 func (s *Server) komgaRoutes(r chi.Router) {
 	r.Get("/libraries", s.komgaLibraries)
+	r.Get("/users/me", s.komgaMe)
+	r.Get("/client-settings/user/list", s.komgaClientSettings)
+	r.Patch("/client-settings/user", s.patchKomgaClientSettings)
 	r.Get("/series", s.komgaSeries)
+	r.Post("/series/list", s.komgaSeriesList)
 	r.Get("/series/{seriesID}", s.komgaSeriesByID)
 	r.Get("/series/{seriesID}/books", s.komgaSeriesBooks)
 	r.Get("/series/{seriesID}/thumbnail", s.komgaSeriesThumbnail)
 	r.Get("/books", s.komgaBooks)
+	r.Post("/books/list", s.komgaBooksList)
 	r.Get("/books/{bookID}", s.komgaBookByID)
+	r.Get("/books/{bookID}/read-progress", s.komgaBookReadProgress)
+	r.Patch("/books/{bookID}/read-progress", s.patchKomgaBookReadProgress)
 	r.Get("/books/{bookID}/pages", s.komgaPages)
 	r.Get("/books/{bookID}/pages/{pageNumber}", s.komgaPageImage)
 	r.Get("/books/{bookID}/pages/{pageNumber}/raw", s.komgaPageImage)
 	r.Get("/books/{bookID}/pages/{pageNumber}/thumbnail", func(w http.ResponseWriter, _ *http.Request) { s.writePlaceholder(w) })
 	r.Get("/books/{bookID}/thumbnail", func(w http.ResponseWriter, _ *http.Request) { s.writePlaceholder(w) })
 	r.Get("/collections", s.emptyPage)
+	r.Get("/collections/{id}/series", s.emptyPage)
 	r.Get("/collections/{id}/thumbnail", func(w http.ResponseWriter, _ *http.Request) { s.writePlaceholder(w) })
 	r.Get("/readlists", s.emptyPage)
 	r.Get("/readlists/{id}/thumbnail", func(w http.ResponseWriter, _ *http.Request) { s.writePlaceholder(w) })
@@ -67,17 +75,20 @@ func (s *Server) komgaLibraries(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) komgaSeries(w http.ResponseWriter, r *http.Request) {
 	page, size := intQuery(r, "page", 0), intQuery(r, "size", 20)
+	filters := legacyKomgaFilters(r, "series")
 	items, total, err := s.store.SeriesPage(r.Context(), database.SeriesQuery{
-		Search: r.URL.Query().Get("search"), LibraryIDs: listQuery(r, "library_id"),
-		OneShot: boolQuery(r, "oneshot"), Page: page, Size: size, Sort: r.URL.Query().Get("sort"),
+		Search: filters.Search, LibraryIDs: filters.LibraryIDs,
+		ReadStatus: filters.ReadStatuses, OneShot: filters.OneShot,
+		Empty: filters.Empty, Page: page, Size: size, Sort: r.URL.Query().Get("sort"),
 	})
 	if err != nil {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
 	}
-	out := make([]any, 0, len(items))
-	for _, item := range items {
-		out = append(out, seriesDTO(item))
+	out, err := s.seriesDTOs(r, items)
+	if err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
 	}
 	writeJSON(w, 200, makePage(out, page, size, total, false))
 }
@@ -92,7 +103,12 @@ func (s *Server) komgaSeriesByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
 	}
-	writeJSON(w, 200, seriesDTO(item))
+	progress, err := s.store.SeriesReadProgress(r.Context(), item.ID)
+	if err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, 200, seriesDTOWithProgress(item, progress))
 }
 
 func (s *Server) komgaSeriesBooks(w http.ResponseWriter, r *http.Request) {
@@ -106,23 +122,21 @@ func (s *Server) komgaBooks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) komgaBookPage(w http.ResponseWriter, r *http.Request, seriesID string) {
 	page, size := intQuery(r, "page", 0), intQuery(r, "size", 20)
 	unpaged := r.URL.Query().Get("unpaged") == "true"
+	filters := legacyKomgaFilters(r, "books")
 	items, total, err := s.store.BooksPage(r.Context(), database.BookQuery{
-		Search: r.URL.Query().Get("search"), LibraryIDs: listQuery(r, "library_id"),
-		SeriesID: seriesID, OneShot: boolQuery(r, "oneshot"),
-		Page: page, Size: size, Unpaged: unpaged, Sort: r.URL.Query().Get("sort"),
+		Search: filters.Search, LibraryIDs: filters.LibraryIDs,
+		ReadStatus: filters.ReadStatuses, SeriesID: seriesID, OneShot: filters.OneShot,
+		Empty: filters.Empty, Page: page, Size: size, Unpaged: unpaged,
+		Sort: r.URL.Query().Get("sort"),
 	})
 	if err != nil {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
 	}
-	out := make([]any, 0, len(items))
-	for _, item := range items {
-		series, err := s.store.SeriesByID(r.Context(), item.SeriesID)
-		if err != nil {
-			writeError(w, 500, "DATABASE_ERROR", err.Error())
-			return
-		}
-		out = append(out, bookDTO(item, series))
+	out, err := s.bookDTOs(r, items)
+	if err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
 	}
 	writeJSON(w, 200, makePage(out, page, size, total, unpaged))
 }
@@ -142,7 +156,101 @@ func (s *Server) komgaBookByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
 	}
-	writeJSON(w, 200, bookDTO(book, series))
+	progress, ok, err := s.store.BookReadProgress(r.Context(), book.ID)
+	if err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, 200, bookDTOWithProgress(book, series, progress, ok))
+}
+
+func (s *Server) seriesDTOs(r *http.Request, items []database.Series) ([]any, error) {
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		progress, err := s.store.SeriesReadProgress(r.Context(), item.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, seriesDTOWithProgress(item, progress))
+	}
+	return out, nil
+}
+
+func (s *Server) bookDTOs(r *http.Request, items []database.Book) ([]any, error) {
+	out := make([]any, 0, len(items))
+	bookIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		bookIDs = append(bookIDs, item.ID)
+	}
+	progresses, err := s.store.BookReadProgresses(r.Context(), bookIDs)
+	if err != nil {
+		return nil, err
+	}
+	seriesCache := map[string]database.Series{}
+	for _, item := range items {
+		series, ok := seriesCache[item.SeriesID]
+		if !ok {
+			series, err = s.store.SeriesByID(r.Context(), item.SeriesID)
+			if err != nil {
+				return nil, err
+			}
+			seriesCache[item.SeriesID] = series
+		}
+		progress, ok := progresses[item.ID]
+		out = append(out, bookDTOWithProgress(item, series, progress, ok))
+	}
+	return out, nil
+}
+
+func (s *Server) komgaBookReadProgress(w http.ResponseWriter, r *http.Request) {
+	book, err := s.store.BookByID(r.Context(), chi.URLParam(r, "bookID"))
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "Book not found.")
+		return
+	}
+	progress, ok, err := s.store.BookReadProgress(r.Context(), book.ID)
+	if err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
+	}
+	if !ok {
+		writeJSON(w, 200, nil)
+		return
+	}
+	writeJSON(w, 200, bookReadProgressDTO(progress))
+}
+
+func (s *Server) patchKomgaBookReadProgress(w http.ResponseWriter, r *http.Request) {
+	book, err := s.store.BookByID(r.Context(), chi.URLParam(r, "bookID"))
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "Book not found.")
+		return
+	}
+	var request struct {
+		Completed *bool `json:"completed"`
+		Page      *int  `json:"page"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	if request.Completed == nil && request.Page == nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PROGRESS", "completed or page is required.")
+		return
+	}
+	if request.Page != nil && *request.Page < 1 {
+		writeError(w, http.StatusBadRequest, "INVALID_PROGRESS", "page must be greater than zero.")
+		return
+	}
+	if err := s.store.UpdateBookReadProgress(
+		r.Context(), book, request.Completed, request.Page,
+	); err != nil {
+		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) komgaPages(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +375,18 @@ func (s *Server) putSeriesProgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func seriesDTO(item database.Series) map[string]any {
+	progress := database.SeriesReadProgress{
+		BooksCount:       item.BooksCount,
+		BooksUnreadCount: item.BooksCount,
+		MaxNumberSort:    float64(item.BooksCount),
+	}
+	return seriesDTOWithProgress(item, progress)
+}
+
+func seriesDTOWithProgress(
+	item database.Series,
+	progress database.SeriesReadProgress,
+) map[string]any {
 	created, updated := item.CreatedAt.UTC().Format(time.RFC3339), item.UpdatedAt.UTC().Format(time.RFC3339)
 	fileModified := updated
 	if item.FileModifiedAt != nil {
@@ -275,8 +395,9 @@ func seriesDTO(item database.Series) map[string]any {
 	return map[string]any{
 		"id": item.ID, "libraryId": item.LibraryID, "name": item.Name, "url": "",
 		"created": created, "lastModified": updated, "fileLastModified": fileModified,
-		"booksCount": item.BooksCount, "booksReadCount": 0,
-		"booksUnreadCount": item.BooksCount, "booksInProgressCount": 0,
+		"booksCount": item.BooksCount, "booksReadCount": progress.BooksReadCount,
+		"booksUnreadCount":     progress.BooksUnreadCount,
+		"booksInProgressCount": progress.BooksInProgressCount,
 		"metadata": map[string]any{
 			"status": "ONGOING", "statusLock": false,
 			"created": created, "lastModified": updated,
@@ -298,6 +419,15 @@ func seriesDTO(item database.Series) map[string]any {
 }
 
 func bookDTO(item database.Book, series database.Series) map[string]any {
+	return bookDTOWithProgress(item, series, database.BookReadProgress{}, false)
+}
+
+func bookDTOWithProgress(
+	item database.Book,
+	series database.Series,
+	progress database.BookReadProgress,
+	hasProgress bool,
+) map[string]any {
 	createdAt := item.CreatedAt
 	if item.FileCreatedAt != nil {
 		createdAt = *item.FileCreatedAt
@@ -325,7 +455,29 @@ func bookDTO(item database.Book, series database.Series) map[string]any {
 			"tags": []string{}, "tagsLock": false, "isbn": "", "isbnLock": false,
 			"links": []any{}, "linksLock": false, "created": created, "lastModified": updated,
 		},
-		"readProgress": nil, "deleted": false, "oneshot": series.OneShot,
+		"readProgress": func() any {
+			if !hasProgress {
+				return nil
+			}
+			return bookReadProgressDTO(progress)
+		}(),
+		"deleted": false, "oneshot": series.OneShot,
+	}
+}
+
+func bookReadProgressDTO(progress database.BookReadProgress) map[string]any {
+	var page any
+	if progress.Page != nil {
+		page = *progress.Page
+	}
+	var readDate any
+	if progress.ReadDate != nil {
+		readDate = progress.ReadDate.UTC().Format(time.RFC3339)
+	}
+	return map[string]any{
+		"completed": progress.Completed,
+		"page":      page,
+		"readDate":  readDate,
 	}
 }
 
