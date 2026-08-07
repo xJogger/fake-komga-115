@@ -83,6 +83,7 @@ func (s *Server) Handler() http.Handler { return s.router }
 func (s *Server) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
+	r.Use(s.corsMiddleware)
 	r.Use(s.requestLogger)
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

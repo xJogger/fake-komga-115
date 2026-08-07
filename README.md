@@ -20,7 +20,7 @@ Koharia / Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range �
 翻页时才读取并解压对应图片所需的远程字节范围。
 
 > [!WARNING]
-> 当前版本是 `v1.2.0` 开发预览版。服务没有认证功能，115 Token 会明文保存在
+> 当前版本是 `v1.3.0` 开发预览版。服务没有认证功能，115 Token 会明文保存在
 > 本地 SQLite 中。仅应部署在可信局域网，不要直接暴露到公网。
 
 ## 当前功能
@@ -32,8 +32,9 @@ Koharia / Mihon → fake-komga-115 → 115 Open API → downurl → HTTP Range �
 - 只有子目录、没有直接漫画文件的目录不生成 Series
 - Library 可切换 One-Shots 模式，递归把每个漫画归档文件映射为独立 Series
 - 最新 Mihon Komga 扩展和 Koharia 所需的 Series、Book、Pages、筛选和缩略图端点
+- 独立纯前端网页阅读器所需的 CORS、能力探测、上一卷/下一卷和单本进度删除端点
 - Mihon / Koharia WebView 的 Series、Book 信息页、手动维护按钮和友好 HTML 404 页面
-- Mihon/Komga Tracker 卷级阅读进度同步，Koharia 页级进度同步，并在信息页显示推断页码进度
+- Mihon/Komga Tracker 卷级阅读进度同步，Koharia / Web 前端页级进度同步，并在信息页显示推断页码进度
 - 远程 ZIP central directory 解析
 - ZIP `store` 和 `deflate` 页面读取
 - RAR4/RAR5 非固实、非加密、单卷页面读取
@@ -301,6 +302,19 @@ API Key:  留空
 如果服务器有多个网卡，管理页会列出检测到的局域网地址。选择与运行客户端的手机
 处于同一局域网、且能从手机访问的地址。
 
+### 独立网页阅读器
+
+本服务也可以作为纯前端网页漫画阅读器的后端。前端可以部署在 Cloudflare Pages、
+GitHub Pages 或 Cloudflare Workers Static Assets 上，由用户浏览器直接请求局域网内的
+`fake-komga-115`。
+
+跨域访问默认关闭；如需使用外部前端，需要先在管理页“允许的 Web 前端 Origin（CORS）”
+中按行填写前端 Origin，例如 `https://reader.example.pages.dev`。CORS 只对 `/api/v1` 和
+`/api/v2` 生效，管理 API 不对跨域前端开放。后端同时支持浏览器访问本地网络所需的
+`Access-Control-Allow-Private-Network` 预检响应头。
+
+给网页客户端或 AI Agent 的接口契约见 [docs/WEB_CLIENT_API.md](docs/WEB_CLIENT_API.md)。
+
 ## WebView 信息页
 
 Koharia / Mihon 漫画条目和阅读界面的 WebView 按钮会打开本服务的本地信息页：
@@ -321,9 +335,9 @@ One-Shots Book 可以复用已经存在的系列封面。打开信息页只读�
 的卷号同步给服务端；服务端严格以 Mihon 发来的值为准，允许进度前进或回退。Mihon
 原版 Komga 扩展的同步只到 Book / Chapter 级，不包含页码。
 
-Koharia 会通过 Komga Book 进度接口把当前页码同步到服务端。本服务实现
-`PATCH /api/v1/books/{bookId}/read-progress`，并在 Book DTO 中返回
-`readProgress.completed`、`readProgress.page` 和 `readProgress.readDate`。Koharia 的
+Koharia 和外部 Web 前端可以通过 Komga Book 进度接口把当前页码同步到服务端。
+本服务实现 `GET/PATCH/DELETE /api/v1/books/{bookId}/read-progress`，并在 Book DTO
+中返回 `readProgress.completed`、`readProgress.page` 和 `readProgress.readDate`。
 `read_status` 筛选严格以这份真实同步进度为准：
 
 - 没有记录：`UNREAD`
@@ -515,6 +529,8 @@ docker compose up -d
 - [AGENTS.md](AGENTS.md)：给 AI 编程助手和贡献者的开发约束与修改清单。
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：架构、数据模型、扫描事务、
   远程归档读取和兼容 API 的技术说明。
+- [docs/WEB_CLIENT_API.md](docs/WEB_CLIENT_API.md)：给纯前端网页阅读器和 AI Agent 的
+  Komga 兼容 API、CORS 和阅读器调用约定。
 - [SECURITY.md](SECURITY.md)：安全边界和漏洞报告方式。
 
 ## 参考

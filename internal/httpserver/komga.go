@@ -15,10 +15,12 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/xJogger/fake-komga-115/internal/archive"
+	"github.com/xJogger/fake-komga-115/internal/buildinfo"
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
 func (s *Server) komgaRoutes(r chi.Router) {
+	r.Get("/server/capabilities", s.komgaCapabilities)
 	r.Get("/libraries", s.komgaLibraries)
 	r.Get("/users/me", s.komgaMe)
 	r.Get("/client-settings/user/list", s.komgaClientSettings)
@@ -31,8 +33,11 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Get("/books", s.komgaBooks)
 	r.Post("/books/list", s.komgaBooksList)
 	r.Get("/books/{bookID}", s.komgaBookByID)
+	r.Get("/books/{bookID}/next", s.komgaBookNext)
+	r.Get("/books/{bookID}/previous", s.komgaBookPrevious)
 	r.Get("/books/{bookID}/read-progress", s.komgaBookReadProgress)
 	r.Patch("/books/{bookID}/read-progress", s.patchKomgaBookReadProgress)
+	r.Delete("/books/{bookID}/read-progress", s.deleteKomgaBookReadProgress)
 	r.Get("/books/{bookID}/pages", s.komgaPages)
 	r.Get("/books/{bookID}/pages/{pageNumber}", s.komgaPageImage)
 	r.Get("/books/{bookID}/pages/{pageNumber}/raw", s.komgaPageImage)
@@ -47,6 +52,30 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Get("/tags", s.emptyList)
 	r.Get("/publishers", s.emptyList)
 	r.Get("/authors", s.emptyList)
+}
+
+func (s *Server) komgaCapabilities(w http.ResponseWriter, r *http.Request) {
+	origins, _ := s.allowedCORSOrigins(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":           "fake-komga-115",
+		"version":        buildinfo.Version,
+		"apiBasePath":    "/api/v1",
+		"compatibility":  "komga-partial",
+		"corsConfigured": len(origins) > 0,
+		"features": map[string]bool{
+			"libraries":                  true,
+			"seriesList":                 true,
+			"booksList":                  true,
+			"bookPages":                  true,
+			"pageImages":                 true,
+			"seriesThumbnails":           true,
+			"pageReadProgress":           true,
+			"deleteBookReadProgress":     true,
+			"bookSiblingNavigation":      true,
+			"clientSettings":             true,
+			"privateNetworkAccessHeader": true,
+		},
+	})
 }
 
 func (s *Server) komgaLibraries(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +231,47 @@ func (s *Server) bookDTOs(r *http.Request, items []database.Book) ([]any, error)
 	return out, nil
 }
 
+func (s *Server) komgaBookNext(w http.ResponseWriter, r *http.Request) {
+	s.komgaBookSibling(w, r, true)
+}
+
+func (s *Server) komgaBookPrevious(w http.ResponseWriter, r *http.Request) {
+	s.komgaBookSibling(w, r, false)
+}
+
+func (s *Server) komgaBookSibling(w http.ResponseWriter, r *http.Request, next bool) {
+	book, err := s.store.BookByID(r.Context(), chi.URLParam(r, "bookID"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Book not found.")
+		return
+	}
+	var sibling database.Book
+	if next {
+		sibling, err = s.store.NextBookInSeries(r.Context(), book)
+	} else {
+		sibling, err = s.store.PreviousBookInSeries(r.Context(), book)
+	}
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Sibling book not found.")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		return
+	}
+	series, err := s.store.SeriesByID(r.Context(), sibling.SeriesID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		return
+	}
+	progress, ok, err := s.store.BookReadProgress(r.Context(), sibling.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, bookDTOWithProgress(sibling, series, progress, ok))
+}
+
 func (s *Server) komgaBookReadProgress(w http.ResponseWriter, r *http.Request) {
 	book, err := s.store.BookByID(r.Context(), chi.URLParam(r, "bookID"))
 	if err != nil {
@@ -218,6 +288,19 @@ func (s *Server) komgaBookReadProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, bookReadProgressDTO(progress))
+}
+
+func (s *Server) deleteKomgaBookReadProgress(w http.ResponseWriter, r *http.Request) {
+	book, err := s.store.BookByID(r.Context(), chi.URLParam(r, "bookID"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Book not found.")
+		return
+	}
+	if err := s.store.DeleteBookReadProgress(r.Context(), book.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) patchKomgaBookReadProgress(w http.ResponseWriter, r *http.Request) {

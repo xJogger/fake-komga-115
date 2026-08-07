@@ -89,7 +89,16 @@ func TestMihonKomgaContract(t *testing.T) {
 		settings["volume_index_prefetch_remaining_pages"] != "10" {
 		t.Fatalf("unexpected volume prefetch defaults: %#v", settings)
 	}
-	response := putJSON(t, server.URL+"/admin/api/settings", map[string]string{
+	if settings["cors_allowed_origins"] != "" {
+		t.Fatalf("CORS must be disabled by default: %#v", settings)
+	}
+	response := optionsRequest(t, server.URL+"/api/v1/libraries", "https://reader.example.com", "GET", true)
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || response.Header.Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("default CORS preflight status=%d origin=%q",
+			response.StatusCode, response.Header.Get("Access-Control-Allow-Origin"))
+	}
+	response = putJSON(t, server.URL+"/admin/api/settings", map[string]string{
 		"volume_index_prefetch_enabled":         "true",
 		"volume_index_prefetch_remaining_pages": "12",
 	})
@@ -106,6 +115,48 @@ func TestMihonKomgaContract(t *testing.T) {
 		t.Fatalf("invalid volume prefetch threshold status=%d", response.StatusCode)
 	}
 	response.Body.Close()
+	response = putJSON(t, server.URL+"/admin/api/settings", map[string]string{
+		"cors_allowed_origins": "https://reader.example.com/\nhttp://localhost:5173\nhttps://reader.example.com",
+	})
+	decodeResponseJSON(t, response, &settings)
+	if settings["cors_allowed_origins"] != "https://reader.example.com\nhttp://localhost:5173" {
+		t.Fatalf("CORS origins were not normalized: %#v", settings)
+	}
+	response = optionsRequest(t, server.URL+"/api/v1/libraries", "https://reader.example.com", "GET", true)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent ||
+		response.Header.Get("Access-Control-Allow-Origin") != "https://reader.example.com" ||
+		response.Header.Get("Access-Control-Allow-Private-Network") != "true" {
+		t.Fatalf("allowed CORS preflight status=%d headers=%#v", response.StatusCode, response.Header)
+	}
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/libraries", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Origin", "https://reader.example.com")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK ||
+		response.Header.Get("Access-Control-Allow-Origin") != "https://reader.example.com" {
+		t.Fatalf("actual CORS GET status=%d origin=%q",
+			response.StatusCode, response.Header.Get("Access-Control-Allow-Origin"))
+	}
+	request, err = http.NewRequest(http.MethodGet, server.URL+"/admin/api/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Origin", "https://reader.example.com")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.Header.Get("Access-Control-Allow-Origin") != "" {
+		t.Fatal("admin API must not expose CORS headers")
+	}
 
 	if err := store.UpsertLibrary(ctx, database.Library{
 		ID: libraryID, Name: "Comics", RootCID: "root", Enabled: true, OneShot: true,
@@ -156,6 +207,14 @@ INSERT INTO books(
 	getJSON(t, server.URL+"/admin/api/maintenance-jobs", &maintenanceJobs)
 	if len(maintenanceJobs) != 0 {
 		t.Fatalf("unexpected maintenance jobs: %#v", maintenanceJobs)
+	}
+
+	var capabilities map[string]any
+	getJSON(t, server.URL+"/api/v1/server/capabilities", &capabilities)
+	if capabilities["name"] != "fake-komga-115" ||
+		capabilities["corsConfigured"] != true ||
+		capabilities["features"].(map[string]any)["bookSiblingNavigation"] != true {
+		t.Fatalf("unexpected capabilities: %#v", capabilities)
 	}
 
 	var komgaLibraries []map[string]any
@@ -328,6 +387,19 @@ INSERT INTO books(
 	if seriesPage["totalElements"].(float64) != 1 {
 		t.Fatalf("series read_status READ failed: %#v", seriesPage)
 	}
+	response = deleteRequest(t, server.URL+"/api/v1/books/"+bookID+"/read-progress")
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("book readProgress DELETE status=%d", response.StatusCode)
+	}
+	getJSON(t, server.URL+"/api/v1/books/"+bookID, &bookDetail)
+	if bookDetail["readProgress"] != nil {
+		t.Fatalf("book readProgress after DELETE: %#v", bookDetail["readProgress"])
+	}
+	getJSON(t, server.URL+"/api/v1/books?read_status=UNREAD&unpaged=true&deleted=false", &bookPage)
+	if bookPage["totalElements"].(float64) != 1 {
+		t.Fatalf("book read_status UNREAD after DELETE failed: %#v", bookPage)
+	}
 
 	response, err = http.Get(server.URL + "/api/v1/series/" + seriesID + "/thumbnail")
 	if err != nil {
@@ -435,6 +507,33 @@ INSERT INTO books(
 		now, now, now, now); err != nil {
 		t.Fatal(err)
 	}
+	normalBook2ID := id.Book(libraryID, "normal-file-2")
+	if _, err := store.DB().Exec(`
+INSERT INTO books(
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
+ file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
+) VALUES(?,?,?,?,?,'Vol 02.cbz',4096,'normal-pick-2','normal-sha-2',?,?,2,?,?,'scan')`,
+		normalBook2ID, normalSeriesID, libraryID, "normal-file-2", "normal-series",
+		now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	var sibling map[string]any
+	getJSON(t, server.URL+"/api/v1/books/"+normalBookID+"/next", &sibling)
+	if sibling["id"] != normalBook2ID {
+		t.Fatalf("unexpected next book: %#v", sibling)
+	}
+	getJSON(t, server.URL+"/api/v1/books/"+normalBook2ID+"/previous", &sibling)
+	if sibling["id"] != normalBookID {
+		t.Fatalf("unexpected previous book: %#v", sibling)
+	}
+	response, err = http.Get(server.URL + "/api/v1/books/" + normalBook2ID + "/next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("last book next status=%d", response.StatusCode)
+	}
 	normalHTML := getText(t, server.URL+"/book/"+normalBookID, http.StatusOK)
 	if !strings.Contains(normalHTML, "Root/Normal Series/Vol 01.cbz") {
 		t.Fatal("normal Book page does not show the full relative path")
@@ -527,6 +626,43 @@ func postJSON(t *testing.T, url string, value any) *http.Response {
 
 func patchJSON(t *testing.T, url string, value any) *http.Response {
 	return requestJSON(t, http.MethodPatch, url, value)
+}
+
+func deleteRequest(t *testing.T, url string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func optionsRequest(
+	t *testing.T,
+	url string,
+	origin string,
+	requestMethod string,
+	privateNetwork bool,
+) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodOptions, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Origin", origin)
+	request.Header.Set("Access-Control-Request-Method", requestMethod)
+	if privateNetwork {
+		request.Header.Set("Access-Control-Request-Private-Network", "true")
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
 }
 
 func requestJSON(t *testing.T, method, url string, value any) *http.Response {

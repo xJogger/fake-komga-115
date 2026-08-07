@@ -58,6 +58,8 @@ TCP 监听成功后打开本机管理页。Linux 和 macOS 仍默认使用 `./da
 
 - `settings`：扫描、限速、Range block、缓存和预读设置。
 - `client_settings`：Koharia/WebUI 等兼容客户端写入的非敏感用户设置。
+- `settings.cors_allowed_origins`：外部纯前端网页阅读器允许跨域访问的精确 Origin 列表，
+  每行一个；空值表示关闭。
 - `provider_accounts`：单个 115 账号的 Access/Refresh Token。
 - `libraries`：115 根目录和普通/One-Shots 模式。
 - `scan_runs`：扫描队列、进度、结果和取消标记。
@@ -240,10 +242,12 @@ Mihon 的 Komga Tracker 使用 `/api/v2/series/{seriesId}/read-progress/tachiyom
   `booksInProgressCount`、`lastReadContinuousNumberSort` 和 `maxNumberSort`。
   `booksInProgressCount` 不受图片加载推断页码影响，只来自真实同步的 Book 进度。
 
-Koharia 使用 Komga Book 进度接口同步页码：
+Koharia 和外部 Web 前端使用 Komga Book 进度接口同步页码：
 
+- `GET /api/v1/books/{bookId}/read-progress` 返回单本真实同步进度；无记录时返回 `null`。
 - `PATCH /api/v1/books/{bookId}/read-progress` 接收 `page` 和可选 `completed`。
   没有 `completed=true` 时保存为 `IN_PROGRESS`；`completed=true` 时保存为 `READ`。
+- `DELETE /api/v1/books/{bookId}/read-progress` 删除单本真实同步进度，用于标记未读。
 - `GET /api/v1/books/{bookId}`、`GET /api/v1/books` 和
   `GET /api/v1/series/{seriesId}/books` 会在 Book DTO 中返回 `readProgress`。
 - `read_status` 筛选严格使用 `book_read_progress`：无记录为 `UNREAD`，有记录且
@@ -283,10 +287,17 @@ Series 信息页显示当前版本已建索引数量、平均索引耗时、最�
 - `/series/{id}`、`/book/{id}`、`/books/{id}`：Mihon WebView 使用的本地信息页。
 - `/admin/api/*`：账号、Library、设置、扫描、封面任务、维护任务和缓存管理。
 - `/admin/api/maintenance-jobs`：详情页手动封面/索引维护任务的创建、查询和取消。
-- `/api/v1/*`：Komga 兼容的 Library、Series、Book、Pages、图片和 Koharia 所需
-  client-settings / structured search 端点。
+- `/api/v1/*`：Komga 兼容的 Library、Series、Book、Pages、图片，Koharia 所需
+  client-settings / structured search，以及纯前端网页阅读器所需的 capabilities、
+  Book previous/next、单本 read-progress 删除端点。
 - `/api/v2/series/{id}/read-progress/tachiyomi`：Mihon 所需的简化阅读进度端点。
 - `/health`：健康检查。
+
+跨域中间件只作用于 `/api/v1/*` 和 `/api/v2/*`。管理 API 不暴露 CORS header，避免
+外部网页阅读器获得跨域管理能力。允许列表来自 `cors_allowed_origins` 设置，采用精确
+Origin 匹配，不支持通配；OPTIONS 预检会返回标准 CORS header，并在浏览器请求包含
+`Access-Control-Request-Private-Network: true` 时返回
+`Access-Control-Allow-Private-Network: true`。
 
 Komga API 是有意裁剪的兼容层。集合、元数据和分页字段以 Mihon / Koharia 实际
 需要为准。未实现的缩略图返回占位图；collection/readlist 等返回空集合。
@@ -343,8 +354,8 @@ README、LICENSE 一起打包，最后生成 `SHA256SUMS` 并创建 GitHub Relea
 
 `.github/workflows/docker.yml` 使用 Docker Buildx 构建 `linux/amd64` 和
 `linux/arm64` 多架构镜像，并推送到 `blacktal/fake-komga-115`。镜像标签包括
-`latest`、原始 Git Tag（如 `v1.2.0`）、不带 `v` 的完整语义版本（如 `1.2.0`）
-以及 minor 标签（如 `1.2`）。Docker Hub 凭据只来自 GitHub Actions secrets，
+`latest`、原始 Git Tag（如 `v1.3.0`）、不带 `v` 的完整语义版本（如 `1.3.0`）
+以及 minor 标签（如 `1.3`）。Docker Hub 凭据只来自 GitHub Actions secrets，
 不要写入仓库。
 
 GitHub Release 的正文不再只依赖自动生成说明。发布 `vX.Y.Z` 前必须提交

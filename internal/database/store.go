@@ -69,6 +69,7 @@ func (s *Store) ensureDefaults(ctx context.Context) error {
 		"volume_index_prefetch_remaining_pages": "10",
 		"max_page_size":                         "104857600",
 		"downurl_ttl_seconds":                   "1200",
+		"cors_allowed_origins":                  "",
 	}
 	now := nowText()
 	for key, value := range defaults {

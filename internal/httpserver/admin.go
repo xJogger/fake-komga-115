@@ -346,6 +346,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		"volume_index_prefetch_remaining_pages": true,
 		"downurl_ttl_seconds":                   true, "rar_index_block_size": true,
 		"rar_max_dictionary_size": true,
+		"cors_allowed_origins":    true,
 	}
 	nonNegativeIntegers := map[string]bool{
 		"range_block_size": true, "range_cache_max_bytes": true,
@@ -354,6 +355,15 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		"rar_index_block_size": true, "rar_max_dictionary_size": true,
 	}
 	for key, value := range request {
+		if key == corsAllowedOriginsSetting {
+			normalized, err := normalizeCORSOrigins(value)
+			if err != nil {
+				writeError(w, 400, "INVALID_SETTING", err.Error())
+				return
+			}
+			request[key] = normalized
+			continue
+		}
 		if !allowed[key] {
 			writeError(w, 400, "INVALID_SETTING", "Unknown setting: "+key)
 			return

@@ -228,6 +228,11 @@ ON CONFLICT(book_id) DO UPDATE SET
 	return err
 }
 
+func (s *Store) DeleteBookReadProgress(ctx context.Context, bookID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM book_read_progress WHERE book_id=?`, bookID)
+	return err
+}
+
 func (s *Store) RecordBookPageProgress(
 	ctx context.Context,
 	book Book,

@@ -13,7 +13,7 @@
     header>div,main{max-width:1240px;margin:auto;padding:18px 22px}h1{font-size:20px;margin:0;letter-spacing:-.02em}h2{font-size:17px;margin:0 0 14px}
     main{display:grid;gap:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:16px}
     section{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;overflow:auto;box-shadow:var(--shadow);backdrop-filter:blur(14px)}
-    label{display:block;color:var(--muted);margin:10px 0 5px}input,select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text)}
+    label{display:block;color:var(--muted);margin:10px 0 5px}input,select,textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text)}textarea{min-height:92px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
     input[type=checkbox]{width:auto;margin-right:7px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.row button{flex:0 0 auto}
     button,.button-link{display:inline-block;border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:white;padding:8px 12px;cursor:pointer;font-weight:650;text-decoration:none;transition:filter .15s ease,transform .15s ease}button:hover,.button-link:hover{filter:brightness(1.07);transform:translateY(-1px)}
     button.secondary{background:#21262d;border-color:var(--line)}button.warning{background:var(--warning);border-color:#d29922}button.danger{background:#da3633;border-color:var(--danger)}button:disabled{opacity:.5;cursor:not-allowed}
@@ -130,6 +130,9 @@
             <div class="muted">只读取同一 Series 下一卷的归档索引，不读取或解压页面。</div>
           </div>
         </div>
+        <label>允许的 Web 前端 Origin（CORS，每行一个；留空关闭）</label>
+        <textarea id="corsOrigins" placeholder="https://your-reader.pages.dev&#10;http://localhost:5173"></textarea>
+        <div class="muted">只对 /api/v1 和 /api/v2 生效。必须填写完整 Origin，不支持 * 或 http://localhost:* 通配。用于 Cloudflare Pages / GitHub Pages 等纯前端阅读器访问本机 API。</div>
         <button type="submit" style="margin-top:12px">保存设置</button>
       </form>
     </section>
@@ -225,6 +228,7 @@ async function loadSettings(){
   const x=await api('/settings');$('#autoScan').checked=x.auto_scan_enabled==='true';$('#scanInterval').value=x.auto_scan_interval_minutes;
   $('#startupScan').checked=x.scan_on_startup==='true';$('#apiRate').value=x.api_rate_per_second;$('#prefetch').value=x.page_prefetch_count;
   $('#volumePrefetch').checked=x.volume_index_prefetch_enabled==='true';$('#volumePrefetchRemaining').value=x.volume_index_prefetch_remaining_pages||10;
+  $('#corsOrigins').value=x.cors_allowed_origins||'';
   $('#rangeCacheLimit').value=Number(gib(x.range_cache_max_bytes).toFixed(2));$('#pageCacheLimit').value=Number(gib(x.page_cache_max_bytes).toFixed(2));
 }
 async function loadCache(){
@@ -251,7 +255,7 @@ async function cancelCoverJob(id){if(!confirm('确认取消这个封面任务？
 async function toggleLibrary(id,name,enabled,oneShot){try{await api(`/libraries/${id}`,{method:'PUT',body:JSON.stringify({name,enabled,oneShot})});refresh()}catch(e){notice(e.message,true)}}
 async function toggleOneShot(id,name,enabled,oneShot){if(!confirm(`切换为${oneShot?' One-Shots':'普通'}模式后需要重新扫描。扫描成功前会保留旧结构，是否继续？`))return;try{await api(`/libraries/${id}`,{method:'PUT',body:JSON.stringify({name,enabled,oneShot})});notice('模式已切换，请点击扫描应用新结构');refresh()}catch(e){notice(e.message,true)}}
 async function deleteLibrary(id){if(!confirm('删除该 Library 及本地扫描元数据？不会删除 115 文件。'))return;try{await api(`/libraries/${id}`,{method:'DELETE'});notice('已删除');refresh()}catch(e){notice(e.message,true)}}
-$('#settingsForm').onsubmit=async e=>{e.preventDefault();try{await api('/settings',{method:'PUT',body:JSON.stringify({auto_scan_enabled:String($('#autoScan').checked),auto_scan_interval_minutes:$('#scanInterval').value,scan_on_startup:String($('#startupScan').checked),api_rate_per_second:$('#apiRate').value,page_prefetch_count:$('#prefetch').value,volume_index_prefetch_enabled:String($('#volumePrefetch').checked),volume_index_prefetch_remaining_pages:$('#volumePrefetchRemaining').value})});notice('设置已保存');loadSettings()}catch(e){notice(e.message,true)}};
+$('#settingsForm').onsubmit=async e=>{e.preventDefault();try{await api('/settings',{method:'PUT',body:JSON.stringify({auto_scan_enabled:String($('#autoScan').checked),auto_scan_interval_minutes:$('#scanInterval').value,scan_on_startup:String($('#startupScan').checked),api_rate_per_second:$('#apiRate').value,page_prefetch_count:$('#prefetch').value,volume_index_prefetch_enabled:String($('#volumePrefetch').checked),volume_index_prefetch_remaining_pages:$('#volumePrefetchRemaining').value,cors_allowed_origins:$('#corsOrigins').value})});notice('设置已保存');loadSettings()}catch(e){notice(e.message,true)}};
 $('#cacheSettingsForm').onsubmit=async e=>{e.preventDefault();try{const unit=1024**3;await api('/settings',{method:'PUT',body:JSON.stringify({range_cache_max_bytes:String(Math.round(Number($('#rangeCacheLimit').value)*unit)),page_cache_max_bytes:String(Math.round(Number($('#pageCacheLimit').value)*unit))})});notice('缓存上限已保存');refresh()}catch(e){notice(e.message,true)}};
 document.querySelectorAll('[data-clear]').forEach(b=>b.onclick=async()=>{const t=b.dataset.clear;if(!confirm(`确认清理 ${t} 缓存？`))return;try{await api(`/cache/${t}`,{method:'DELETE'});notice('缓存已清理');loadCache()}catch(e){notice(e.message,true)}});
 $('#browseButton').onclick=async()=>{try{const x=await api('/115/folders?cid='+encodeURIComponent($('#browseCid').value||'0'));$('#folderBrowser').innerHTML=(x.folders||[]).map(f=>`<div class="row" style="margin-top:6px"><span>${esc(f.name)} <code>${esc(f.id)}</code></span><button class="secondary" onclick="browseInto('${f.id}')">进入</button><button onclick="chooseFolder('${f.id}',decodeURIComponent('${enc(f.name)}'))">选择</button></div>`).join('')||'<p>没有子目录</p>'}catch(e){notice(e.message,true)}};

@@ -218,6 +218,28 @@ WHERE ordered.id=? AND ordered.next_id IS NOT NULL AND series.one_shot=0`,
 	return s.BookByID(ctx, id)
 }
 
+func (s *Store) PreviousBookInSeries(ctx context.Context, current Book) (Book, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+WITH ordered AS (
+ SELECT id,
+  LAG(id) OVER (
+   ORDER BY number_sort ASC,name COLLATE NOCASE ASC,id ASC
+  ) AS previous_id
+ FROM books
+ WHERE series_id=?
+)
+SELECT ordered.previous_id
+FROM ordered
+JOIN series ON series.id=?
+WHERE ordered.id=? AND ordered.previous_id IS NOT NULL AND series.one_shot=0`,
+		current.SeriesID, current.SeriesID, current.ID).Scan(&id)
+	if err != nil {
+		return Book{}, err
+	}
+	return s.BookByID(ctx, id)
+}
+
 func (s *Store) Counts(
 	ctx context.Context,
 ) (libraries, series, books, comicBytes int64, err error) {
