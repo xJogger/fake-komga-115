@@ -1180,9 +1180,6 @@ table.data-table th {
 }
 
 @media (max-width: 780px) {
-  html.kb-typing .topbar:not(:focus-within) {
-    position: relative;
-  }
   html.kb-typing .topbar {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
@@ -1247,6 +1244,7 @@ table.data-table th {
     padding: 10px 14px;
   }
   .topbar {
+    position: static;
     height: auto;
   }
   .topbar-search {
