@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -24,17 +25,40 @@ var (
 )
 
 type LiveClient struct {
-	baseURL string
-	http    *http.Client
-	limiter *rate.Limiter
+	baseURL      string
+	clientMu     sync.RWMutex
+	http         *http.Client
+	proxyRaw     string
+	limiter      *rate.Limiter
+	coverLimiter *rate.Limiter
 }
 
 func NewLiveClient() *LiveClient {
+	tr, _ := NewBangumiTransport("", 20*time.Second)
 	return &LiveClient{
-		baseURL: "https://api.bgm.tv",
-		http:    &http.Client{Timeout: 25 * time.Second},
-		limiter: rate.NewLimiter(rate.Limit(2.0), 2),
+		baseURL:      "https://api.bgm.tv",
+		http:         &http.Client{Timeout: 25 * time.Second, Transport: tr},
+		limiter:      rate.NewLimiter(rate.Limit(2.0), 2),
+		coverLimiter: rate.NewLimiter(rate.Limit(12.0), 8),
 	}
+}
+
+func (c *LiveClient) SetProxyURL(proxyURL string) error {
+	tr, err := NewBangumiTransport(proxyURL, 20*time.Second)
+	if err != nil {
+		return err
+	}
+	c.clientMu.Lock()
+	c.http = &http.Client{Timeout: 25 * time.Second, Transport: tr}
+	c.proxyRaw = proxyURL
+	c.clientMu.Unlock()
+	return nil
+}
+
+func (c *LiveClient) httpClient() (*http.Client, string) {
+	c.clientMu.RLock()
+	defer c.clientMu.RUnlock()
+	return c.http, c.proxyRaw
 }
 
 type apiSubjectResponse struct {
@@ -109,9 +133,10 @@ func (c *LiveClient) Search(
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.http.Do(req)
+	client, proxyRaw := c.httpClient()
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.New(SanitizeProxyError(err, proxyRaw))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -162,9 +187,10 @@ func (c *LiveClient) SubjectByID(ctx context.Context, subjectID int64) (SubjectC
 	req.Header.Set("User-Agent", archiveUserAgent)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.http.Do(req)
+	client, proxyRaw := c.httpClient()
+	resp, err := client.Do(req)
 	if err != nil {
-		return SubjectCandidate{}, err
+		return SubjectCandidate{}, errors.New(SanitizeProxyError(err, proxyRaw))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -197,9 +223,10 @@ func (c *LiveClient) fetchSubjectPersons(ctx context.Context, subjectID int64) (
 	}
 	req.Header.Set("User-Agent", archiveUserAgent)
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
+	client, proxyRaw := c.httpClient()
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.New(SanitizeProxyError(err, proxyRaw))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -213,10 +240,13 @@ func (c *LiveClient) fetchSubjectPersons(ctx context.Context, subjectID int64) (
 }
 
 func (c *LiveClient) FetchCoverBytes(ctx context.Context, coverURL string, subjectID int64) ([]byte, error) {
-	if err := c.limiter.Wait(ctx); err != nil {
+	if err := c.coverLimiter.Wait(ctx); err != nil {
 		return nil, err
 	}
 	target := strings.TrimSpace(coverURL)
+	if target != "" && !IsAllowedBangumiCoverURL(target) {
+		target = ""
+	}
 	if target == "" && subjectID > 0 {
 		target = CoverEndpointURL(subjectID)
 	}
@@ -228,9 +258,10 @@ func (c *LiveClient) FetchCoverBytes(ctx context.Context, coverURL string, subje
 		return nil, err
 	}
 	req.Header.Set("User-Agent", archiveUserAgent)
-	resp, err := c.http.Do(req)
+	client, proxyRaw := c.httpClient()
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.New(SanitizeProxyError(err, proxyRaw))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

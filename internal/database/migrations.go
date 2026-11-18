@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS auth_api_keys (
   last_used_at TEXT
 );
 `)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`
+UPDATE auth_sessions SET remember=1,expires_at=? WHERE expires_at>? AND expires_at<>?`,
+		PermanentSessionExpiresAt, nowText(), PermanentSessionExpiresAt)
 	return err
 }
 

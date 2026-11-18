@@ -30,8 +30,7 @@ const (
 	argonThreads uint8  = 2
 	argonKeyLen  uint32 = 32
 
-	defaultSessionTTL  = 24 * time.Hour
-	rememberSessionTTL = 90 * 24 * time.Hour
+	PermanentSessionExpiresAt = "9999-12-31T23:59:59Z"
 )
 
 func (s *Store) HasAdmin(ctx context.Context) (bool, error) {
@@ -188,7 +187,7 @@ UPDATE auth_admin SET username=?,password_hash=?,updated_at=? WHERE id=1`,
 func (s *Store) CreateSession(
 	ctx context.Context,
 	username string,
-	remember bool,
+	_ bool,
 	userAgent string,
 ) (string, AuthSession, error) {
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE expires_at<=?`, nowText())
@@ -198,29 +197,23 @@ func (s *Store) CreateSession(
 	}
 	tokenHash := sha256Hex(rawToken)
 	now := time.Now().UTC()
-	ttl := defaultSessionTTL
-	rememberInt := 0
-	if remember {
-		ttl = rememberSessionTTL
-		rememberInt = 1
-	}
 	createdText := now.Format(time.RFC3339Nano)
-	expiresText := now.Add(ttl).Format(time.RFC3339Nano)
+	expiresText := PermanentSessionExpiresAt
 	ua := strings.TrimSpace(userAgent)
 	if len(ua) > 256 {
 		ua = ua[:256]
 	}
 	if _, err := s.db.ExecContext(ctx, `
 INSERT INTO auth_sessions(token_hash,username,remember,user_agent,created_at,last_seen_at,expires_at)
-VALUES(?,?,?,?,?,?,?)`,
-		tokenHash, username, rememberInt, ua, createdText, createdText, expiresText,
+VALUES(?,?,1,?,?,?,?)`,
+		tokenHash, username, ua, createdText, createdText, expiresText,
 	); err != nil {
 		return "", AuthSession{}, err
 	}
 	return rawToken, AuthSession{
 		ID:         tokenHash[:16],
 		Username:   username,
-		Remember:   remember,
+		Remember:   true,
 		UserAgent:  ua,
 		CreatedAt:  createdText,
 		LastSeenAt: createdText,
@@ -251,26 +244,24 @@ FROM auth_sessions WHERE token_hash=?`, tokenHash).Scan(
 		return AuthSession{}, false, err
 	}
 	now := time.Now().UTC()
-	expiresAt, err := time.Parse(time.RFC3339Nano, session.ExpiresAt)
-	if err != nil || !expiresAt.After(now) {
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE token_hash=?`, tokenHash)
-		return AuthSession{}, false, nil
+	if session.ExpiresAt != PermanentSessionExpiresAt {
+		expiresAt, parseErr := time.Parse(time.RFC3339Nano, session.ExpiresAt)
+		if parseErr != nil || !expiresAt.After(now) {
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE token_hash=?`, tokenHash)
+			return AuthSession{}, false, nil
+		}
 	}
 	session.ID = tokenHash[:16]
-	session.Remember = rememberInt != 0
+	session.Remember = true
 	lastSeen, _ := time.Parse(time.RFC3339Nano, session.LastSeenAt)
-	if now.Sub(lastSeen) > 5*time.Minute {
-		ttl := defaultSessionTTL
-		if session.Remember {
-			ttl = rememberSessionTTL
-		}
+	if now.Sub(lastSeen) > 5*time.Minute || session.ExpiresAt != PermanentSessionExpiresAt {
 		newSeen := now.Format(time.RFC3339Nano)
-		newExpires := now.Add(ttl).Format(time.RFC3339Nano)
 		_, _ = s.db.ExecContext(ctx, `
-UPDATE auth_sessions SET last_seen_at=?,expires_at=? WHERE token_hash=?`,
-			newSeen, newExpires, tokenHash)
+UPDATE auth_sessions SET remember=1,last_seen_at=?,expires_at=? WHERE token_hash=?`,
+			newSeen, PermanentSessionExpiresAt, tokenHash)
 		session.LastSeenAt = newSeen
-		session.ExpiresAt = newExpires
+		session.ExpiresAt = PermanentSessionExpiresAt
+		session.Refreshed = true
 	}
 	return session, true, nil
 }

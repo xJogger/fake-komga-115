@@ -54,10 +54,18 @@ UPDATE bangumi_scrape_runs SET status='failed',completed_at=?,
  errors_json='["service restarted before scrape job completed"]'
 WHERE status IN ('queued','running')`, now)
 
+	liveClient := NewLiveClient()
+	if savedProxy, pErr := store.GetSetting(ctx, SettingProxyURL); pErr == nil && strings.TrimSpace(savedProxy) != "" {
+		if _, normalized, vErr := ValidateProxyURL(savedProxy); vErr == nil {
+			_ = archiveIdx.SetProxyURL(normalized)
+			_ = liveClient.SetProxyURL(normalized)
+		}
+	}
+
 	svc := &Service{
 		store:   store,
 		archive: archiveIdx,
-		live:    NewLiveClient(),
+		live:    liveClient,
 		logger:  logger,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -96,6 +104,45 @@ func (s *Service) ImportArchiveZip(ctx context.Context, zipPath, dumpName, creat
 
 func (s *Service) FetchCoverBytes(ctx context.Context, coverURL string, subjectID int64) ([]byte, error) {
 	return s.live.FetchCoverBytes(ctx, coverURL, subjectID)
+}
+
+func (s *Service) RedactedProxyURL(ctx context.Context) string {
+	val, err := s.store.GetSetting(ctx, SettingProxyURL)
+	if err != nil {
+		return ""
+	}
+	return RedactProxyURL(val)
+}
+
+func (s *Service) SetProxyURL(ctx context.Context, inputRaw string) (string, error) {
+	existing, _ := s.store.GetSetting(ctx, SettingProxyURL)
+	merged, err := MergeProxyURLUpdate(inputRaw, existing)
+	if err != nil {
+		return "", err
+	}
+	if err := s.archive.SetProxyURL(merged); err != nil {
+		return "", err
+	}
+	if err := s.live.SetProxyURL(merged); err != nil {
+		return "", err
+	}
+	if err := s.store.SetSetting(ctx, SettingProxyURL, merged); err != nil {
+		return "", err
+	}
+	return RedactProxyURL(merged), nil
+}
+
+func (s *Service) TestConnectivity(ctx context.Context, candidateRaw *string) (ConnectivityReport, error) {
+	existing, _ := s.store.GetSetting(ctx, SettingProxyURL)
+	targetProxy := existing
+	if candidateRaw != nil {
+		merged, err := MergeProxyURLUpdate(*candidateRaw, existing)
+		if err != nil {
+			return ConnectivityReport{}, err
+		}
+		targetProxy = merged
+	}
+	return ProbeConnectivity(ctx, targetProxy, s.live.baseURL, s.archive.metaURL)
 }
 
 // SearchCandidates searches Bangumi for manual matching in the UI.

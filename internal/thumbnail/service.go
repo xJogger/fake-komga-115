@@ -85,7 +85,7 @@ func New(store *database.Store, root string, logger *slog.Logger) (*Service, err
 	}
 	service := &Service{
 		store: store, root: root, bgmDir: bgmDir, logger: logger,
-		bgmSem:   make(chan struct{}, 3),
+		bgmSem:   make(chan struct{}, 6),
 		inflight: make(map[string]struct{}),
 	}
 	if err := service.cleanupOrphans(context.Background()); err != nil {
@@ -227,6 +227,53 @@ func (s *Service) Get(ctx context.Context, seriesID string) (Data, bool, error) 
 	}, true, nil
 }
 
+func (s *Service) GetOrFetchBangumiCover(ctx context.Context, subjectID int64, coverURL string) (Data, error) {
+	if subjectID <= 0 {
+		return Data{}, errors.New("invalid Bangumi subject ID")
+	}
+	expectedFile := fmt.Sprintf("bgm_%d.jpg", subjectID)
+	diskFull := filepath.Join(s.bgmDir, expectedFile)
+	if raw, err := os.ReadFile(diskFull); err == nil && len(raw) > 0 {
+		return Data{Bytes: raw, MediaType: "image/jpeg"}, nil
+	}
+	if s.bgmFetcher == nil {
+		return Data{}, errors.New("Bangumi cover fetcher is not configured")
+	}
+	flightKey := fmt.Sprintf("%d", subjectID)
+	val, fetchErr, _ := s.bgmFlight.Do(flightKey, func() (any, error) {
+		select {
+		case s.bgmSem <- struct{}{}:
+			defer func() { <-s.bgmSem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if raw, err := os.ReadFile(diskFull); err == nil && len(raw) > 0 {
+			return raw, nil
+		}
+		dlCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		fetched, err := s.bgmFetcher(dlCtx, coverURL, subjectID)
+		if err != nil {
+			return nil, err
+		}
+		compressed, _, _, err := compressWithMaxEdge(fetched, 420)
+		if err != nil {
+			return nil, err
+		}
+		if err := writeAtomic(diskFull, compressed); err != nil {
+			return nil, err
+		}
+		return compressed, nil
+	})
+	if fetchErr != nil || val == nil {
+		if fetchErr == nil {
+			fetchErr = errors.New("empty Bangumi cover result")
+		}
+		return Data{}, fetchErr
+	}
+	return Data{Bytes: val.([]byte), MediaType: "image/jpeg"}, nil
+}
+
 func (s *Service) getBangumiCoverIfPreferred(ctx context.Context, seriesID string) (Data, bool, bool) {
 	var (
 		bgmID       sql.NullInt64
@@ -246,51 +293,20 @@ FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &c
 	forceOnlyBgm := coverSource == database.CoverSourceBangumi
 	subjectID := bgmID.Int64
 	expectedFile := fmt.Sprintf("bgm_%d.jpg", subjectID)
-	diskName := expectedFile
 	if coverPath != "" {
-		diskName = filepath.Base(coverPath)
+		if raw, err := os.ReadFile(filepath.Join(s.bgmDir, filepath.Base(coverPath))); err == nil && len(raw) > 0 {
+			return Data{Bytes: raw, MediaType: "image/jpeg"}, true, forceOnlyBgm
+		}
 	}
-	diskFull := filepath.Join(s.bgmDir, diskName)
-	if raw, err := os.ReadFile(diskFull); err == nil && len(raw) > 0 {
-		return Data{Bytes: raw, MediaType: "image/jpeg"}, true, forceOnlyBgm
-	}
-	if s.bgmFetcher == nil {
-		return Data{}, false, forceOnlyBgm
-	}
-	flightKey := fmt.Sprintf("%d", subjectID)
-	val, fetchErr, _ := s.bgmFlight.Do(flightKey, func() (any, error) {
-		select {
-		case s.bgmSem <- struct{}{}:
-			defer func() { <-s.bgmSem }()
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-		if raw, err := os.ReadFile(filepath.Join(s.bgmDir, expectedFile)); err == nil && len(raw) > 0 {
-			return raw, nil
-		}
-		dlCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		fetched, err := s.bgmFetcher(dlCtx, coverURL, subjectID)
-		if err != nil {
-			return nil, err
-		}
-		compressed, _, _, err := compressWithMaxEdge(fetched, 420)
-		if err != nil {
-			return nil, err
-		}
-		if err := writeAtomic(filepath.Join(s.bgmDir, expectedFile), compressed); err != nil {
-			return nil, err
-		}
-		return compressed, nil
-	})
-	if fetchErr != nil || val == nil {
-		if s.logger != nil && fetchErr != nil {
+	data, fetchErr := s.GetOrFetchBangumiCover(ctx, subjectID, coverURL)
+	if fetchErr != nil {
+		if s.logger != nil {
 			s.logger.Debug("lazy fetch Bangumi cover failed", "series", seriesID, "subject", subjectID, "error", fetchErr)
 		}
 		return Data{}, false, forceOnlyBgm
 	}
 	_ = s.store.SetSeriesBgmCoverPath(ctx, seriesID, expectedFile)
-	return Data{Bytes: val.([]byte), MediaType: "image/jpeg"}, true, forceOnlyBgm
+	return data, true, forceOnlyBgm
 }
 
 func (s *Service) BangumiStats(ctx context.Context) (Stats, error) {

@@ -27,7 +27,7 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/v1 + /ap
    - 未初始化时，`GET /health` 保持公开；浏览器页面统一 `307` 跳转至 `/setup`，API 请求统一返回 `401 SETUP_REQUIRED`。
    - 用户在 `/setup`（或 Komga 标准 `POST /api/v1/claim`）自定义用户名与密码后，密码经 `argon2id`（`time=3, memory=64MiB, threads=4`）哈希落库，此后 `/setup` 与 `/api/v1/claim` 永久关闭。
 3. **三种认证凭证**：
-   - **Session Cookie**：`fk115_session` 与兼容 Cookie `KOMGA-SESSION`（`HttpOnly`, `SameSite=Lax`），支持 90 天记住登录；数据库仅存 `SHA-256(token)`。
+   - **Session Cookie**：`fk115_session` 与兼容 Cookie `KOMGA-SESSION`（`HttpOnly`, `SameSite=Lax`），登录态永久有效（服务端会话永不过期，配合中间件静默滑动续期突破浏览器单次 400 天 Cookie 上限）；数据库仅存 `SHA-256(token)`。
    - **API Key**：`X-API-Key` 请求头，支持在后台创建多个命名密钥、查看前缀与最近使用时间并随时吊销；数据库仅存 `SHA-256(key)`。
    - **HTTP Basic Auth**：完整兼容 Mihon Komga 扩展与 Koharia。内存维护短时（5 分钟 TTL）凭据校验摘要缓存，避免高并发图片流重复触发 `argon2id` CPU 开销。当非浏览器 XHR 请求未认证时返回标准 `WWW-Authenticate: Basic` 头以触发 Mihon OkHttp Authenticator；内置前端请求附带 `X-FK115-UI: 1` 头以抑制浏览器原生弹窗。
 
@@ -50,7 +50,8 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/v1 + /ap
    - 几万部漫画批量刮削全程在本地完成，无外部 API 频率限制。
 3. **引擎二：实时 `api.bgm.tv/v0` 客户端（单部搜索与兜底）**：
    - 在作品详情页支持按关键词或直接输入 Bangumi Subject ID / URL 实时检索候选并一键绑定。
-4. **显示、锁定与按需封面缓存**：
+4. **显示、锁定、专用代理与按需封面缓存**：
+   - 支持在后台配置独立的 Bangumi 网络代理（`http://`、`https://`、`socks5://`、`socks5h://`），统一加速 GitHub 离线快照下载、`api.bgm.tv` 与 `lain.bgm.tv` 封面抓取（含弹窗候选封面服务端代理预览），绝不影响 115 与 WebDAV 流量。
    - 刮削命中后存入 `series_metadata`：展示优先使用中文译名（`title`），同时保留原始目录名 `series.name` 可搜索、详情页可见；支持 Komga 标准 `*Lock` 字段锁。
    - 封面支持 `auto`（默认优先 Bangumi 官方封面，回退首卷首页）、`bangumi`、`book` 三档切换。Bangumi 封面在首次请求 `/api/v1/series/{id}/thumbnail` 时通过 `singleflight` 按需拉取并落盘缓存至 `data/thumbnails/bangumi/{subjectId}.jpg`，批量刮削数万条目时零图片网络风暴。
 

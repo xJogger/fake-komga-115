@@ -38,6 +38,7 @@ type AuthSession struct {
 	LastSeenAt string `json:"lastSeenAt"`
 	ExpiresAt  string `json:"expiresAt"`
 	Current    bool   `json:"current,omitempty"`
+	Refreshed  bool   `json:"-"`
 }
 
 type APIKey struct {

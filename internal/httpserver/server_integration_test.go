@@ -141,11 +141,58 @@ func TestV2AuthAndMihonKomgaContract(t *testing.T) {
 	setupResp := requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/admin/api/auth/setup", map[string]any{
 		"username": adminUser,
 		"password": adminPass,
-		"remember": true,
 	})
+	var foundPermCookie bool
+	for _, ck := range setupResp.Cookies() {
+		if ck.Name == sessionCookieName && ck.MaxAge == cookieMaxAgeSeconds {
+			foundPermCookie = true
+		}
+	}
 	setupResp.Body.Close()
 	if setupResp.StatusCode != http.StatusCreated {
 		t.Fatalf("setup expected 201, got %d", setupResp.StatusCode)
+	}
+	if !foundPermCookie {
+		t.Fatalf("expected permanent session cookie with MaxAge=%d", cookieMaxAgeSeconds)
+	}
+
+	var sessions []database.AuthSession
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/auth/sessions", &sessions)
+	if len(sessions) != 1 || sessions[0].ExpiresAt != database.PermanentSessionExpiresAt {
+		t.Fatalf("expected permanent session in DB, got %+v", sessions)
+	}
+
+	// Verify Bangumi proxy config save + redaction + subject cover preview endpoint
+	bgmCfgResp := requestJSONWithClient(t, sessionClient, http.MethodPut, server.URL+"/admin/api/bangumi/config", map[string]string{
+		"proxyUrl": "socks5://proxyuser:SuperSecret@127.0.0.1:1080",
+	})
+	bgmCfgResp.Body.Close()
+	if bgmCfgResp.StatusCode != http.StatusOK {
+		t.Fatalf("put bangumi config status=%d", bgmCfgResp.StatusCode)
+	}
+	var bgmSt map[string]any
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/bangumi/status", &bgmSt)
+	if bgmSt["proxyUrl"] != "socks5://proxyuser:xxxxx@127.0.0.1:1080" {
+		t.Fatalf("expected redacted proxyUrl, got %#v", bgmSt["proxyUrl"])
+	}
+	clearProxyResp := requestJSONWithClient(t, sessionClient, http.MethodPut, server.URL+"/admin/api/bangumi/config", map[string]string{
+		"proxyUrl": "",
+	})
+	clearProxyResp.Body.Close()
+
+	mockCoverSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(testCoverPNG(t))
+	}))
+	defer mockCoverSrv.Close()
+	coverPreviewResp, err := sessionClient.Get(server.URL + "/admin/api/bangumi/subjects/24596/cover?u=" + mockCoverSrv.URL + "/cover.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverPreviewResp.Body.Close()
+	if coverPreviewResp.StatusCode != http.StatusOK || coverPreviewResp.Header.Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("bangumi candidate cover preview status=%d type=%q",
+			coverPreviewResp.StatusCode, coverPreviewResp.Header.Get("Content-Type"))
 	}
 
 	// Second setup attempt must be permanently locked (409)

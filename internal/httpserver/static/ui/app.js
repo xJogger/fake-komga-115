@@ -1,23 +1,74 @@
 (() => {
   'use strict';
 
+  const THEME_MODE_KEY = 'fk115_theme_mode';
+  const darkMediaQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
   const state = {
     auth: { claimed: true, authenticated: false, username: '' },
-    theme: localStorage.getItem('fk115_theme') || 'dark',
+    themeMode: localStorage.getItem(THEME_MODE_KEY) || 'auto',
+    theme: 'dark',
     libraries: [],
     taxonomies: { loaded: false, genres: [], tags: [], publishers: [] },
     pollTimer: null,
     pollFn: null,
     coverVer: Date.now(),
     adminTab: 'overview',
+    bgmProxyProbeHTML: '',
   };
 
-  function applyTheme(t) {
-    state.theme = t === 'light' ? 'light' : 'dark';
-    document.documentElement.setAttribute('data-theme', state.theme);
-    localStorage.setItem('fk115_theme', state.theme);
+  function resolveEffectiveTheme(mode) {
+    if (mode === 'light' || mode === 'dark') return mode;
+    return darkMediaQuery && darkMediaQuery.matches ? 'dark' : 'light';
   }
-  applyTheme(state.theme);
+
+  function themeButtonLabel(mode) {
+    if (mode === 'light') return '☀ 日间';
+    if (mode === 'dark') return '☾ 夜间';
+    return '◐ 自动';
+  }
+
+  function themeButtonTitle(mode) {
+    if (mode === 'light') return '当前：固定日间模式（点击切换为夜间）';
+    if (mode === 'dark') return '当前：固定夜间模式（点击切换为自动跟随系统）';
+    return '当前：自动跟随系统日夜模式（点击切换为日间）';
+  }
+
+  function nextThemeMode(mode) {
+    if (mode === 'auto') return 'light';
+    if (mode === 'light') return 'dark';
+    return 'auto';
+  }
+
+  function syncThemeButtons() {
+    document.querySelectorAll('[data-theme-btn]').forEach((btn) => {
+      btn.textContent = themeButtonLabel(state.themeMode);
+      btn.title = themeButtonTitle(state.themeMode);
+    });
+  }
+
+  function setThemeMode(mode) {
+    state.themeMode = (mode === 'light' || mode === 'dark') ? mode : 'auto';
+    state.theme = resolveEffectiveTheme(state.themeMode);
+    document.documentElement.setAttribute('data-theme', state.theme);
+    localStorage.setItem(THEME_MODE_KEY, state.themeMode);
+    syncThemeButtons();
+  }
+
+  if (darkMediaQuery) {
+    const onSysChange = () => {
+      if (state.themeMode === 'auto') {
+        state.theme = resolveEffectiveTheme('auto');
+        document.documentElement.setAttribute('data-theme', state.theme);
+      }
+    };
+    if (typeof darkMediaQuery.addEventListener === 'function') {
+      darkMediaQuery.addEventListener('change', onSysChange);
+    } else if (typeof darkMediaQuery.addListener === 'function') {
+      darkMediaQuery.addListener(onSysChange);
+    }
+  }
+  setThemeMode(state.themeMode);
 
   function esc(val) {
     if (val === null || val === undefined) return '';
@@ -202,7 +253,7 @@
             <input type="text" id="global-search-input" placeholder="搜索书名、原目录名、作者…" value="${esc(searchVal)}">
           </form>
           <div class="topbar-actions">
-            <button type="button" class="btn btn-sm btn-icon" id="theme-toggle-btn" title="切换明暗主题">${state.theme === 'dark' ? '☀' : '☾'}</button>
+            <button type="button" class="btn btn-sm" id="theme-toggle-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
             ${state.auth.username ? `<span class="user-pill" title="当前登录账号">${esc(state.auth.username)}</span>` : ''}
             <button type="button" class="btn btn-sm" id="logout-btn">退出</button>
           </div>
@@ -211,8 +262,7 @@
       <main class="page-shell" id="page-content">${innerHTML}</main>
     `;
     document.getElementById('theme-toggle-btn').onclick = () => {
-      applyTheme(state.theme === 'dark' ? 'light' : 'dark');
-      document.getElementById('theme-toggle-btn').textContent = state.theme === 'dark' ? '☀' : '☾';
+      setThemeMode(nextThemeMode(state.themeMode));
     };
     document.getElementById('logout-btn').onclick = async () => {
       try { await api('/admin/api/auth/logout', { method: 'POST', allow401: true }); } catch (_) {}
@@ -259,7 +309,10 @@
     app.innerHTML = `
       <div class="auth-screen">
         <form class="auth-card" id="setup-form">
-          <div class="brand"><span class="brand-mark">FK</span><span>fake-komga-115</span></div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <div class="brand"><span class="brand-mark">FK</span><span>fake-komga-115</span></div>
+            <button type="button" class="btn btn-sm" id="setup-theme-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
+          </div>
           <h1>初始化管理员账号</h1>
           <p class="lead">欢迎使用 v2。首次启用或升级后请设置管理员用户名与登录密码，设置完成后书架与 Komga 接口均受鉴权保护。</p>
           <div class="field">
@@ -274,22 +327,16 @@
             <label for="setup-pass2">确认登录密码</label>
             <input id="setup-pass2" type="password" autocomplete="new-password" placeholder="再次输入登录密码" required>
           </div>
-          <div class="field">
-            <label class="check-row">
-              <input id="setup-remember" type="checkbox" checked>
-              <span>在此浏览器保持登录状态（90 天）</span>
-            </label>
-          </div>
-          <button type="submit" class="btn btn-primary btn-lg" style="width:100%" id="setup-submit">完成初始化并进入书架</button>
+          <button type="submit" class="btn btn-primary btn-lg" style="width:100%;margin-top:6px" id="setup-submit">完成初始化并进入书架</button>
         </form>
       </div>`;
+    document.getElementById('setup-theme-btn').onclick = () => setThemeMode(nextThemeMode(state.themeMode));
     document.getElementById('setup-user').focus();
     document.getElementById('setup-form').onsubmit = async (e) => {
       e.preventDefault();
       const username = document.getElementById('setup-user').value.trim();
       const password = document.getElementById('setup-pass').value;
       const password2 = document.getElementById('setup-pass2').value;
-      const remember = document.getElementById('setup-remember').checked;
       if (username.length < 2) { toast('用户名至少需要 2 个字符', 'error'); return; }
       if (password.length < 8) { toast('密码至少需要 8 位字符', 'error'); return; }
       if (password !== password2) { toast('两次输入的密码不一致', 'error'); return; }
@@ -298,7 +345,7 @@
       try {
         const res = await api('/admin/api/auth/setup', {
           method: 'POST',
-          body: { username, password, remember },
+          body: { username, password },
           allow401: true,
         });
         state.auth = { claimed: true, authenticated: true, username: res.username };
@@ -319,7 +366,10 @@
     app.innerHTML = `
       <div class="auth-screen">
         <form class="auth-card" id="login-form">
-          <div class="brand"><span class="brand-mark">FK</span><span>fake-komga-115</span></div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <div class="brand"><span class="brand-mark">FK</span><span>fake-komga-115</span></div>
+            <button type="button" class="btn btn-sm" id="login-theme-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
+          </div>
           <h1>登录书架</h1>
           <p class="lead">请输入管理员用户名与密码访问漫画书库、内置阅读器与管理后台。</p>
           <div class="field">
@@ -330,27 +380,21 @@
             <label for="login-pass">密码</label>
             <input id="login-pass" type="password" autocomplete="current-password" placeholder="登录密码" required>
           </div>
-          <div class="field">
-            <label class="check-row">
-              <input id="login-remember" type="checkbox" checked>
-              <span>记住登录状态（90 天）</span>
-            </label>
-          </div>
-          <button type="submit" class="btn btn-primary btn-lg" style="width:100%" id="login-submit">登录</button>
+          <button type="submit" class="btn btn-primary btn-lg" style="width:100%;margin-top:6px" id="login-submit">登录</button>
         </form>
       </div>`;
+    document.getElementById('login-theme-btn').onclick = () => setThemeMode(nextThemeMode(state.themeMode));
     document.getElementById('login-user').focus();
     document.getElementById('login-form').onsubmit = async (e) => {
       e.preventDefault();
       const username = document.getElementById('login-user').value.trim();
       const password = document.getElementById('login-pass').value;
-      const remember = document.getElementById('login-remember').checked;
       const btn = document.getElementById('login-submit');
       btn.disabled = true;
       try {
         const res = await api('/admin/api/auth/login', {
           method: 'POST',
-          body: { username, password, remember },
+          body: { username, password },
           allow401: true,
         });
         state.auth = { claimed: true, authenticated: true, username: res.username };
@@ -988,11 +1032,11 @@
               return;
             }
             box.innerHTML = cands.map((c) => {
-              const imgURL = c.coverUrl || `https://api.bgm.tv/v0/subjects/${c.id}/image?type=common`;
+              const imgURL = `/admin/api/bangumi/subjects/${encodeURIComponent(c.id)}/cover${c.coverUrl ? `?u=${encodeURIComponent(c.coverUrl)}` : ''}`;
               const authorsTxt = (c.authors || []).map((a) => a.name).join(' / ');
               return `
                 <div class="bgm-candidate">
-                  <img loading="lazy" src="${esc(imgURL)}" alt="" referrerpolicy="no-referrer">
+                  <img loading="lazy" src="${esc(imgURL)}" alt="">
                   <div style="flex:1;min-width:0">
                     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                       <strong style="font-size:15px">${esc(c.nameCn || c.name)}</strong>
@@ -1916,6 +1960,11 @@
   function paintAdminBangumi(body, st, runs, libs) {
     const arch = st.archive || {};
     const dlPct = arch.totalBytes > 0 ? Math.min(100, Math.round((arch.downloadedBytes / arch.totalBytes) * 100)) : 0;
+    const prevInput = document.getElementById('bgm-proxy-url');
+    const editingProxy = prevInput && document.activeElement === prevInput;
+    const proxyInputVal = editingProxy ? prevInput.value : (st.proxyUrl || '');
+    const selStart = editingProxy ? prevInput.selectionStart : null;
+    const selEnd = editingProxy ? prevInput.selectionEnd : null;
 
     body.innerHTML = `
       <div class="stat-grid">
@@ -1923,6 +1972,23 @@
         <div class="stat-box"><div class="k">已匹配 Bangumi</div><div class="v" style="color:var(--success)">${Number(st.matchedCount || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">待刮削</div><div class="v">${Number(st.pendingCount || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">自动未命中</div><div class="v" style="color:var(--warn)">${Number(st.unmatchedCount || 0).toLocaleString()}</div></div>
+      </div>
+
+      <div class="card">
+        <div class="section-head" style="margin-bottom:8px">
+          <h3>Bangumi 专用网络代理设置</h3>
+          <span class="badge ${st.proxyUrl ? 'badge-success' : ''}">${st.proxyUrl ? '已启用代理' : '当前为直连'}</span>
+        </div>
+        <p style="font-size:12.5px;color:var(--text-secondary);margin:0 0 12px">
+          统一加速 <code>bangumi/Archive</code> GitHub 离线快照下载、<code>api.bgm.tv</code> 检索与 <code>lain.bgm.tv</code> 封面抓取（含手动匹配弹窗预览图）。<strong>仅作用于 Bangumi 相关请求，绝不影响 115 网盘与 WebDAV 流量。</strong>
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="bgm-proxy-url" value="${esc(proxyInputVal)}" placeholder="留空直连；支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" style="flex:1;min-width:260px;height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+          <button type="button" class="btn btn-primary" id="bgm-proxy-save">保存代理</button>
+          <button type="button" class="btn" id="bgm-proxy-test">测试连通性与延迟</button>
+          ${st.proxyUrl ? `<button type="button" class="btn btn-danger" id="bgm-proxy-clear">清空改回直连</button>` : ''}
+        </div>
+        <div id="bgm-proxy-probe-result" style="margin-top:10px;font-size:12.5px">${state.bgmProxyProbeHTML || ''}</div>
       </div>
 
       <div class="grid-2">
@@ -1999,6 +2065,60 @@
             </table></div>`}
       </div>
     `;
+
+    if (editingProxy) {
+      const restored = document.getElementById('bgm-proxy-url');
+      if (restored) {
+        restored.focus();
+        if (selStart !== null && selEnd !== null) {
+          try { restored.setSelectionRange(selStart, selEnd); } catch (_) {}
+        }
+      }
+    }
+
+    document.getElementById('bgm-proxy-save').onclick = async () => {
+      const proxyUrl = document.getElementById('bgm-proxy-url').value.trim();
+      try {
+        await api('/admin/api/bangumi/config', { method: 'PUT', body: { proxyUrl } });
+        toast(proxyUrl ? 'Bangumi 代理已保存并立即生效' : '已切换为直连模式');
+        renderAdminBangumi(body);
+      } catch (err) { toast(err.message, 'error'); }
+    };
+    const clearProxyBtn = document.getElementById('bgm-proxy-clear');
+    if (clearProxyBtn) {
+      clearProxyBtn.onclick = async () => {
+        try {
+          state.bgmProxyProbeHTML = '';
+          await api('/admin/api/bangumi/config', { method: 'PUT', body: { proxyUrl: '' } });
+          toast('已清空代理并恢复直连');
+          renderAdminBangumi(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
+    document.getElementById('bgm-proxy-test').onclick = async () => {
+      const btn = document.getElementById('bgm-proxy-test');
+      const probeBox = document.getElementById('bgm-proxy-probe-result');
+      const proxyUrl = document.getElementById('bgm-proxy-url').value.trim();
+      btn.disabled = true;
+      if (probeBox) probeBox.innerHTML = `<span style="color:var(--text-secondary)">正在测试 GitHub 与 api.bgm.tv 连通性…</span>`;
+      try {
+        const rep = await api('/admin/api/bangumi/proxy/test', { method: 'POST', body: { proxyUrl } });
+        const fmtItem = (label, p) => p && p.ok
+          ? `<span style="color:var(--success)">✅ ${label}：连通 (${p.latencyMs} ms${p.detail ? ` · ${esc(p.detail)}` : ''})</span>`
+          : `<span style="color:var(--danger)">❌ ${label}：失败 (${esc((p && p.error) || '超时')})</span>`;
+        state.bgmProxyProbeHTML = `<div style="display:flex;flex-wrap:wrap;gap:16px;padding:8px 11px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
+          <span>模式：<strong>${rep.direct ? '直连' : esc(rep.proxyUrl)}</strong></span>
+          ${fmtItem('api.bgm.tv', rep.api)}
+          ${fmtItem('GitHub 离线库源', rep.archive)}
+        </div>`;
+        if (probeBox) probeBox.innerHTML = state.bgmProxyProbeHTML;
+      } catch (err) {
+        toast(err.message, 'error');
+        if (probeBox) probeBox.innerHTML = `<span style="color:var(--danger)">${esc(err.message)}</span>`;
+      } finally {
+        btn.disabled = false;
+      }
+    };
 
     document.getElementById('bgm-arch-update').onclick = async () => {
       try {
@@ -2177,12 +2297,12 @@
           </div>
           <div class="stat-box">
             <div class="k">首卷缩略图缓存</div>
-            <div class="v" style="font-size:17px">${fmtBytes(thumbStat.bytes)} · ${thumbStat.count || 0} 张</div>
+            <div class="v" style="font-size:17px">${fmtBytes(thumbStat.bytes)} · ${thumbStat.files ?? thumbStat.count ?? 0} 张</div>
             <button type="button" class="btn btn-sm" style="margin-top:8px" data-clear-cache="thumbnail">清理首卷封面</button>
           </div>
           <div class="stat-box">
             <div class="k">Bangumi 懒加载封面缓存</div>
-            <div class="v" style="font-size:17px">${fmtBytes(bgmThumb.bytes)} · ${bgmThumb.count || 0} 张</div>
+            <div class="v" style="font-size:17px">${fmtBytes(bgmThumb.bytes)} · ${bgmThumb.files ?? bgmThumb.count ?? 0} 张</div>
             <button type="button" class="btn btn-sm" style="margin-top:8px" data-clear-cache="bangumi">清理 Bgm 封面</button>
           </div>
         </div>
@@ -2294,14 +2414,18 @@
         <div class="table-wrap"><table class="data-table">
           <thead><tr><th>会话标识</th><th>浏览器 / 客户端</th><th>最近活跃</th><th>过期时间</th><th>操作</th></tr></thead>
           <tbody>
-            ${(sessions || []).map((s) => `
+            ${(sessions || []).map((s) => {
+              const sid = s.id || s.tokenPrefix || '';
+              const expTxt = (!s.expiresAt || String(s.expiresAt).startsWith('9999-')) ? '永久有效（自动续期）' : fmtTime(s.expiresAt);
+              return `
               <tr>
-                <td><code>${esc(s.tokenPrefix)}</code> ${s.current ? '<span class="badge badge-success">当前设备</span>' : ''}</td>
+                <td><code>${esc(sid)}</code> ${s.current ? '<span class="badge badge-success">当前设备</span>' : ''}</td>
                 <td style="font-size:12px;color:var(--text-secondary);max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.userAgent || '—')}</td>
                 <td>${fmtTime(s.lastSeenAt)}</td>
-                <td>${fmtTime(s.expiresAt)}</td>
-                <td>${!s.current ? `<button type="button" class="btn btn-sm btn-danger" data-del-sess="${esc(s.tokenPrefix)}">强制下线</button>` : ''}</td>
-              </tr>`).join('')}
+                <td>${esc(expTxt)}</td>
+                <td>${!s.current && sid ? `<button type="button" class="btn btn-sm btn-danger" data-del-sess="${esc(sid)}">强制下线</button>` : ''}</td>
+              </tr>`;
+            }).join('')}
           </tbody>
         </table></div>
       </div>

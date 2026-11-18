@@ -18,6 +18,9 @@ import (
 const (
 	sessionCookieName      = "fk115_session"
 	komgaSessionCookieName = "KOMGA-SESSION"
+	// RFC 6265bis maximum single-cookie lifetime honored by Chromium/WebKit (400 days),
+	// paired with sliding renewal in authMiddleware so active browsers never expire.
+	cookieMaxAgeSeconds = 400 * 24 * 3600
 )
 
 type authContextKey struct{}
@@ -26,6 +29,7 @@ type authPrincipal struct {
 	Username   string
 	Method     string // "session", "apikey", "basic"
 	RawSession string
+	Refreshed  bool
 }
 
 func (s *Server) currentPrincipal(r *http.Request) (authPrincipal, bool) {
@@ -125,6 +129,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		if principal.Method == "session" && principal.Refreshed && principal.RawSession != "" {
+			setSessionCookies(w, r, principal.RawSession, true)
+		}
 		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, principal))
 		next.ServeHTTP(w, r)
 	})
@@ -138,6 +145,7 @@ func (s *Server) authenticateRequest(r *http.Request) (authPrincipal, bool) {
 				Username:   sess.Username,
 				Method:     "session",
 				RawSession: token,
+				Refreshed:  sess.Refreshed,
 			}, true
 		}
 	}
@@ -224,26 +232,19 @@ func sanitizeRedirectTarget(raw string) string {
 	return raw
 }
 
-func setSessionCookies(w http.ResponseWriter, r *http.Request, token string, remember bool) {
+func setSessionCookies(w http.ResponseWriter, r *http.Request, token string, _ bool) {
 	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
-	maxAge := 0
-	var expires time.Time
-	if remember {
-		maxAge = 90 * 24 * 3600
-		expires = time.Now().UTC().Add(90 * 24 * time.Hour)
-	}
+	expires := time.Now().UTC().Add(time.Duration(cookieMaxAgeSeconds) * time.Second)
 	for _, name := range []string{sessionCookieName, komgaSessionCookieName} {
 		cookie := &http.Cookie{
 			Name:     name,
 			Value:    token,
 			Path:     "/",
+			MaxAge:   cookieMaxAgeSeconds,
+			Expires:  expires,
 			HttpOnly: true,
 			Secure:   secure,
 			SameSite: http.SameSiteLaxMode,
-		}
-		if remember {
-			cookie.MaxAge = maxAge
-			cookie.Expires = expires
 		}
 		http.SetCookie(w, cookie)
 	}

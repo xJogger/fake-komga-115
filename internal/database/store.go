@@ -104,7 +104,10 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_
 }
 
 func (s *Store) Settings(ctx context.Context) (map[string]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT key,value FROM settings WHERE key<>'cors_allowed_origins' ORDER BY key`)
+	rows, err := s.db.QueryContext(ctx, `
+SELECT key,value FROM settings
+WHERE key NOT IN ('cors_allowed_origins','bangumi_proxy_url')
+ORDER BY key`)
 	if err != nil {
 		return nil, err
 	}

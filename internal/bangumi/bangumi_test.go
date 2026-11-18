@@ -9,6 +9,8 @@ import (
 	"image/png"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -256,4 +258,117 @@ func makeTinyPNG(t *testing.T, c color.RGBA) []byte {
 		t.Fatal(err)
 	}
 	return out.Bytes()
+}
+
+func TestBangumiProxyValidationRedactionAndProbe(t *testing.T) {
+	for _, valid := range []string{
+		"",
+		"http://127.0.0.1:7890",
+		"https://proxy.example.com:8443",
+		"socks5://127.0.0.1:1080",
+		"socks5h://user:secret@127.0.0.1:1080",
+	} {
+		if _, _, err := ValidateProxyURL(valid); err != nil {
+			t.Fatalf("ValidateProxyURL(%q) unexpected error: %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"ftp://127.0.0.1:21", "127.0.0.1:7890", "http://"} {
+		if _, _, err := ValidateProxyURL(invalid); err == nil {
+			t.Fatalf("ValidateProxyURL(%q) expected error", invalid)
+		}
+	}
+
+	rawAuth := "http://alice:TopSecret99@127.0.0.1:7890"
+	redacted := RedactProxyURL(rawAuth)
+	if redacted != "http://alice:xxxxx@127.0.0.1:7890" {
+		t.Fatalf("RedactProxyURL = %q", redacted)
+	}
+	merged, err := MergeProxyURLUpdate(redacted, rawAuth)
+	if err != nil || merged != rawAuth {
+		t.Fatalf("MergeProxyURLUpdate preserved password failed: got %q err=%v", merged, err)
+	}
+
+	if !IsAllowedBangumiCoverURL("https://lain.bgm.tv/r/400/pic/cover/l/01/02/100_abc.jpg") ||
+		!IsAllowedBangumiCoverURL("https://api.bgm.tv/v0/subjects/100/image?type=common") {
+		t.Fatal("expected official Bangumi cover URLs to be allowed")
+	}
+	if IsAllowedBangumiCoverURL("http://169.254.169.254/latest/meta-data") ||
+		IsAllowedBangumiCoverURL("https://evil.example.com/a.jpg") {
+		t.Fatal("expected non-Bangumi cover URLs to be rejected")
+	}
+
+	// Verify HTTP proxy routing for both API and Archive metadata probes
+	var proxyHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v0/subjects/1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":1,"type":1,"name":"Test"}`))
+		case "/latest.json":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"dump-2026-11-18.zip","size":12345}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.RequestURI, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		resp, err := http.DefaultClient.Do(outReq)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	defer proxySrv.Close()
+
+	tmp := t.TempDir()
+	store, err := database.Open(filepath.Join(tmp, "proxy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc, err := NewService(store, filepath.Join(tmp, "bgm"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+
+	svc.live.baseURL = upstream.URL
+	svc.archive.metaURL = upstream.URL + "/latest.json"
+
+	ctx := context.Background()
+	if _, err := svc.SetProxyURL(ctx, proxySrv.URL); err != nil {
+		t.Fatal(err)
+	}
+	// Generic settings map must not expose bangumi_proxy_url
+	settingsMap, err := store.Settings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, leaked := settingsMap[SettingProxyURL]; leaked {
+		t.Fatal("bangumi_proxy_url should not be exposed in generic Settings()")
+	}
+
+	report, err := svc.TestConnectivity(ctx, nil)
+	if err != nil {
+		t.Fatalf("TestConnectivity error: %v", err)
+	}
+	if !report.API.OK || !report.Archive.OK || report.Archive.Detail != "dump-2026-11-18.zip" {
+		t.Fatalf("unexpected connectivity report: %+v", report)
+	}
+	if proxyHits.Load() < 2 {
+		t.Fatalf("expected both API and Archive probes to traverse proxy, hits=%d", proxyHits.Load())
+	}
 }

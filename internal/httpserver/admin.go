@@ -79,6 +79,9 @@ func (s *Server) adminRoutes(r chi.Router) {
 
 	// Bangumi scraping & archive index management
 	r.Get("/bangumi/status", s.bangumiStatus)
+	r.Put("/bangumi/config", s.putBangumiConfig)
+	r.Post("/bangumi/proxy/test", s.testBangumiProxy)
+	r.Get("/bangumi/subjects/{subjectID}/cover", s.bangumiSubjectCover)
 	r.Post("/bangumi/archive/update", s.startBangumiArchiveUpdate)
 	r.Post("/bangumi/archive/cancel", s.cancelBangumiArchiveUpdate)
 	r.Get("/bangumi/runs", s.listBangumiRuns)
@@ -1132,16 +1135,82 @@ func (s *Server) bookRichDetail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) bangumiStatus(w http.ResponseWriter, r *http.Request) {
 	matched, unmatched, total, _ := s.store.ScrapeSummary(r.Context())
 	var arch bangumi.ArchiveStatus
+	proxyURL := ""
 	if s.bangumi != nil {
 		arch = s.bangumi.ArchiveStatus()
+		proxyURL = s.bangumi.RedactedProxyURL(r.Context())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"archive":        arch,
+		"proxyUrl":       proxyURL,
 		"matchedCount":   matched,
 		"unmatchedCount": unmatched,
 		"pendingCount":   max(int64(0), total-matched-unmatched),
 		"totalSeries":    total,
 	})
+}
+
+func (s *Server) putBangumiConfig(w http.ResponseWriter, r *http.Request) {
+	if s.bangumi == nil {
+		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
+		return
+	}
+	var req struct {
+		ProxyURL string `json:"proxyUrl"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	redacted, err := s.bangumi.SetProxyURL(r.Context(), req.ProxyURL)
+	if err != nil {
+		if errors.Is(err, bangumi.ErrInvalidProxyURL) {
+			writeError(w, http.StatusBadRequest, "INVALID_PROXY_URL", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "BANGUMI_CONFIG_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"proxyUrl": redacted})
+}
+
+func (s *Server) testBangumiProxy(w http.ResponseWriter, r *http.Request) {
+	if s.bangumi == nil {
+		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
+		return
+	}
+	var req struct {
+		ProxyURL *string `json:"proxyUrl"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	report, err := s.bangumi.TestConnectivity(r.Context(), req.ProxyURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_PROXY_URL", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) bangumiSubjectCover(w http.ResponseWriter, r *http.Request) {
+	subjectID, err := strconv.ParseInt(chi.URLParam(r, "subjectID"), 10, 64)
+	if err != nil || subjectID <= 0 {
+		writeError(w, http.StatusBadRequest, "INVALID_SUBJECT", "Invalid Bangumi subject ID.")
+		return
+	}
+	coverURL := strings.TrimSpace(r.URL.Query().Get("u"))
+	if !bangumi.IsAllowedBangumiCoverURL(coverURL) {
+		coverURL = ""
+	}
+	data, err := s.thumbs.GetOrFetchBangumiCover(r.Context(), subjectID, coverURL)
+	if err != nil {
+		s.writeUncachedPlaceholder(w)
+		return
+	}
+	w.Header().Set("Content-Type", data.MediaType)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data.Bytes)))
+	_, _ = w.Write(data.Bytes)
 }
 
 func (s *Server) startBangumiArchiveUpdate(w http.ResponseWriter, _ *http.Request) {

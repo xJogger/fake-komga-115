@@ -45,11 +45,14 @@ type ArchiveStatus struct {
 }
 
 type ArchiveIndex struct {
-	dir        string
-	dbPath     string
-	metaURL    string
+	dir     string
+	dbPath  string
+	metaURL string
+	logger  *slog.Logger
+
+	clientMu   sync.RWMutex
 	httpClient *http.Client
-	logger     *slog.Logger
+	proxyRaw   string
 
 	mu     sync.RWMutex
 	db     *sql.DB
@@ -61,17 +64,38 @@ func NewArchiveIndex(dir string, logger *slog.Logger) (*ArchiveIndex, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	tr, _ := NewBangumiTransport("", 30*time.Second)
 	idx := &ArchiveIndex{
 		dir:     dir,
 		dbPath:  filepath.Join(dir, "bangumi-archive.db"),
 		metaURL: DefaultArchiveMetaURL,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Minute,
+			Transport: tr,
 		},
 		logger: logger,
 	}
 	idx.openExistingIfPresent()
 	return idx, nil
+}
+
+func (a *ArchiveIndex) SetProxyURL(proxyURL string) error {
+	tr, err := NewBangumiTransport(proxyURL, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	a.clientMu.Lock()
+	a.httpClient = &http.Client{
+		Transport: tr,
+	}
+	a.proxyRaw = proxyURL
+	a.clientMu.Unlock()
+	return nil
+}
+
+func (a *ArchiveIndex) clientAndProxy() (*http.Client, string) {
+	a.clientMu.RLock()
+	defer a.clientMu.RUnlock()
+	return a.httpClient, a.proxyRaw
 }
 
 func (a *ArchiveIndex) Close() error {
@@ -140,6 +164,7 @@ type latestDumpMeta struct {
 }
 
 func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context) {
+	client, proxyRaw := a.clientAndProxy()
 	var finishErr error
 	defer func() {
 		a.mu.Lock()
@@ -151,7 +176,7 @@ func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context) {
 				a.status.LastError = "更新已取消"
 			} else {
 				a.status.Phase = "failed"
-				a.status.LastError = finishErr.Error()
+				a.status.LastError = SanitizeProxyError(finishErr, proxyRaw)
 			}
 		} else {
 			a.status.Phase = "idle"
@@ -166,7 +191,7 @@ func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context) {
 		return
 	}
 	req.Header.Set("User-Agent", archiveUserAgent)
-	resp, err := a.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		finishErr = fmt.Errorf("fetch latest.json: %w", err)
 		return
@@ -206,7 +231,7 @@ func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context) {
 		return
 	}
 	dlReq.Header.Set("User-Agent", archiveUserAgent)
-	dlResp, err := a.httpClient.Do(dlReq)
+	dlResp, err := client.Do(dlReq)
 	if err != nil {
 		finishErr = fmt.Errorf("download archive zip: %w", err)
 		return
