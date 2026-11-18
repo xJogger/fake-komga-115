@@ -133,6 +133,9 @@ func (s *Server) routes() chi.Router {
 	// Admin & internal UI API
 	r.Route("/admin/api", s.adminRoutes)
 
+	// Agent-friendly management API (/api/agent/v1)
+	r.Route("/api/agent/v1", s.agentRoutes)
+
 	// Komga v1 & v2 compatibility API
 	r.Route("/api/v1", s.komgaRoutes)
 	r.Get("/api/v2/users/me", s.komgaMe)

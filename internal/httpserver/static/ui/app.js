@@ -92,6 +92,27 @@
     return `${v} B`;
   }
 
+  function fmtMiB(n) {
+    const mib = Number(n || 0) / (1024 * 1024);
+    if (!mib) return '0.0 MiB';
+    if (mib < 1) return `${mib.toFixed(2)} MiB`;
+    return `${mib.toFixed(1)} MiB`;
+  }
+
+  function bytesToMiBInput(rawBytes, fallbackMiB) {
+    const n = Number(rawBytes);
+    if (!Number.isFinite(n) || n < 0) return String(fallbackMiB);
+    const mib = n / (1024 * 1024);
+    const rounded = Math.round(mib * 100) / 100;
+    return String(rounded);
+  }
+
+  function mibInputToBytes(rawVal) {
+    const num = parseFloat(String(rawVal || '').trim());
+    if (!Number.isFinite(num) || num < 0) return null;
+    return String(Math.round(num * 1024 * 1024));
+  }
+
   function fmtTime(iso) {
     if (!iso) return '—';
     const d = new Date(iso);
@@ -101,7 +122,7 @@
 
   function providerLabel(p) {
     switch ((p || '115').toLowerCase()) {
-      case 'local': return '本地目录';
+      case 'local': return '本地 / SMB';
       case 'webdav': return 'WebDAV';
       default: return '115 网盘';
     }
@@ -429,7 +450,7 @@
           <div class="card" style="text-align:center;padding:38px 20px">
             <h2>欢迎来到 fake-komga-115 书架</h2>
             <p style="color:var(--text-secondary);max-width:540px;margin:8px auto 18px">
-              当前暂无可展示的书库（尚未创建书库，或所有书库均已设为隐藏）。支持挂载 <strong>115 网盘目录</strong>、<strong>本地磁盘目录</strong> 与 <strong>WebDAV 远程目录</strong>，并支持 Bangumi 中文元数据刮削与内置双页阅读器。
+              当前暂无可展示的书库（尚未创建书库，或所有书库均已设为隐藏）。支持挂载 <strong>115 网盘目录</strong>、<strong>本地 / SMB 挂载目录</strong> 与 <strong>WebDAV 远程目录（CloudDrive2 / OpenList / NAS）</strong>，并支持 Bangumi 中文元数据刮削与内置简体中文双页阅读器。
             </p>
             <a href="/admin?tab=libraries" data-nav class="btn btn-primary btn-lg">前往管理后台管理书库</a>
           </div>`;
@@ -602,7 +623,7 @@
 
         <div class="filter-panel">
           <div class="filter-row">
-            <input type="text" id="f-q" placeholder="关键词（中文译名 / 原文件夹名 / 别名 / 作者）" value="${esc(q)}" style="min-width:240px;flex:1">
+            <input type="text" id="f-q" class="filter-search-input" placeholder="关键词（中文译名 / 原文件夹名 / 别名 / 作者）" value="${esc(q)}">
             <select id="f-sort">
               <option value="lastModifiedDate,desc" ${sort === 'lastModifiedDate,desc' ? 'selected' : ''}>按最近更新</option>
               <option value="createdDate,desc" ${sort === 'createdDate,desc' ? 'selected' : ''}>按最新入库</option>
@@ -621,7 +642,7 @@
               <option value="matched" ${scrapeStatus === 'matched' ? 'selected' : ''}>已匹配 Bangumi</option>
               <option value="manual" ${scrapeStatus === 'manual' ? 'selected' : ''}>手动指定</option>
               <option value="unmatched" ${scrapeStatus === 'unmatched' ? 'selected' : ''}>自动未命中</option>
-              <option value="pending" ${scrapeStatus === 'pending' ? 'selected' : ''}>尚未刮削</option>
+              <option value="none" ${(scrapeStatus === 'none' || scrapeStatus === 'pending') ? 'selected' : ''}>尚未刮削</option>
             </select>
             <select id="f-oneshot">
               <option value="">形态：全部</option>
@@ -649,10 +670,10 @@
               <option value="">出版社：全部</option>
               ${state.taxonomies.publishers.slice(0, 150).map((p) => `<option value="${esc(p)}" ${publisher === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
             </select>
-            <input type="text" id="f-author" placeholder="作者筛选" value="${esc(author)}" style="width:140px">
+            <input type="text" id="f-author" class="filter-author-input" placeholder="作者筛选" value="${esc(author)}">
             <button type="button" class="btn btn-primary btn-sm" id="f-apply">筛选</button>
             <button type="button" class="btn btn-sm" id="f-reset">重置</button>
-            <span style="margin-left:auto;color:var(--text-muted);font-size:12.5px">共 ${totalElements.toLocaleString()} 部作品</span>
+            <span class="filter-count" style="margin-left:auto;color:var(--text-muted);font-size:12.5px">共 ${totalElements.toLocaleString()} 部作品</span>
           </div>
         </div>
 
@@ -773,9 +794,10 @@
             <span class="badge">${esc(providerLabel(lib.providerType))}</span>
             <span class="badge">${s.oneshot ? '单本 One-Shot' : `共 ${books.length} 册 · ${esc(detail.totalSize)}`}</span>
             <span class="badge badge-accent">${esc(meta.status || 'ONGOING')}</span>
+            ${rawMeta.isNsfw ? `<span class="badge badge-danger">NSFW</span>` : ''}
             ${meta.publisher ? `<a href="/libraries?publisher=${encodeURIComponent(meta.publisher)}" data-nav class="badge">${esc(meta.publisher)}</a>` : ''}
             ${bgmID > 0
-              ? `<a href="https://bgm.tv/subject/${bgmID}" target="_blank" rel="noopener noreferrer" class="badge badge-bgm">Bangumi #${bgmID}${bgmScore ? ` · ★ ${bgmScore}` : ''} ↗</a>`
+              ? `<a href="https://bgm.tv/subject/${bgmID}" target="_blank" rel="noopener noreferrer" class="badge badge-bgm" title="若打开提示“数据库中没有查询您所指定的条目”，说明该条目在 Bangumi 网页端受登录保护，请先在浏览器登录 bgm.tv 账号后再访问">Bangumi #${bgmID}${bgmScore ? ` · ★ ${bgmScore}` : ''} ↗</a>`
               : `<span class="badge">${rawMeta.scrapeStatus === 'unmatched' ? 'Bangumi 未命中' : '尚未匹配 Bangumi'}</span>`}
           </div>
 
@@ -783,6 +805,7 @@
           <div class="detail-orig">
             ${detail.originalName !== title ? `<div>原始目录名：<strong>${esc(detail.originalName)}</strong></div>` : ''}
             <div>相对路径：${esc(detail.relativePath)}</div>
+            ${bgmID > 0 ? `<div style="margin-top:2px">提示：部分带受限标签的条目在未登录 <code>bgm.tv</code> 时网页会提示“没有查询您所指定的条目”，登录 Bangumi 账号后即可正常打开。</div>` : ''}
           </div>
 
           <div class="detail-cta">
@@ -1011,7 +1034,7 @@
           <button type="button" class="btn btn-bgm" id="bgm-auto-btn">自动清洗匹配</button>
           ${rawMeta.bgmSubjectId ? `<button type="button" class="btn btn-danger" id="bgm-clear-btn">解除绑定 (#${rawMeta.bgmSubjectId})</button>` : ''}
         </div>
-        <div id="bgm-parsed-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:10px">支持直接粘贴 Subject ID（如 24596）或 https://bgm.tv/subject/... 链接；NSFW 条目默认已严格过滤。</div>
+        <div id="bgm-parsed-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:10px">支持直接粘贴 Subject ID（如 24596）或 https://bgm.tv/subject/... 链接（部分受限条目需登录 bgm.tv 才能在网页端打开）。</div>
         <div id="bgm-candidates-box"><div class="boot-splash" style="min-height:140px"><div class="spinner"></div><p>正在搜索 Bangumi…</p></div></div>
       `,
       onMount: () => {
@@ -1041,6 +1064,7 @@
                     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                       <strong style="font-size:15px">${esc(c.nameCn || c.name)}</strong>
                       <span class="badge badge-bgm">#${c.id} · ${esc(c.platformLabel || '漫画')}</span>
+                      ${c.nsfw ? `<span class="badge badge-danger">NSFW</span>` : ''}
                       ${c.score ? `<span class="badge">★ ${Number(c.score).toFixed(1)}</span>` : ''}
                       ${c.confidence ? `<span class="badge badge-accent">匹配度 ${Math.round(c.confidence * 100)}%</span>` : ''}
                     </div>
@@ -1165,6 +1189,13 @@
             <label>发售日期 <label class="check-row" style="float:right"><input type="checkbox" id="em-date-lock" ${m.releaseDateLock ? 'checked' : ''}>锁定</label></label>
             <input type="text" id="em-date" placeholder="YYYY-MM-DD" value="${esc(m.releaseDate || '')}">
           </div>
+          <div class="field">
+            <label>NSFW 分级标记 <label class="check-row" style="float:right"><input type="checkbox" id="em-nsfw-lock" ${m.nsfwLock ? 'checked' : ''}>锁定</label></label>
+            <select id="em-nsfw">
+              <option value="false" ${!m.isNsfw ? 'selected' : ''}>普通作品（非 NSFW）</option>
+              <option value="true" ${m.isNsfw ? 'selected' : ''}>NSFW（受后台显示开关控制）</option>
+            </select>
+          </div>
         </div>
         <div class="field">
           <label>分类 Genres（英文逗号分隔） <label class="check-row" style="float:right"><input type="checkbox" id="em-genres-lock" ${m.genresLock ? 'checked' : ''}>锁定</label></label>
@@ -1185,7 +1216,7 @@
       `,
       onMount: () => {
         document.getElementById('em-unlock-all').onclick = () => {
-          ['em-title-lock', 'em-sort-lock', 'em-status-lock', 'em-dir-lock', 'em-pub-lock', 'em-date-lock', 'em-genres-lock', 'em-tags-lock', 'em-sum-lock']
+          ['em-title-lock', 'em-sort-lock', 'em-status-lock', 'em-dir-lock', 'em-pub-lock', 'em-date-lock', 'em-nsfw-lock', 'em-genres-lock', 'em-tags-lock', 'em-sum-lock']
             .forEach((id) => { document.getElementById(id).checked = false; });
         };
         document.getElementById('em-save').onclick = async () => {
@@ -1203,6 +1234,8 @@
             publisherLock: document.getElementById('em-pub-lock').checked,
             releaseDate: document.getElementById('em-date').value.trim(),
             releaseDateLock: document.getElementById('em-date-lock').checked,
+            isNsfw: document.getElementById('em-nsfw').value === 'true',
+            nsfwLock: document.getElementById('em-nsfw-lock').checked,
             genres: splitCSV(document.getElementById('em-genres').value),
             genresLock: document.getElementById('em-genres-lock').checked,
             tags: splitCSV(document.getElementById('em-tags').value),
@@ -1348,7 +1381,7 @@
 
     const tabs = [
       ['overview', '概览与连接'],
-      ['sources', '存储源（115 / WebDAV / 本地）'],
+      ['sources', '存储源（115 / WebDAV / 本地·SMB）'],
       ['libraries', '书库管理'],
       ['bangumi', 'Bangumi 刮削中心'],
       ['jobs', '后台任务'],
@@ -1392,7 +1425,7 @@
     body.innerHTML = `
       <div class="stat-grid">
         <div class="stat-box"><div class="k">有效书库数</div><div class="v">${st.libraries}${st.hiddenLibraries > 0 ? `<span style="font-size:12px;font-weight:500;color:var(--text-muted);margin-left:6px">（已隐藏 ${st.hiddenLibraries}）</span>` : ''}</div></div>
-        <div class="stat-box"><div class="k">漫画系列总数</div><div class="v">${Number(st.series || 0).toLocaleString()}</div></div>
+        <div class="stat-box"><div class="k">漫画系列总数</div><div class="v">${Number(st.series || 0).toLocaleString()}${(!st.showNsfw && st.nsfwSeries > 0) ? `<span style="font-size:12px;font-weight:500;color:var(--text-muted);margin-left:6px">（已隐藏 NSFW ${Number(st.nsfwSeries).toLocaleString()} 部）</span>` : ''}</div></div>
         <div class="stat-box"><div class="k">漫画文件总数</div><div class="v">${Number(st.books || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">漫画总容量</div><div class="v">${fmtBytes(st.comicBytes)}</div></div>
         <div class="stat-box"><div class="k">Bangumi 已匹配</div><div class="v" style="color:var(--bgm)">${Number(st.bgmMatched || 0).toLocaleString()}</div></div>
@@ -1448,20 +1481,21 @@
         </div>
 
         <div class="card">
-          <h3>本地磁盘目录说明</h3>
+          <h3>本地磁盘与 SMB 挂载目录说明</h3>
           <p style="color:var(--text-secondary);font-size:13px">
-            本地目录存储源无需预配账号，直接在「书库管理」中选择「本地目录」并浏览服务器路径即可挂载。
+            本地目录存储源无需预配账号，支持服务器本地磁盘、Linux 挂载的 SMB/CIFS 共享（如 <code>/share/manga</code>、<code>/mnt/smb</code>）以及 Windows 映射网络驱动器（如 <code>Z:\</code> 或 <code>\\nas\manga</code>）。
           </p>
           <ul style="color:var(--text-muted);font-size:12.5px;padding-left:18px;line-height:1.7">
-            <li>本地 CBZ/ZIP 与 CBR/RAR 通过内核 <code>io.ReaderAt</code> 原生随机读取，自动跳过分块磁盘缓存，零双份空间浪费。</li>
-            <li>Docker 部署时请将宿主机漫画目录通过 <code>-v /host/manga:/manga:ro</code> 只读挂载进容器。</li>
+            <li>通过内核 <code>io.ReaderAt</code> 原生按偏移量随机读取，自动跳过分块磁盘缓存，零双份空间浪费，并针对 SMB 目录遍历去除了多余元数据往返。</li>
+            <li>内置<strong>空挂载点防误删保护</strong>：当已有漫画数据的本地/SMB 根目录因断连变为空目录时，自动中止扫描并保留全部历史系列、元数据与阅读进度。</li>
+            <li>Docker 部署时可将宿主机目录或 SMB 挂载点通过 <code>-v /share/manga:/manga:ro</code> 只读映射进容器。</li>
           </ul>
         </div>
       </div>
 
       <div class="card">
         <div class="section-head">
-          <h3>WebDAV 账号列表（支持 OpenList / AList / 群晖 / Nextcloud 等）</h3>
+          <h3>WebDAV 账号列表（支持 OpenList / CloudDrive2 / 群晖 / Nextcloud 等）</h3>
           <button type="button" class="btn btn-primary btn-sm" id="wd-add-btn">+ 新增 WebDAV 账号</button>
         </div>
         ${(webdavs || []).length === 0
@@ -1541,11 +1575,12 @@
       bodyHTML: `
         <div class="field">
           <label>账号备注名称</label>
-          <input type="text" id="wd-name" placeholder="例如：群晖 NAS / OpenList" value="${esc(existing ? existing.name : '')}">
+          <input type="text" id="wd-name" placeholder="例如：CloudDrive2 / OpenList / 群晖 NAS" value="${esc(existing ? existing.name : '')}">
         </div>
         <div class="field">
           <label>WebDAV 根地址 (Base URL)</label>
-          <input type="url" id="wd-url" placeholder="https://nas.example.com:5006/dav" value="${esc(existing ? existing.baseUrl : '')}">
+          <input type="url" id="wd-url" placeholder="http://127.0.0.1:19798/dav 或 https://nas.example.com:5006/dav" value="${esc(existing ? existing.baseUrl : '')}">
+          <div class="field-hint">CloudDrive2 默认 WebDAV 地址通常为 <code>http://&lt;IP&gt;:19798/dav</code>；OpenList 默认通常为 <code>http://&lt;IP&gt;:5244/dav</code>。</div>
         </div>
         <div class="grid-2">
           <div class="field">
@@ -1558,8 +1593,9 @@
           </div>
         </div>
         <div class="field">
-          <label>请求限速（每秒最大请求数，默认 8）</label>
+          <label>请求限速（每秒最大请求数，同时限制目录扫描与 Range 读取，默认 8）</label>
           <input type="number" step="0.5" min="0.5" max="100" id="wd-rate" value="${existing && existing.ratePerSecond ? existing.ratePerSecond : 8}">
+          <div class="field-hint">若后端通过 CloudDrive2 / OpenList 挂载 115 等网盘，建议设为 <code>2 ~ 4</code> 以避免触发上游风控。</div>
         </div>
         <div class="field">
           <label class="check-row">
@@ -1624,8 +1660,8 @@
             <label>存储源类型</label>
             <select id="nl-provider">
               <option value="115">115 网盘目录</option>
-              <option value="local">服务器本地目录</option>
-              <option value="webdav">WebDAV 远程目录</option>
+              <option value="local">服务器本地 / SMB 挂载目录</option>
+              <option value="webdav">WebDAV 远程目录（CloudDrive2 / OpenList / NAS）</option>
             </select>
           </div>
           <div class="field">
@@ -1643,8 +1679,8 @@
 
         <div id="nl-local-box" style="display:none">
           <div class="field">
-            <label>服务器本地绝对路径 <button type="button" class="btn btn-sm" id="nl-browse-local" style="margin-left:8px">浏览服务器目录</button></label>
-            <input type="text" id="nl-local-path" placeholder="例如：/mnt/manga/comics">
+            <label>服务器本地或 SMB 挂载绝对路径 <button type="button" class="btn btn-sm" id="nl-browse-local" style="margin-left:8px">浏览目录</button></label>
+            <input type="text" id="nl-local-path" placeholder="例如：/share/manga、/mnt/smb/comics 或 Z:\\Manga">
           </div>
         </div>
 
@@ -1998,10 +2034,25 @@
 
     body.innerHTML = `
       <div class="stat-grid">
-        <div class="stat-box"><div class="k">总系列数</div><div class="v">${Number(st.totalSeries || 0).toLocaleString()}</div></div>
+        <div class="stat-box"><div class="k">总系列数</div><div class="v">${Number(st.totalSeries || 0).toLocaleString()}${(!st.showNsfw && st.nsfwCount > 0) ? `<span style="font-size:12px;font-weight:500;color:var(--text-muted);margin-left:6px">（已隐藏 NSFW ${Number(st.nsfwCount).toLocaleString()} 部）</span>` : ''}</div></div>
         <div class="stat-box"><div class="k">已匹配 Bangumi</div><div class="v" style="color:var(--success)">${Number(st.matchedCount || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">待刮削</div><div class="v">${Number(st.pendingCount || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">自动未命中</div><div class="v" style="color:var(--warn)">${Number(st.unmatchedCount || 0).toLocaleString()}</div></div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+          <div>
+            <h3 style="margin:0 0 4px">NSFW 作品前台显示开关</h3>
+            <div style="font-size:12.5px;color:var(--text-secondary)">
+              系统正常匹配 Bangumi <code>nsfw: true</code> 条目及含成人目录特征的作品（非 <code>nsfw: true</code> 的普通受限标签作品不受影响）。默认关闭以在前台书架与 Komga 客户端中自动隐藏 NSFW 作品（当前未隐藏书库中共识别 <strong>${Number(st.nsfwCount || 0).toLocaleString()}</strong> 部 NSFW 作品）。
+            </div>
+          </div>
+          <label class="check-row" style="font-weight:600;color:var(--text)">
+            <input type="checkbox" id="bgm-show-nsfw" ${st.showNsfw ? 'checked' : ''}>
+            <span>显示 NSFW 作品</span>
+          </label>
+        </div>
       </div>
 
       <div class="card">
@@ -2025,7 +2076,7 @@
         <div class="card">
           <h3>引擎一：Bangumi 官方离线索引库（推荐大规模书库使用）</h3>
           <p style="font-size:12.5px;color:var(--text-secondary)">
-            自动从 <code>bangumi/Archive</code> 拉取最新公开数据快照并校验 SHA256，流式导入全量非 NSFW 书籍主条目并剔除单行本子条目。几万部漫画可在本地 SQLite 毫秒级完成清洗与交叉匹配，零 API 限流风险。
+            自动从 <code>bangumi/Archive</code> 拉取最新公开数据快照并校验 SHA256，流式导入全量书籍主条目（含 <code>nsfw: true</code> 分级标记）并剔除单行本分卷子条目。几万部漫画可在本地 SQLite 毫秒级完成繁简/异体归一与作者交叉匹配，零 API 限流风险。
           </p>
           <div style="font-size:13px;margin:12px 0;display:grid;gap:4px">
             <div>状态：${arch.ready ? `<span class="badge badge-success">已就绪 · ${Number(arch.subjectCount || 0).toLocaleString()} 条书籍条目</span>` : `<span class="badge badge-warn">尚未建立离线索引</span>`}</div>
@@ -2046,7 +2097,7 @@
         <div class="card">
           <h3>启动批量自动刮削</h3>
           <p style="font-size:12.5px;color:var(--text-secondary)">
-            自动剥离 <code>[作者][出版社][卷数][完全版/扫图]</code> 等噪音并执行繁简归一与作者交叉打分；优先采用中文译名与 Bangumi 封面（按需懒加载缓存），不会覆盖已手动锁定的字段，严格排除 NSFW。
+            支持 <code>[标题][作者]</code> 与 <code>[作者][标题]</code> 双序识别、通用子目录（如 <code>台版</code>/<code>特别篇</code>）自动回溯父目录并追加后缀、繁简异体字归一与作者交叉打分，不会覆盖已手动绑定或锁定的字段。
           </p>
           <div class="field">
             <label>选择目标书库</label>
@@ -2056,10 +2107,12 @@
             </select>
           </div>
           <div class="field">
-            <label class="check-row">
-              <input type="checkbox" id="bgm-batch-force">
-              <span>强制重新刮削已自动匹配/未命中的条目（手动绑定与锁定字段仍受保护）</span>
-            </label>
+            <label>刮削范围模式</label>
+            <select id="bgm-batch-mode">
+              <option value="incremental">增量刮削（仅处理尚未刮削的新作品）</option>
+              <option value="retry_unmatched">重试未命中（处理“自动未命中”与新作品，规则升级后推荐）</option>
+              <option value="force">全量强制重刮（重新匹配全部作品，保留手动绑定与锁定字段）</option>
+            </select>
           </div>
           <button type="button" class="btn btn-bgm" id="bgm-batch-start">开始批量刮削</button>
         </div>
@@ -2081,7 +2134,7 @@
                     <tr>
                       <td><strong>${esc(r.libraryName || '全部未隐藏书库')}</strong></td>
                       <td><span class="badge">${esc(r.mode)}</span></td>
-                      <td><span class="badge ${r.status === 'completed' ? 'badge-success' : r.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(r.status)}</span></td>
+                      <td><span class="badge ${(r.status === 'completed' || r.status === 'success') ? 'badge-success' : r.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(r.status)}</span></td>
                       <td style="min-width:140px">
                         <div style="font-size:12px">${r.processedSeries} / ${r.totalSeries} (${pct}%)</div>
                         <div class="progress-track" style="margin-top:3px"><span style="width:${pct}%"></span></div>
@@ -2105,6 +2158,19 @@
         }
       }
     }
+
+    document.getElementById('bgm-show-nsfw').onchange = async (e) => {
+      const showNsfw = e.target.checked;
+      try {
+        await api('/admin/api/bangumi/config', { method: 'PUT', body: { showNsfw } });
+        state.taxonomies.loaded = false;
+        toast(showNsfw ? '已开启显示 NSFW 作品' : '已隐藏 NSFW 作品');
+        renderAdminBangumi(body);
+      } catch (err) {
+        e.target.checked = !showNsfw;
+        toast(err.message, 'error');
+      }
+    };
 
     document.getElementById('bgm-proxy-save').onclick = async () => {
       const proxyUrl = document.getElementById('bgm-proxy-url').value.trim();
@@ -2166,11 +2232,13 @@
     }
     document.getElementById('bgm-batch-start').onclick = async () => {
       try {
+        const mode = document.getElementById('bgm-batch-mode').value;
         await api('/admin/api/bangumi/runs', {
           method: 'POST',
           body: {
             libraryId: document.getElementById('bgm-batch-lib').value,
-            force: document.getElementById('bgm-batch-force').checked,
+            mode,
+            force: mode === 'force',
           },
         });
         toast('批量刮削任务已启动');
@@ -2230,7 +2298,7 @@
               ${scans.map((s) => `
                 <tr>
                   <td><strong>${esc(s.libraryName || s.libraryId)}</strong></td>
-                  <td><span class="badge ${s.status === 'completed' ? 'badge-success' : s.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(s.status)}</span></td>
+                  <td><span class="badge ${(s.status === 'completed' || s.status === 'success') ? 'badge-success' : s.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(s.status)}</span></td>
                   <td>目录 ${s.directoriesSeen ?? s.directoriesScanned ?? 0} · 系列 ${s.seriesSeen ?? s.seriesFound ?? 0} · 单册 ${s.booksSeen ?? s.booksFound ?? 0}</td>
                   <td>${fmtTime(s.startedAt)}</td>
                   <td style="color:var(--danger);font-size:12px">${esc(s.error || '')}</td>
@@ -2249,7 +2317,7 @@
               ${covers.map((c) => `
                 <tr>
                   <td><strong>${esc(c.libraryName || c.libraryId)}</strong></td>
-                  <td><span class="badge ${c.status === 'completed' ? 'badge-success' : c.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(c.status)}</span></td>
+                  <td><span class="badge ${(c.status === 'completed' || c.status === 'success') ? 'badge-success' : c.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(c.status)}</span></td>
                   <td>${c.processedSeries || 0} / ${c.totalSeries || 0}</td>
                   <td>${c.generatedCount || 0} / ${c.skippedCount || 0} / ${c.failedCount || 0}</td>
                   <td style="font-size:12px;color:var(--text-muted)">${esc(c.currentSeries || fmtTime(c.startedAt))}</td>
@@ -2312,12 +2380,12 @@
         <div class="stat-grid">
           <div class="stat-box">
             <div class="k">Range 分块缓存（115 / WebDAV）</div>
-            <div class="v" style="font-size:17px">${fmtBytes(rangeStat.bytes)} · ${rangeStat.count || 0} 块</div>
+            <div class="v" style="font-size:17px">${fmtMiB(rangeStat.bytes)} · ${rangeStat.files ?? rangeStat.count ?? 0} 块</div>
             <button type="button" class="btn btn-sm" style="margin-top:8px" data-clear-cache="range">清理 Range</button>
           </div>
           <div class="stat-box">
             <div class="k">解压页面缓存</div>
-            <div class="v" style="font-size:17px">${fmtBytes(pageStat.bytes)} · ${pageStat.count || 0} 页</div>
+            <div class="v" style="font-size:17px">${fmtMiB(pageStat.bytes)} · ${pageStat.files ?? pageStat.count ?? 0} 页</div>
             <button type="button" class="btn btn-sm" style="margin-top:8px" data-clear-cache="page">清理页面缓存</button>
           </div>
           <div class="stat-box">
@@ -2327,12 +2395,12 @@
           </div>
           <div class="stat-box">
             <div class="k">首卷缩略图缓存</div>
-            <div class="v" style="font-size:17px">${fmtBytes(thumbStat.bytes)} · ${thumbStat.files ?? thumbStat.count ?? 0} 张</div>
+            <div class="v" style="font-size:17px">${fmtMiB(thumbStat.bytes)} · ${thumbStat.files ?? thumbStat.count ?? 0} 张</div>
             <button type="button" class="btn btn-sm" style="margin-top:8px" data-clear-cache="thumbnail">清理首卷封面</button>
           </div>
           <div class="stat-box">
             <div class="k">Bangumi 懒加载封面缓存</div>
-            <div class="v" style="font-size:17px">${fmtBytes(bgmThumb.bytes)} · ${bgmThumb.files ?? bgmThumb.count ?? 0} 张</div>
+            <div class="v" style="font-size:17px">${fmtMiB(bgmThumb.bytes)} · ${bgmThumb.files ?? bgmThumb.count ?? 0} 张</div>
             <button type="button" class="btn btn-sm" style="margin-top:8px" data-clear-cache="bangumi">清理 Bgm 封面</button>
           </div>
         </div>
@@ -2343,15 +2411,16 @@
         <div class="grid-2">
           <div class="field"><label>115 API 限速 (req/s)</label><input type="text" name="api_rate_per_second" value="${esc(settings.api_rate_per_second || '3')}"></div>
           <div class="field"><label>下载直链缓存秒数 (downurl_ttl_seconds)</label><input type="number" name="downurl_ttl_seconds" value="${esc(settings.downurl_ttl_seconds || '1800')}"></div>
-          <div class="field"><label>Range 分块大小 (字节)</label><input type="number" name="range_block_size" value="${esc(settings.range_block_size || '2097152')}"></div>
-          <div class="field"><label>Range 缓存上限 (字节)</label><input type="number" name="range_cache_max_bytes" value="${esc(settings.range_cache_max_bytes || '2147483648')}"></div>
-          <div class="field"><label>页面缓存上限 (字节)</label><input type="number" name="page_cache_max_bytes" value="${esc(settings.page_cache_max_bytes || '1073741824')}"></div>
+          <div class="field"><label>Range 分块大小 (MiB)</label><input type="number" step="0.25" min="0.25" name="range_block_size_mib" value="${esc(bytesToMiBInput(settings.range_block_size, 2))}"></div>
+          <div class="field"><label>Range 缓存上限 (MiB)</label><input type="number" step="1" min="0" name="range_cache_max_mib" value="${esc(bytesToMiBInput(settings.range_cache_max_bytes, 2048))}"></div>
+          <div class="field"><label>页面缓存上限 (MiB)</label><input type="number" step="1" min="0" name="page_cache_max_mib" value="${esc(bytesToMiBInput(settings.page_cache_max_bytes, 1024))}"></div>
           <div class="field"><label>向后预读页数 (page_prefetch_count)</label><input type="number" name="page_prefetch_count" value="${esc(settings.page_prefetch_count || '2')}"></div>
-          <div class="field"><label>单页最大允许字节 (max_page_size)</label><input type="number" name="max_page_size" value="${esc(settings.max_page_size || '52428800')}"></div>
+          <div class="field"><label>单页最大允许体积 (MiB)</label><input type="number" step="1" min="1" name="max_page_size_mib" value="${esc(bytesToMiBInput(settings.max_page_size, 50))}"></div>
           <div class="field"><label>下一卷索引预热阈值（剩余页数 1-100）</label><input type="number" name="volume_index_prefetch_remaining_pages" value="${esc(settings.volume_index_prefetch_remaining_pages || '10')}"></div>
           <div class="field"><label>定时自动扫描间隔（分钟）</label><input type="number" name="auto_scan_interval_minutes" value="${esc(settings.auto_scan_interval_minutes || '360')}"></div>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:18px;margin:10px 0 16px">
+          <label class="check-row"><input type="checkbox" name="show_nsfw" ${settings.show_nsfw === 'true' ? 'checked' : ''}><span>显示 NSFW 作品（默认隐藏）</span></label>
           <label class="check-row"><input type="checkbox" name="volume_index_prefetch_enabled" ${settings.volume_index_prefetch_enabled === 'true' ? 'checked' : ''}><span>启用下一卷目录索引自动预热</span></label>
           <label class="check-row"><input type="checkbox" name="auto_scan_enabled" ${settings.auto_scan_enabled === 'true' ? 'checked' : ''}><span>启用定时自动扫描</span></label>
           <label class="check-row"><input type="checkbox" name="scan_on_startup" ${settings.scan_on_startup === 'true' ? 'checked' : ''}><span>进程启动时自动扫描</span></label>
@@ -2377,13 +2446,29 @@
       e.preventDefault();
       const fd = new FormData(e.target);
       const payload = {};
-      ['api_rate_per_second', 'downurl_ttl_seconds', 'range_block_size', 'range_cache_max_bytes', 'page_cache_max_bytes', 'page_prefetch_count', 'max_page_size', 'volume_index_prefetch_remaining_pages', 'auto_scan_interval_minutes']
+      ['api_rate_per_second', 'downurl_ttl_seconds', 'page_prefetch_count', 'volume_index_prefetch_remaining_pages', 'auto_scan_interval_minutes']
         .forEach((k) => { payload[k] = String(fd.get(k) || '').trim(); });
-      ['volume_index_prefetch_enabled', 'auto_scan_enabled', 'scan_on_startup']
+      const mibPairs = [
+        ['range_block_size', 'range_block_size_mib', 'Range 分块大小'],
+        ['range_cache_max_bytes', 'range_cache_max_mib', 'Range 缓存上限'],
+        ['page_cache_max_bytes', 'page_cache_max_mib', '页面缓存上限'],
+        ['max_page_size', 'max_page_size_mib', '单页最大允许体积'],
+      ];
+      for (const [byteKey, mibField, label] of mibPairs) {
+        const converted = mibInputToBytes(fd.get(mibField));
+        if (converted === null) {
+          toast(`${label} 请输入有效的非负数字 (MiB)`, 'error');
+          return;
+        }
+        payload[byteKey] = converted;
+      }
+      ['show_nsfw', 'volume_index_prefetch_enabled', 'auto_scan_enabled', 'scan_on_startup']
         .forEach((k) => { payload[k] = e.target.elements[k].checked ? 'true' : 'false'; });
       try {
         await api('/admin/api/settings', { method: 'PUT', body: payload });
+        state.taxonomies.loaded = false;
         toast('系统设置已保存');
+        renderAdminSettings(body);
       } catch (err) { toast(err.message, 'error'); }
     };
   }
@@ -2416,8 +2501,8 @@
         </form>
 
         <div class="card">
-          <h3>API Key 管理（推荐用于外部客户端 / 脚本）</h3>
-          <p style="font-size:12.5px;color:var(--text-secondary)">通过请求头 <code>X-API-Key: &lt;密钥&gt;</code> 访问 Komga 接口，无需暴露主登录密码，可随时单独吊销。</p>
+          <h3>API Key 管理（推荐用于 AI Agent / 外部客户端 / 脚本）</h3>
+          <p style="font-size:12.5px;color:var(--text-secondary)">支持通过 <code>Authorization: Bearer &lt;密钥&gt;</code> 或 <code>X-API-Key: &lt;密钥&gt;</code> 访问 Komga 接口与 AI Agent 专用书库管理接口（<code>GET /api/agent/v1/manifest</code>），无需暴露主登录密码，可随时单独吊销。</p>
           <div style="display:flex;gap:8px;margin-bottom:12px">
             <input type="text" id="ak-name" placeholder="备注名称，例如：Mihon 平板" style="flex:1;height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
             <button type="button" class="btn btn-primary" id="ak-create">生成 API Key</button>

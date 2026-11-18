@@ -37,6 +37,8 @@ func applyMigrations(db *sql.DB) error {
 		{"libraries", "webdav_account_id", "TEXT NOT NULL DEFAULT ''"},
 		{"libraries", "root_path", "TEXT NOT NULL DEFAULT ''"},
 		{"series", "one_shot", "INTEGER NOT NULL DEFAULT 0"},
+		{"series_metadata", "is_nsfw", "INTEGER NOT NULL DEFAULT 0"},
+		{"series_metadata", "nsfw_lock", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, migration := range migrations {
 		if err := addColumnIfMissing(db, migration.table, migration.column, migration.definition); err != nil {
@@ -120,6 +122,13 @@ func ensurePerformanceIndexes(db *sql.DB) error {
 			return err
 		}
 	}
+	if exists, err := tableExists(db, "series_metadata"); err != nil {
+		return err
+	} else if exists {
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_metadata_nsfw ON series_metadata(is_nsfw)`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -167,6 +176,8 @@ CREATE TABLE IF NOT EXISTS series_metadata (
   links_lock INTEGER NOT NULL DEFAULT 0,
   sharing_labels_json TEXT NOT NULL DEFAULT '[]',
   sharing_labels_lock INTEGER NOT NULL DEFAULT 0,
+  is_nsfw INTEGER NOT NULL DEFAULT 0,
+  nsfw_lock INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
 );
@@ -174,6 +185,7 @@ CREATE INDEX IF NOT EXISTS idx_series_metadata_title ON series_metadata(title CO
 CREATE INDEX IF NOT EXISTS idx_series_metadata_publisher ON series_metadata(publisher COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_series_metadata_scrape_status ON series_metadata(scrape_status);
 CREATE INDEX IF NOT EXISTS idx_series_metadata_bgm_id ON series_metadata(bgm_subject_id);
+CREATE INDEX IF NOT EXISTS idx_series_metadata_nsfw ON series_metadata(is_nsfw);
 
 CREATE TABLE IF NOT EXISTS series_genres (
   series_id TEXT NOT NULL,

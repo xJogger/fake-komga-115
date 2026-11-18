@@ -116,12 +116,10 @@ func (c *LiveClient) Search(
 	if err := c.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
-	nsfwFalse := false
 	reqBody, _ := json.Marshal(map[string]any{
 		"keyword": keyword,
 		"filter": map[string]any{
 			"type": []int{1},
-			"nsfw": nsfwFalse,
 		},
 	})
 	url := fmt.Sprintf("%s/v0/search/subjects?limit=%d", strings.TrimRight(c.baseURL, "/"), limit)
@@ -153,7 +151,7 @@ func (c *LiveClient) Search(
 	}
 	out := make([]SubjectCandidate, 0, len(payload.Data))
 	for _, item := range payload.Data {
-		if item.NSFW || item.Type != 1 {
+		if item.Type != 1 {
 			continue
 		}
 		cand := mapAPISubject(item, nil)
@@ -202,9 +200,6 @@ func (c *LiveClient) SubjectByID(ctx context.Context, subjectID int64) (SubjectC
 	var item apiSubjectResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&item); err != nil {
 		return SubjectCandidate{}, err
-	}
-	if item.NSFW {
-		return SubjectCandidate{}, ErrNSFWBlocked
 	}
 	persons, _ := c.fetchSubjectPersons(ctx, subjectID)
 	cand := mapAPISubject(item, persons)
@@ -361,6 +356,7 @@ func mapAPISubject(item apiSubjectResponse, persons []apiPersonRelation) Subject
 		Platform:        platformCode,
 		PlatformLabel:   PlatformName(platformCode),
 		IsSeries:        item.Series,
+		NSFW:            item.NSFW,
 		Name:            strings.TrimSpace(item.Name),
 		NameCN:          nameCN,
 		Summary:         strings.TrimSpace(item.Summary),

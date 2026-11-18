@@ -91,7 +91,13 @@ func ListDirectory(rootPath, relDir string) ([]Entry, error) {
 			continue
 		}
 		fullPath := filepath.Join(targetDir, name)
-		info, err := os.Stat(fullPath)
+		isRegularOrDir := de.IsDir() || de.Type().IsRegular()
+		var info fs.FileInfo
+		if isRegularOrDir {
+			info, err = de.Info()
+		} else {
+			info, err = os.Stat(fullPath)
+		}
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
 				continue
@@ -103,7 +109,7 @@ func ListDirectory(rootPath, relDir string) ([]Entry, error) {
 			childRel = baseRel + "/" + name
 		}
 		realKey := ""
-		if info.IsDir() {
+		if info.IsDir() && !isRegularOrDir {
 			if resolved, err := filepath.EvalSymlinks(fullPath); err == nil {
 				realKey = resolved
 			} else {
@@ -153,7 +159,7 @@ func BrowseDirectories(rawDir string) (current string, parent string, folders []
 			continue
 		}
 		isDir := entry.IsDir()
-		if !isDir && entry.Type()&os.ModeSymlink != 0 {
+		if !isDir && !entry.Type().IsRegular() {
 			if info, err := os.Stat(filepath.Join(clean, name)); err == nil && info.IsDir() {
 				isDir = true
 			}
@@ -188,7 +194,7 @@ func isIgnoredSystemName(name string) bool {
 		return true
 	}
 	switch strings.ToLower(name) {
-	case "@eadir", "#recycle", "$recycle.bin", "system volume information", "__macosx":
+	case "@eadir", "#recycle", "$recycle.bin", "system volume information", "__macosx", "thumbs.db", "ehthumbs.db", "desktop.ini":
 		return true
 	default:
 		return false

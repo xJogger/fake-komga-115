@@ -27,8 +27,9 @@ import (
 )
 
 const (
-	DefaultArchiveMetaURL = "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json"
-	archiveUserAgent      = "xJogger/fake-komga-115/2.0 (https://github.com/xJogger/fake-komga-115)"
+	DefaultArchiveMetaURL     = "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json"
+	archiveUserAgent          = "xJogger/fake-komga-115/2.0 (https://github.com/xJogger/fake-komga-115)"
+	currentTermsSchemaVersion = "2"
 )
 
 type ArchiveStatus struct {
@@ -356,19 +357,18 @@ func (a *ArchiveIndex) ImportFromZipFile(
 		return errors.New("subject.jsonlines not found in archive zip")
 	}
 
-	// Pass 1: collect non-NSFW book subject IDs and series IDs.
-	bookIDs := make(map[int64]bool, 200000)
+	// Pass 1: collect all book subject IDs (including nsfw=true) and series flags.
+	bookIDs := make(map[int64]bool, 220000)
 	if err := streamZipLines(ctx, subjFile, func(line []byte) error {
 		var header struct {
 			ID     int64 `json:"id"`
 			Type   int   `json:"type"`
-			NSFW   bool  `json:"nsfw"`
 			Series bool  `json:"series"`
 		}
 		if err := json.Unmarshal(line, &header); err != nil {
 			return nil
 		}
-		if header.Type == 1 && !header.NSFW && header.ID > 0 {
+		if header.Type == 1 && header.ID > 0 {
 			bookIDs[header.ID] = header.Series
 		}
 		return nil
@@ -467,6 +467,7 @@ CREATE TABLE bgm_subjects (
   id INTEGER PRIMARY KEY,
   platform INTEGER NOT NULL,
   is_series INTEGER NOT NULL,
+  is_nsfw INTEGER NOT NULL DEFAULT 0,
   name TEXT NOT NULL,
   name_cn TEXT NOT NULL,
   summary TEXT NOT NULL,
@@ -497,9 +498,9 @@ CREATE TABLE bgm_terms (
 	}
 	subjStmt, err := tx.PrepareContext(ctx, `
 INSERT INTO bgm_subjects(
- id,platform,is_series,name,name_cn,summary,publisher,status,release_date,
+ id,platform,is_series,is_nsfw,name,name_cn,summary,publisher,status,release_date,
  total_volumes,score,rank,genres_json,tags_json,authors_json,aliases_json
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -519,7 +520,7 @@ ON CONFLICT(term_key,subject_id) DO UPDATE SET is_primary=MAX(bgm_terms.is_prima
 		if err := json.Unmarshal(line, &s); err != nil {
 			return nil
 		}
-		if s.Type != 1 || s.NSFW || s.ID <= 0 {
+		if s.Type != 1 || s.ID <= 0 {
 			return nil
 		}
 		if _, isChild := childTankobons[s.ID]; isChild {
@@ -558,8 +559,12 @@ ON CONFLICT(term_key,subject_id) DO UPDATE SET is_primary=MAX(bgm_terms.is_prima
 		if s.Series {
 			isSeriesInt = 1
 		}
+		isNSFWInt := 0
+		if s.NSFW {
+			isNSFWInt = 1
+		}
 		if _, err := subjStmt.ExecContext(ctx,
-			s.ID, s.Platform, isSeriesInt, strings.TrimSpace(s.Name), nameCN,
+			s.ID, s.Platform, isSeriesInt, isNSFWInt, strings.TrimSpace(s.Name), nameCN,
 			strings.TrimSpace(s.Summary), wiki.Publisher, wiki.Status, relDate,
 			volsPtr, scorePtr, s.Rank,
 			string(genresJSON), string(tagsJSON), string(authorsJSON), string(aliasesJSON),
@@ -567,32 +572,8 @@ ON CONFLICT(term_key,subject_id) DO UPDATE SET is_primary=MAX(bgm_terms.is_prima
 			return err
 		}
 
-		insertTerm := func(raw string, primary int) error {
-			k := NormalizeMatchKey(raw)
-			if k == "" {
-				return nil
-			}
-			if _, err := termStmt.ExecContext(ctx, k, s.ID, primary); err != nil {
-				return err
-			}
-			stripped := NormalizeMatchKey(editionRe.ReplaceAllString(ToSimplified(raw), " "))
-			if stripped != "" && stripped != k && len([]rune(stripped)) >= 2 {
-				if _, err := termStmt.ExecContext(ctx, stripped, s.ID, 0); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		if err := insertTerm(nameCN, 1); err != nil {
+		if err := insertSubjectTerms(ctx, termStmt, s.ID, nameCN, s.Name, wiki.Aliases); err != nil {
 			return err
-		}
-		if err := insertTerm(s.Name, 1); err != nil {
-			return err
-		}
-		for _, alt := range wiki.Aliases {
-			if err := insertTerm(alt.Title, 0); err != nil {
-				return err
-			}
 		}
 		importedCount++
 		return nil
@@ -605,10 +586,12 @@ ON CONFLICT(term_key,subject_id) DO UPDATE SET is_primary=MAX(bgm_terms.is_prima
 	}
 	importedAt := time.Now().UTC().Format(time.RFC3339)
 	for k, v := range map[string]string{
-		"dump_name":       dumpName,
-		"dump_created_at": dumpCreatedAt,
-		"imported_at":     importedAt,
-		"subject_count":   fmt.Sprintf("%d", importedCount),
+		"dump_name":            dumpName,
+		"dump_created_at":      dumpCreatedAt,
+		"imported_at":          importedAt,
+		"subject_count":        fmt.Sprintf("%d", importedCount),
+		"terms_schema_version": currentTermsSchemaVersion,
+		"includes_nsfw":        "1",
 	} {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES(?,?)`, k, v); err != nil {
 			tx.Rollback()
@@ -646,10 +629,143 @@ PRAGMA journal_mode = DELETE;
 	return nil
 }
 
+func insertSubjectTerms(
+	ctx context.Context,
+	termStmt *sql.Stmt,
+	subjectID int64,
+	nameCN string,
+	name string,
+	aliases []database.AlternateTitle,
+) error {
+	insertRaw := func(raw string, primary int) error {
+		k := NormalizeMatchKey(raw)
+		if k == "" {
+			return nil
+		}
+		if _, err := termStmt.ExecContext(ctx, k, subjectID, primary); err != nil {
+			return err
+		}
+		simp := ToSimplified(raw)
+		for _, derived := range []string{
+			editionRe.ReplaceAllString(simp, " "),
+			stripTrailingParens(simp),
+			editionRe.ReplaceAllString(stripTrailingParens(simp), " "),
+		} {
+			dk := NormalizeMatchKey(derived)
+			if dk != "" && dk != k && len([]rune(dk)) >= 2 {
+				if _, err := termStmt.ExecContext(ctx, dk, subjectID, 0); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := insertRaw(nameCN, 1); err != nil {
+		return err
+	}
+	if err := insertRaw(name, 1); err != nil {
+		return err
+	}
+	for _, alt := range aliases {
+		if err := insertRaw(alt.Title, 0); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *ArchiveIndex) upgradeExistingIndexIfNeeded() {
+	if _, err := os.Stat(a.dbPath); err != nil {
+		return
+	}
+	checkDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(a.dbPath)+"?mode=ro&_pragma=query_only(1)")
+	if err != nil {
+		return
+	}
+	var schemaVer string
+	_ = checkDB.QueryRow(`SELECT value FROM meta WHERE key='terms_schema_version'`).Scan(&schemaVer)
+	hasNSFWCol := false
+	if cRows, err := checkDB.Query(`PRAGMA table_info(bgm_subjects)`); err == nil {
+		for cRows.Next() {
+			var cid, notNull, pk int
+			var cName, cType string
+			var dflt sql.NullString
+			if cRows.Scan(&cid, &cName, &cType, &notNull, &dflt, &pk) == nil && cName == "is_nsfw" {
+				hasNSFWCol = true
+			}
+		}
+		cRows.Close()
+	}
+	checkDB.Close()
+
+	if schemaVer == currentTermsSchemaVersion && hasNSFWCol {
+		return
+	}
+
+	rwDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(a.dbPath))
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Warn("open Bangumi archive index for local upgrade", "error", err)
+		}
+		return
+	}
+	defer rwDB.Close()
+
+	ctx := context.Background()
+	if !hasNSFWCol {
+		_, _ = rwDB.ExecContext(ctx, `ALTER TABLE bgm_subjects ADD COLUMN is_nsfw INTEGER NOT NULL DEFAULT 0`)
+	}
+	if schemaVer != currentTermsSchemaVersion {
+		type subjTermSource struct {
+			id          int64
+			name        string
+			nameCN      string
+			aliasesJSON string
+		}
+		rows, qErr := rwDB.QueryContext(ctx, `SELECT id,name,name_cn,aliases_json FROM bgm_subjects`)
+		if qErr == nil {
+			var sources []subjTermSource
+			for rows.Next() {
+				var item subjTermSource
+				if rows.Scan(&item.id, &item.name, &item.nameCN, &item.aliasesJSON) == nil {
+					sources = append(sources, item)
+				}
+			}
+			rows.Close()
+
+			tx, txErr := rwDB.BeginTx(ctx, nil)
+			if txErr == nil {
+				_, _ = tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_bgm_terms_key; DELETE FROM bgm_terms;`)
+				stmt, pErr := tx.PrepareContext(ctx, `
+INSERT INTO bgm_terms(term_key,subject_id,is_primary) VALUES(?,?,?)
+ON CONFLICT(term_key,subject_id) DO UPDATE SET is_primary=MAX(bgm_terms.is_primary, excluded.is_primary)`)
+				if pErr == nil {
+					for _, src := range sources {
+						var aliases []database.AlternateTitle
+						_ = json.Unmarshal([]byte(src.aliasesJSON), &aliases)
+						_ = insertSubjectTerms(ctx, stmt, src.id, src.nameCN, src.name, aliases)
+					}
+					stmt.Close()
+					_, _ = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_bgm_terms_key ON bgm_terms(term_key)`)
+					_, _ = tx.ExecContext(ctx, `
+INSERT INTO meta(key,value) VALUES('terms_schema_version',?)
+ON CONFLICT(key) DO UPDATE SET value=excluded.value`, currentTermsSchemaVersion)
+					if cErr := tx.Commit(); cErr == nil && a.logger != nil {
+						a.logger.Info("Bangumi offline index terms upgraded locally", "subjects", len(sources), "schema", currentTermsSchemaVersion)
+					}
+				} else {
+					_ = tx.Rollback()
+				}
+			}
+		}
+	}
+}
+
 func (a *ArchiveIndex) openExistingIfPresent() {
 	if _, err := os.Stat(a.dbPath); err != nil {
 		return
 	}
+	a.upgradeExistingIndexIfNeeded()
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(a.dbPath)+"?mode=ro&_pragma=query_only(1)")
 	if err != nil {
 		if a.logger != nil {
@@ -735,19 +851,26 @@ func (a *ArchiveIndex) Search(
 	}
 	rows.Close()
 
-	// Prefix fallback on primary key if exact term_key returned few hits and key has >= 3 runes.
-	if len(subjectIDSet) < 8 && len([]rune(keys[0])) >= 3 {
-		pRows, err := db.QueryContext(ctx,
-			`SELECT DISTINCT subject_id FROM bgm_terms WHERE term_key>=? AND term_key<? LIMIT 60`,
-			keys[0], keys[0]+"\uffff")
-		if err == nil {
-			for pRows.Next() {
-				var id int64
-				if pRows.Scan(&id) == nil {
-					subjectIDSet[id] = true
-				}
+	// Prefix fallback on top candidate keys if exact term_key returned few hits and key has >= 3 runes.
+	if len(subjectIDSet) < 8 {
+		maxPrefixKeys := min(2, len(keys))
+		for i := 0; i < maxPrefixKeys; i++ {
+			pk := keys[i]
+			if len([]rune(pk)) < 3 {
+				continue
 			}
-			pRows.Close()
+			pRows, err := db.QueryContext(ctx,
+				`SELECT DISTINCT subject_id FROM bgm_terms WHERE term_key>=? AND term_key<? LIMIT 60`,
+				pk, pk+"\uffff")
+			if err == nil {
+				for pRows.Next() {
+					var id int64
+					if pRows.Scan(&id) == nil {
+						subjectIDSet[id] = true
+					}
+				}
+				pRows.Close()
+			}
 		}
 	}
 	if len(subjectIDSet) == 0 {
@@ -759,7 +882,7 @@ func (a *ArchiveIndex) Search(
 		idArgs = append(idArgs, id)
 	}
 	sRows, err := db.QueryContext(ctx, `
-SELECT id,platform,is_series,name,name_cn,summary,publisher,status,release_date,
+SELECT id,platform,is_series,coalesce(is_nsfw,0),name,name_cn,summary,publisher,status,release_date,
  total_volumes,score,rank,genres_json,tags_json,authors_json,aliases_json
 FROM bgm_subjects WHERE id IN `+database.Placeholders(len(idArgs)), idArgs...)
 	if err != nil {
@@ -810,7 +933,7 @@ func (a *ArchiveIndex) SubjectByID(ctx context.Context, subjectID int64) (Subjec
 		return SubjectCandidate{}, false, nil
 	}
 	row := db.QueryRowContext(ctx, `
-SELECT id,platform,is_series,name,name_cn,summary,publisher,status,release_date,
+SELECT id,platform,is_series,coalesce(is_nsfw,0),name,name_cn,summary,publisher,status,release_date,
  total_volumes,score,rank,genres_json,tags_json,authors_json,aliases_json
 FROM bgm_subjects WHERE id=?`, subjectID)
 	cand, err := scanSubjectCandidateRow(row)
@@ -828,13 +951,14 @@ func scanSubjectCandidateRow(scanner interface{ Scan(...any) error }) (SubjectCa
 	var (
 		c                          SubjectCandidate
 		isSeries                   int
+		isNSFW                     int
 		totalVols                  sql.NullInt64
 		score                      sql.NullFloat64
 		genresJSON, tagsJSON       string
 		authorsJSON, altTitlesJSON string
 	)
 	if err := scanner.Scan(
-		&c.ID, &c.Platform, &isSeries, &c.Name, &c.NameCN, &c.Summary,
+		&c.ID, &c.Platform, &isSeries, &isNSFW, &c.Name, &c.NameCN, &c.Summary,
 		&c.Publisher, &c.Status, &c.ReleaseDate, &totalVols, &score, &c.Rank,
 		&genresJSON, &tagsJSON, &authorsJSON, &altTitlesJSON,
 	); err != nil {
@@ -842,6 +966,7 @@ func scanSubjectCandidateRow(scanner interface{ Scan(...any) error }) (SubjectCa
 	}
 	c.PlatformLabel = PlatformName(c.Platform)
 	c.IsSeries = isSeries != 0
+	c.NSFW = isNSFW != 0
 	c.CoverURL = CoverEndpointURL(c.ID)
 	if totalVols.Valid && totalVols.Int64 > 0 {
 		v := int(totalVols.Int64)

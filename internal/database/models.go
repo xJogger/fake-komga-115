@@ -166,6 +166,8 @@ type SeriesMetadata struct {
 	LinksLock           bool             `json:"linksLock"`
 	SharingLabels       []string         `json:"sharingLabels"`
 	SharingLabelsLock   bool             `json:"sharingLabelsLock"`
+	IsNSFW              bool             `json:"isNsfw"`
+	NSFWLock            bool             `json:"nsfwLock"`
 	UpdatedAt           time.Time        `json:"updatedAt"`
 }
 

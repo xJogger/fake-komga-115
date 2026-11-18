@@ -690,6 +690,115 @@ INSERT INTO books(
 		t.Fatalf("restored thumbnail status=%d type=%q", restoredThumb.StatusCode, restoredThumb.Header.Get("Content-Type"))
 	}
 
+	// 10. Agent API (/api/agent/v1) with Authorization: Bearer + NSFW default-hide & toggle lifecycle
+	var agentKey struct {
+		Key    string `json:"key"`
+		Record struct {
+			ID string `json:"id"`
+		} `json:"record"`
+	}
+	agentKeyResp := requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/admin/api/auth/api-keys", map[string]string{
+		"name": "Library Agent",
+	})
+	if agentKeyResp.StatusCode != http.StatusCreated {
+		agentKeyResp.Body.Close()
+		t.Fatalf("create agent API key status=%d", agentKeyResp.StatusCode)
+	}
+	if err := json.NewDecoder(agentKeyResp.Body).Decode(&agentKey); err != nil {
+		agentKeyResp.Body.Close()
+		t.Fatal(err)
+	}
+	agentKeyResp.Body.Close()
+
+	doAgentJSON := func(method, path string, body any, out any) int {
+		var bodyReader io.Reader
+		if body != nil {
+			b, mErr := json.Marshal(body)
+			if mErr != nil {
+				t.Fatal(mErr)
+			}
+			bodyReader = bytes.NewReader(b)
+		}
+		req, rErr := http.NewRequest(method, server.URL+path, bodyReader)
+		if rErr != nil {
+			t.Fatal(rErr)
+		}
+		req.Header.Set("Authorization", "Bearer "+agentKey.Key)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, dErr := noRedirect.Do(req)
+		if dErr != nil {
+			t.Fatal(dErr)
+		}
+		defer resp.Body.Close()
+		if out != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return resp.StatusCode
+	}
+
+	var manifest map[string]any
+	if st := doAgentJSON(http.MethodGet, "/api/agent/v1/manifest", nil, &manifest); st != http.StatusOK || manifest["basePath"] != "/api/agent/v1" {
+		t.Fatalf("agent manifest failed: status=%d body=%#v", st, manifest)
+	}
+
+	// Mark seriesID as NSFW via Agent batch API
+	var batchOut map[string]any
+	if st := doAgentJSON(http.MethodPost, "/api/agent/v1/series/batch", map[string]any{
+		"operations": []map[string]any{
+			{
+				"seriesId": seriesID,
+				"action":   "patch_metadata",
+				"patch": map[string]any{
+					"isNsfw":   true,
+					"nsfwLock": true,
+				},
+			},
+		},
+	}, &batchOut); st != http.StatusOK || batchOut["succeeded"].(float64) != 1 {
+		t.Fatalf("agent batch patch_metadata failed: status=%d body=%#v", st, batchOut)
+	}
+
+	// Default show_nsfw=false: seriesID must be hidden (404) on UI, reader, and Komga API,
+	// while remaining visible to Agent API (?nsfw=only)!
+	for _, nsfwURL := range []string{
+		server.URL + "/series/" + seriesID,
+		server.URL + "/reader/series/" + seriesID + "/book/" + bookID,
+		server.URL + "/api/v1/series/" + seriesID,
+		server.URL + "/api/v1/books/" + bookID,
+	} {
+		resp, nErr := noRedirSession.Get(nsfwURL)
+		if nErr != nil {
+			t.Fatal(nErr)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("NSFW route %s expected 404 when show_nsfw=false, got %d", nsfwURL, resp.StatusCode)
+		}
+	}
+
+	var agentNSFWPage map[string]any
+	if st := doAgentJSON(http.MethodGet, "/api/agent/v1/series?nsfw=only", nil, &agentNSFWPage); st != http.StatusOK || agentNSFWPage["totalElements"].(float64) != 1 {
+		t.Fatalf("agent series?nsfw=only expected 1 item, got status=%d body=%#v", st, agentNSFWPage)
+	}
+
+	// Toggle showNsfw=true via Agent settings API -> seriesID becomes visible on UI and Komga API!
+	if st := doAgentJSON(http.MethodPatch, "/api/agent/v1/settings", map[string]any{"showNsfw": true}, nil); st != http.StatusOK {
+		t.Fatalf("agent PATCH settings showNsfw=true status=%d", st)
+	}
+	var visibleNSFWSeries map[string]any
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/series/"+seriesID, &visibleNSFWSeries)
+	if visibleNSFWSeries["isNsfw"] != true {
+		t.Fatalf("expected isNsfw=true on visible series DTO, got %#v", visibleNSFWSeries)
+	}
+	_ = getTextWithClient(t, sessionClient, server.URL+"/series/"+seriesID, http.StatusOK)
+
+	// Restore showNsfw=false
+	_ = doAgentJSON(http.MethodPatch, "/api/agent/v1/settings", map[string]any{"showNsfw": false}, nil)
+
 	_ = getTextWithClient(t, sessionClient, server.URL+"/series/non-existent", http.StatusNotFound)
 	notFoundHTML := getTextWithClient(t, sessionClient, server.URL+"/missing-page", http.StatusNotFound)
 	if !strings.Contains(notFoundHTML, "没有找到这个页面") {

@@ -47,6 +47,9 @@ func TestScanAndReadLocalAndWebDAVLibraries(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(seriesDir, "Vol.01.cbz"), cbzBytes, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// SMB/Windows metadata files must be ignored during local directory scan
+	_ = os.WriteFile(filepath.Join(seriesDir, "Thumbs.db"), []byte("ignore"), 0o644)
+	_ = os.WriteFile(filepath.Join(seriesDir, "desktop.ini"), []byte("ignore"), 0o644)
 	localLocator := "local:" + localRoot
 	localLib := database.Library{
 		ID:           id.Library(localLocator),
@@ -174,6 +177,31 @@ func TestScanAndReadLocalAndWebDAVLibraries(t *testing.T) {
 	}
 	if rangeFiles != 1 {
 		t.Fatalf("expected exactly 1 range cache entry (from WebDAV only), got %d", rangeFiles)
+	}
+
+	// Simulate unmounted SMB share (root directory exists as empty mountpoint while books exist in DB):
+	// scan must fail safely without wiping existing catalog rows!
+	if err := os.RemoveAll(seriesDir); err != nil {
+		t.Fatal(err)
+	}
+	emptyScanRun, err := scanMgr.StartLibrary(ctx, localLib.ID, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for time.Now().Before(time.Now().Add(5 * time.Second)) {
+		cur, _ := scanMgr.Run(ctx, emptyScanRun.ID)
+		if cur.Status == "failed" || cur.Status == "success" {
+			emptyScanRun = cur
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if emptyScanRun.Status != "failed" || !strings.Contains(emptyScanRun.Error, "appears empty") {
+		t.Fatalf("expected empty SMB mountpoint scan to fail with protection error, got %+v", emptyScanRun)
+	}
+	preservedBooks, preservedTotal, err := store.BooksPage(ctx, database.BookQuery{LibraryIDs: []string{localLib.ID}, Unpaged: true})
+	if err != nil || preservedTotal != 1 || len(preservedBooks) != 1 {
+		t.Fatalf("expected existing local book to be preserved after unmounted root scan, got total=%d err=%v", preservedTotal, err)
 	}
 }
 

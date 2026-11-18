@@ -76,6 +76,7 @@ func (s *Store) ensureDefaults(ctx context.Context) error {
 		"volume_index_prefetch_remaining_pages": "10",
 		"max_page_size":                         "104857600",
 		"downurl_ttl_seconds":                   "1200",
+		"show_nsfw":                             "false",
 	}
 	now := nowText()
 	for key, value := range defaults {
@@ -340,6 +341,10 @@ func (s *Store) IsLibraryEnabled(ctx context.Context, id string) bool {
 		return false
 	}
 	return enabled != 0
+}
+
+func (s *Store) ShowNSFW(ctx context.Context) bool {
+	return s.BoolSetting(ctx, "show_nsfw", false)
 }
 
 func nowText() string { return time.Now().UTC().Format(time.RFC3339Nano) }

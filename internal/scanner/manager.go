@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,6 +50,7 @@ type queueDir struct {
 	Name         string
 	RelativePath string
 	ModifiedAt   time.Time
+	RealKey      string
 }
 
 type counters struct {
@@ -408,16 +410,24 @@ func (m *Manager) scanLocal(ctx context.Context, item job, stage bool) (counters
 	if err != nil {
 		return counters{}, fmt.Errorf("local library root: %w", err)
 	}
+	rootResolved := rootClean
+	if resolved, err := filepath.EvalSymlinks(rootClean); err == nil && resolved != "" {
+		rootResolved = resolved
+	}
 	rootName := path.Base(strings.ReplaceAll(rootClean, "\\", "/"))
 	if rootName == "" || rootName == "/" || rootName == "." {
 		rootName = item.library.Name
 	}
-	visitedReal := map[string]bool{rootClean: true}
+	visitedReal := map[string]bool{
+		rootClean:    true,
+		rootResolved: true,
+	}
 	queue := []queueDir{{
 		CID:          ".",
 		Name:         rootName,
 		RelativePath: rootName,
 		ModifiedAt:   time.Now().UTC(),
+		RealKey:      rootResolved,
 	}}
 	var counts counters
 	for len(queue) > 0 {
@@ -430,21 +440,33 @@ func (m *Manager) scanLocal(ctx context.Context, item job, stage bool) (counters
 		if err != nil {
 			return counts, fmt.Errorf("list %s: %w", current.RelativePath, err)
 		}
+		if current.CID == "." && len(entries) == 0 {
+			var existingBooks int64
+			_ = m.store.DB().QueryRowContext(ctx, `SELECT count(*) FROM books WHERE library_id=?`, item.library.ID).Scan(&existingBooks)
+			if existingBooks > 0 {
+				return counts, fmt.Errorf("local library root %q appears empty (0 entries) while %d books exist in database; refusing to wipe catalog (check if SMB/NAS share is unmounted)", rootClean, existingBooks)
+			}
+		}
 		counts.directories++
 		var comics []oneonefive.File
 		for _, entry := range entries {
 			if entry.IsDir {
-				if entry.RealDirKey != "" {
-					if visitedReal[entry.RealDirKey] {
+				realKey := entry.RealDirKey
+				if realKey == "" && current.RealKey != "" {
+					realKey = filepath.Join(current.RealKey, entry.Name)
+				}
+				if realKey != "" {
+					if visitedReal[realKey] {
 						continue
 					}
-					visitedReal[entry.RealDirKey] = true
+					visitedReal[realKey] = true
 				}
 				queue = append(queue, queueDir{
 					CID:          entry.RelPath,
 					Name:         entry.Name,
 					RelativePath: path.Join(current.RelativePath, entry.Name),
 					ModifiedAt:   entry.ModifiedAt,
+					RealKey:      realKey,
 				})
 				continue
 			}

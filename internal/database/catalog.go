@@ -9,21 +9,23 @@ import (
 )
 
 type SeriesQuery struct {
-	Search       string
-	LibraryIDs   []string
-	ReadStatus   []string
-	Statuses     []string
-	Genres       []string
-	Tags         []string
-	Publishers   []string
-	Authors      []string
-	Languages    []string
-	ScrapeStatus string
-	OneShot      *bool
-	Empty        bool
-	Page         int
-	Size         int
-	Sort         string
+	Search        string
+	LibraryIDs    []string
+	ReadStatus    []string
+	Statuses      []string
+	Genres        []string
+	Tags          []string
+	Publishers    []string
+	Authors       []string
+	Languages     []string
+	ScrapeStatus  string
+	IncludeHidden bool
+	NSFWMode      string // "" = follow ShowNSFW(ctx), "all" = both, "only" = nsfw only, "exclude" = non-nsfw only
+	OneShot       *bool
+	Empty         bool
+	Page          int
+	Size          int
+	Sort          string
 }
 
 type BookQuery struct {
@@ -50,6 +52,13 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 	}
 	if q.Empty {
 		return nil, 0, nil
+	}
+	if q.NSFWMode == "" {
+		if s.ShowNSFW(ctx) {
+			q.NSFWMode = "all"
+		} else {
+			q.NSFWMode = "exclude"
+		}
 	}
 	where, args := buildSeriesFilters(q)
 	var total int64
@@ -99,15 +108,29 @@ func sortDirection(value string) string {
 }
 
 func (s *Store) SeriesByID(ctx context.Context, id string) (Series, error) {
+	return s.seriesByID(ctx, id, false, !s.ShowNSFW(ctx))
+}
+
+func (s *Store) SeriesByIDAny(ctx context.Context, id string, includeHidden bool) (Series, error) {
+	return s.seriesByID(ctx, id, includeHidden, false)
+}
+
+func (s *Store) seriesByID(ctx context.Context, id string, includeHidden, excludeNSFW bool) (Series, error) {
 	var item Series
 	var modified sql.NullString
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, `
+	query := `
 SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified_at,s.created_at,s.updated_at,
  (SELECT count(*) FROM books b WHERE b.series_id=s.id)
-FROM series s
-JOIN libraries l ON l.id=s.library_id AND l.enabled=1
-WHERE s.id=?`, id).Scan(
+FROM series s`
+	if !includeHidden {
+		query += ` JOIN libraries l ON l.id=s.library_id AND l.enabled=1`
+	}
+	query += ` WHERE s.id=?`
+	if excludeNSFW {
+		query += ` AND NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=s.id AND sm_nsfw.is_nsfw=1)`
+	}
+	err := s.db.QueryRowContext(ctx, query, id).Scan(
 		&item.ID, &item.LibraryID, &item.CID, &item.Name, &item.RelativePath, &item.OneShot,
 		&modified, &created, &updated, &item.BooksCount,
 	)
@@ -130,7 +153,7 @@ func (s *Store) BooksPage(ctx context.Context, q BookQuery) ([]Book, int64, erro
 	if q.Empty {
 		return nil, 0, nil
 	}
-	where, args := buildBookFilters(q)
+	where, args := buildBookFilters(q, !s.ShowNSFW(ctx))
 	var total int64
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM books b`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -179,17 +202,25 @@ FROM books b LEFT JOIN zip_indexes z ON z.book_id=b.id` + where + ` ORDER BY ` +
 }
 
 func (s *Store) BookByID(ctx context.Context, id string) (Book, error) {
+	return s.bookByID(ctx, id, !s.ShowNSFW(ctx))
+}
+
+func (s *Store) bookByID(ctx context.Context, id string, excludeNSFW bool) (Book, error) {
 	var item Book
 	var fileCreated, fileModified sql.NullString
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, `
+	query := `
 SELECT b.id,b.series_id,b.library_id,b.file_id,b.parent_cid,b.name,b.size,b.pick_code,b.sha1,
  b.file_created_at,b.file_modified_at,b.number_sort,b.created_at,b.updated_at,
  coalesce(z.page_count,0)
 FROM books b
 JOIN libraries l ON l.id=b.library_id AND l.enabled=1
 LEFT JOIN zip_indexes z ON z.book_id=b.id
-WHERE b.id=?`, id).Scan(
+WHERE b.id=?`
+	if excludeNSFW {
+		query += ` AND NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=b.series_id AND sm_nsfw.is_nsfw=1)`
+	}
+	err := s.db.QueryRowContext(ctx, query, id).Scan(
 		&item.ID, &item.SeriesID, &item.LibraryID, &item.FileID, &item.ParentCID,
 		&item.Name, &item.Size, &item.PickCode, &item.SHA1, &fileCreated, &fileModified,
 		&item.NumberSort, &created, &updated, &item.PageCount,
@@ -220,6 +251,9 @@ SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified
 FROM series s
 JOIN libraries l ON l.id=s.library_id AND l.enabled=1
 WHERE s.id IN ` + Placeholders(len(args))
+	if !s.ShowNSFW(ctx) {
+		query += ` AND NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=s.id AND sm_nsfw.is_nsfw=1)`
+	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -243,7 +277,7 @@ ORDER BY number_sort ASC,name COLLATE NOCASE ASC,id ASC LIMIT 1`, seriesID).Scan
 	if err != nil {
 		return Book{}, err
 	}
-	return s.BookByID(ctx, id)
+	return s.bookByID(ctx, id, false)
 }
 
 func (s *Store) NextBookInSeries(ctx context.Context, current Book) (Book, error) {
@@ -293,19 +327,40 @@ WHERE ordered.id=? AND ordered.previous_id IS NOT NULL AND series.one_shot=0`,
 func (s *Store) Counts(
 	ctx context.Context,
 ) (libraries, series, books, comicBytes int64, err error) {
-	err = s.db.QueryRowContext(ctx, `
+	if s.ShowNSFW(ctx) {
+		err = s.db.QueryRowContext(ctx, `
 SELECT
  (SELECT count(*) FROM libraries WHERE enabled=1),
  (SELECT count(*) FROM series s JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1),
  (SELECT count(*) FROM books b JOIN libraries l ON l.id=b.library_id WHERE l.enabled=1),
  (SELECT coalesce(sum(b.size),0) FROM books b JOIN libraries l ON l.id=b.library_id WHERE l.enabled=1)`).
+			Scan(&libraries, &series, &books, &comicBytes)
+		return
+	}
+	err = s.db.QueryRowContext(ctx, `
+SELECT
+ (SELECT count(*) FROM libraries WHERE enabled=1),
+ (SELECT count(*) FROM series s JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND NOT EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.is_nsfw=1)),
+ (SELECT count(*) FROM books b JOIN libraries l ON l.id=b.library_id WHERE l.enabled=1 AND NOT EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=b.series_id AND sm.is_nsfw=1)),
+ (SELECT coalesce(sum(b.size),0) FROM books b JOIN libraries l ON l.id=b.library_id WHERE l.enabled=1 AND NOT EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=b.series_id AND sm.is_nsfw=1))`).
 		Scan(&libraries, &series, &books, &comicBytes)
 	return
 }
 
 func buildSeriesFilters(q SeriesQuery) (string, []any) {
-	clauses := []string{
-		"EXISTS (SELECT 1 FROM libraries enabled_library WHERE enabled_library.id=s.library_id AND enabled_library.enabled=1)",
+	var clauses []string
+	if !q.IncludeHidden {
+		clauses = append(clauses,
+			"EXISTS (SELECT 1 FROM libraries enabled_library WHERE enabled_library.id=s.library_id AND enabled_library.enabled=1)")
+	}
+	switch strings.ToLower(strings.TrimSpace(q.NSFWMode)) {
+	case "only", "true":
+		clauses = append(clauses,
+			"EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=s.id AND sm_nsfw.is_nsfw=1)")
+	case "all":
+	default:
+		clauses = append(clauses,
+			"NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=s.id AND sm_nsfw.is_nsfw=1)")
 	}
 	var args []any
 	if search := strings.TrimSpace(q.Search); search != "" {
@@ -391,7 +446,7 @@ func buildSeriesFilters(q SeriesQuery) (string, []any) {
 		}
 	}
 	if scrapeStatus := strings.ToLower(strings.TrimSpace(q.ScrapeStatus)); scrapeStatus != "" {
-		if scrapeStatus == ScrapeStatusNone {
+		if scrapeStatus == ScrapeStatusNone || scrapeStatus == "pending" {
 			clauses = append(clauses,
 				`COALESCE((SELECT sm.scrape_status FROM series_metadata sm WHERE sm.series_id=s.id),'none')='none'`)
 		} else {
@@ -402,6 +457,9 @@ func buildSeriesFilters(q SeriesQuery) (string, []any) {
 	}
 	if conditions := readStatusConditions(q.ReadStatus, "series"); len(conditions) > 0 {
 		clauses = append(clauses, "("+strings.Join(conditions, " OR ")+")")
+	}
+	if len(clauses) == 0 {
+		return "", args
 	}
 	return " WHERE " + strings.Join(clauses, " AND "), args
 }
@@ -478,9 +536,13 @@ func seriesUnreadCondition() string {
 )`
 }
 
-func buildBookFilters(q BookQuery) (string, []any) {
+func buildBookFilters(q BookQuery, excludeNSFW bool) (string, []any) {
 	clauses := []string{
 		"EXISTS (SELECT 1 FROM libraries enabled_library WHERE enabled_library.id=b.library_id AND enabled_library.enabled=1)",
+	}
+	if excludeNSFW {
+		clauses = append(clauses,
+			"NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=b.series_id AND sm_nsfw.is_nsfw=1)")
 	}
 	var args []any
 	if search := strings.TrimSpace(q.Search); search != "" {

@@ -103,6 +103,8 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hiddenLibraries, _ := s.store.HiddenLibraryCount(r.Context())
+	nsfwSeries, _ := s.store.NSFWSeriesCount(r.Context())
+	showNSFW := s.store.ShowNSFW(r.Context())
 	performance, err := s.store.GlobalPerformance(r.Context())
 	if err != nil {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
@@ -120,6 +122,8 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		"comicBytes":      comicBytes,
 		"bgmMatched":      matched,
 		"bgmUnmatched":    unmatched,
+		"showNsfw":        showNSFW,
+		"nsfwSeries":      nsfwSeries,
 		"version":         buildinfo.Version,
 		"dataDir":         s.runtime.DataDir,
 		"adminUrl":        localServiceURL(s.runtime.Host, s.runtime.Port),
@@ -697,6 +701,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		"downurl_ttl_seconds":                   true,
 		"rar_index_block_size":                  true,
 		"rar_max_dictionary_size":               true,
+		"show_nsfw":                             true,
 	}
 	nonNegativeIntegers := map[string]bool{
 		"range_block_size": true, "range_cache_max_bytes": true,
@@ -713,7 +718,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "INVALID_SETTING", "Setting value cannot be empty: "+key)
 			return
 		}
-		if key == "volume_index_prefetch_enabled" || key == "auto_scan_enabled" || key == "scan_on_startup" {
+		if key == "volume_index_prefetch_enabled" || key == "auto_scan_enabled" || key == "scan_on_startup" || key == "show_nsfw" {
 			parsed, err := strconv.ParseBool(value)
 			if err != nil {
 				writeError(w, 400, "INVALID_SETTING", key+" must be true or false")
@@ -1162,6 +1167,8 @@ func (s *Server) bookRichDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) bangumiStatus(w http.ResponseWriter, r *http.Request) {
 	matched, unmatched, total, _ := s.store.ScrapeSummary(r.Context())
+	nsfwCount, _ := s.store.NSFWSeriesCount(r.Context())
+	showNSFW := s.store.ShowNSFW(r.Context())
 	var arch bangumi.ArchiveStatus
 	proxyURL := ""
 	if s.bangumi != nil {
@@ -1171,6 +1178,8 @@ func (s *Server) bangumiStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"archive":        arch,
 		"proxyUrl":       proxyURL,
+		"showNsfw":       showNSFW,
+		"nsfwCount":      nsfwCount,
 		"matchedCount":   matched,
 		"unmatchedCount": unmatched,
 		"pendingCount":   max(int64(0), total-matched-unmatched),
@@ -1184,21 +1193,35 @@ func (s *Server) putBangumiConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ProxyURL string `json:"proxyUrl"`
+		ProxyURL *string `json:"proxyUrl"`
+		ShowNSFW *bool   `json:"showNsfw"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	redacted, err := s.bangumi.SetProxyURL(r.Context(), req.ProxyURL)
-	if err != nil {
-		if errors.Is(err, bangumi.ErrInvalidProxyURL) {
-			writeError(w, http.StatusBadRequest, "INVALID_PROXY_URL", err.Error())
+	redacted := s.bangumi.RedactedProxyURL(r.Context())
+	if req.ProxyURL != nil {
+		var err error
+		redacted, err = s.bangumi.SetProxyURL(r.Context(), *req.ProxyURL)
+		if err != nil {
+			if errors.Is(err, bangumi.ErrInvalidProxyURL) {
+				writeError(w, http.StatusBadRequest, "INVALID_PROXY_URL", err.Error())
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "BANGUMI_CONFIG_FAILED", err.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "BANGUMI_CONFIG_FAILED", err.Error())
-		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"proxyUrl": redacted})
+	if req.ShowNSFW != nil {
+		if err := s.store.SetSetting(r.Context(), "show_nsfw", strconv.FormatBool(*req.ShowNSFW)); err != nil {
+			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"proxyUrl": redacted,
+		"showNsfw": s.store.ShowNSFW(r.Context()),
+	})
 }
 
 func (s *Server) testBangumiProxy(w http.ResponseWriter, r *http.Request) {
@@ -1282,12 +1305,13 @@ func (s *Server) startBangumiRun(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		LibraryID string `json:"libraryId"`
+		Mode      string `json:"mode"`
 		Force     bool   `json:"force"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	run, err := s.bangumi.StartBatch(r.Context(), req.LibraryID, req.Force)
+	run, err := s.bangumi.StartBatchWithMode(r.Context(), req.LibraryID, bangumi.NormalizeScrapeMode(req.Mode, req.Force))
 	if err != nil {
 		status := http.StatusConflict
 		code := "BANGUMI_SCRAPE_CONFLICT"

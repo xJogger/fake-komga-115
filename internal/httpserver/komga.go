@@ -785,6 +785,7 @@ func seriesDTOFull(
 		"bgmScore":             meta.BgmScore,
 		"scrapeStatus":         meta.ScrapeStatus,
 		"coverSource":          meta.CoverSource,
+		"isNsfw":               meta.IsNSFW,
 		"metadata": map[string]any{
 			"status": status, "statusLock": meta.StatusLock,
 			"created": created, "lastModified": updated,
@@ -801,6 +802,7 @@ func seriesDTOFull(
 			"sharingLabels": sharing, "sharingLabelsLock": meta.SharingLabelsLock,
 			"links": links, "linksLock": meta.LinksLock,
 			"alternateTitles": altTitles, "alternateTitlesLock": meta.AlternateTitlesLock,
+			"isNsfw": meta.IsNSFW, "nsfwLock": meta.NSFWLock,
 		},
 		"booksMetadata": map[string]any{
 			"authors": authors, "tags": tags, "releaseDate": releaseDate,

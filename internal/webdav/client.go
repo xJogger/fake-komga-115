@@ -179,6 +179,9 @@ func (m *Manager) FetchRange(
 	if err != nil {
 		return nil, err
 	}
+	if err := rt.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 	fullRemotePath := JoinRemotePath(libraryRootPath, fileRelPath)
 	targetURL, _, err := buildTargetURL(account.BaseURL, fullRemotePath, false)
 	if err != nil {
@@ -534,7 +537,7 @@ func isIgnoredName(name string) bool {
 		return true
 	}
 	switch strings.ToLower(name) {
-	case "@eadir", "#recycle", "$recycle.bin", "system volume information", "__macosx":
+	case "@eadir", "#recycle", "$recycle.bin", "system volume information", "__macosx", "thumbs.db", "ehthumbs.db", "desktop.ini":
 		return true
 	default:
 		return false

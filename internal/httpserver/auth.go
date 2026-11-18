@@ -149,8 +149,8 @@ func (s *Server) authenticateRequest(r *http.Request) (authPrincipal, bool) {
 			}, true
 		}
 	}
-	// 2. X-API-Key header
-	if rawKey := strings.TrimSpace(r.Header.Get("X-API-Key")); rawKey != "" {
+	// 2. X-API-Key header or Authorization: Bearer <api-key>
+	for _, rawKey := range candidateAPIKeys(r) {
 		if _, ok, err := s.store.ValidateAPIKey(r.Context(), rawKey); err == nil && ok {
 			admin, has, _ := s.store.Admin(r.Context())
 			username := "admin"
@@ -187,6 +187,19 @@ func candidateSessionTokens(r *http.Request) []string {
 		tokens = append(tokens, hdr)
 	}
 	return tokens
+}
+
+func candidateAPIKeys(r *http.Request) []string {
+	var keys []string
+	if k := strings.TrimSpace(r.Header.Get("X-API-Key")); k != "" {
+		keys = append(keys, k)
+	}
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
+		if bearer := strings.TrimSpace(auth[7:]); bearer != "" {
+			keys = append(keys, bearer)
+		}
+	}
+	return keys
 }
 
 func isAPIRequestPath(p string) bool {

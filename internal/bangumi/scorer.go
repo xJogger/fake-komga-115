@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"unicode"
 
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
@@ -21,6 +22,7 @@ type SubjectCandidate struct {
 	Platform        int                       `json:"platform"`
 	PlatformLabel   string                    `json:"platformLabel"`
 	IsSeries        bool                      `json:"isSeries"`
+	NSFW            bool                      `json:"nsfw"`
 	Name            string                    `json:"name"`
 	NameCN          string                    `json:"nameCn"`
 	Summary         string                    `json:"summary"`
@@ -99,10 +101,17 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 		if primary {
 			primaryKeys[k] = true
 		}
-		// Also strip edition suffix for base-title comparison
-		stripped := NormalizeMatchKey(editionRe.ReplaceAllString(ToSimplified(raw), " "))
+		simp := ToSimplified(raw)
+		stripped := NormalizeMatchKey(editionRe.ReplaceAllString(simp, " "))
 		if stripped != "" && stripped != k {
 			candKeys = appendUniqueText(candKeys, stripped)
+		}
+		noParen := NormalizeMatchKey(stripTrailingParens(simp))
+		if noParen != "" && noParen != k {
+			candKeys = appendUniqueText(candKeys, noParen)
+			if primary {
+				primaryKeys[noParen] = true
+			}
 		}
 	}
 	addKey(cand.NameCN, true)
@@ -115,16 +124,25 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 	}
 
 	bestTitleScore := 0.0
+	matchedIdx := 0
+	matchedQueryKey := ""
+	matchedQueryRaw := ""
 	for idx, qRaw := range query.Candidates {
 		qk := NormalizeMatchKey(qRaw)
 		if qk == "" {
 			continue
 		}
-		rankPenalty := math.Max(0, float64(idx)*0.03)
+		rankPenalty := 0.0
+		if idx > 1 {
+			rankPenalty = float64(idx-1) * 0.02
+		}
 		for _, ck := range candKeys {
 			s := compareNormalizedKeys(qk, ck, primaryKeys[ck])
 			if s-rankPenalty > bestTitleScore {
 				bestTitleScore = s - rankPenalty
+				matchedIdx = idx
+				matchedQueryKey = qk
+				matchedQueryRaw = qRaw
 			}
 		}
 	}
@@ -178,16 +196,17 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 	}
 
 	// Author cross-check bonus / penalty
+	authorMatched := false
+	distinctAuthorCount := 0
 	if len(query.Authors) > 0 && len(cand.Authors) > 0 {
-		authorMatched := false
 		for _, qa := range query.Authors {
 			qak := NormalizeMatchKey(qa)
-			if len([]rune(qak)) < 2 {
+			if len([]rune(qak)) < 2 || qak == matchedQueryKey {
 				continue
 			}
+			distinctAuthorCount++
 			for _, ca := range cand.Authors {
-				cak := NormalizeMatchKey(ca.Name)
-				if cak != "" && (cak == qak || strings.Contains(cak, qak) || strings.Contains(qak, cak)) {
+				if authorsMatch(qa, ca.Name) {
 					authorMatched = true
 					break
 				}
@@ -198,13 +217,18 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 		}
 		if authorMatched {
 			score += 0.14
-		} else if bestTitleScore < 0.88 {
+		} else if distinctAuthorCount > 0 && bestTitleScore < 0.86 {
 			score -= 0.08
 		}
 	}
 
-	// Short single-character or 2-ASCII-letter titles require stricter exactness
-	if len(query.Candidates) > 0 && len([]rune(NormalizeMatchKey(query.Candidates[0]))) <= 1 {
+	// Guard against scanlator-credit homonym (e.g. [恶之华] in another manga's folder)
+	if ambiguousScanlators[strings.ToLower(ToSimplified(strings.TrimSpace(matchedQueryRaw)))] && matchedIdx > 0 && !authorMatched {
+		score -= 0.35
+	}
+
+	// Short single-character titles require stricter exactness
+	if matchedQueryKey != "" && len([]rune(matchedQueryKey)) <= 1 {
 		if bestTitleScore < 0.90 {
 			score -= 0.25
 		}
@@ -224,6 +248,36 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 		score = 0
 	}
 	return math.Round(score*1000) / 1000
+}
+
+func authorsMatch(queryAuthor, candAuthor string) bool {
+	qak := NormalizeMatchKey(queryAuthor)
+	cak := NormalizeMatchKey(candAuthor)
+	if len([]rune(qak)) < 2 || len([]rune(cak)) < 2 {
+		return false
+	}
+	if cak == qak || strings.Contains(cak, qak) || strings.Contains(qak, cak) {
+		return true
+	}
+	// Handle Romanized vs Kana given name sharing a >=2-Han-rune surname (e.g. "椎名Umi" vs "椎名うみ")
+	qHan := leadingHanPrefix(ToSimplified(queryAuthor))
+	cHan := leadingHanPrefix(ToSimplified(candAuthor))
+	if len([]rune(qHan)) >= 2 && qHan == cHan {
+		return true
+	}
+	return false
+}
+
+func leadingHanPrefix(s string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		if unicode.Is(unicode.Han, r) {
+			b.WriteRune(r)
+		} else {
+			break
+		}
+	}
+	return b.String()
 }
 
 func compareNormalizedKeys(qk, ck string, isPrimary bool) float64 {
@@ -256,12 +310,21 @@ func compareNormalizedKeys(qk, ck string, isPrimary bool) float64 {
 }
 
 func ToScrapedMetadata(seriesName string, cand SubjectCandidate) database.ScrapedMetadata {
+	return ToScrapedMetadataWithQuery(seriesName, ParsedQuery{}, cand)
+}
+
+func ToScrapedMetadataWithQuery(seriesName string, parsed ParsedQuery, cand SubjectCandidate) database.ScrapedMetadata {
 	displayTitle := strings.TrimSpace(cand.NameCN)
 	if displayTitle == "" {
 		displayTitle = strings.TrimSpace(cand.Name)
 	}
 	if displayTitle == "" {
 		displayTitle = seriesName
+	}
+	if suffix := strings.TrimSpace(parsed.SubfolderSuffix); suffix != "" {
+		if !strings.Contains(ToSimplified(displayTitle), ToSimplified(suffix)) {
+			displayTitle = fmt.Sprintf("%s（%s）", displayTitle, suffix)
+		}
 	}
 	var altTitles []database.AlternateTitle
 	if orig := strings.TrimSpace(cand.Name); orig != "" && orig != displayTitle {
@@ -302,5 +365,6 @@ func ToScrapedMetadata(seriesName string, cand SubjectCandidate) database.Scrape
 		Links: []database.WebLink{
 			{Label: "Bangumi", URL: SubjectWebURL(cand.ID)},
 		},
+		IsNSFW: cand.NSFW,
 	}
 }

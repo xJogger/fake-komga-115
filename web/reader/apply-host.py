@@ -85,9 +85,10 @@ export default defineConfig(() => ({
         encoding="utf-8",
     )
 
-    # 4. Clean index.html title & dark background
+    # 4. Clean index.html title, lang="zh-CN", & dark background
     idx_html = root / "index.html"
     html_text = idx_html.read_text(encoding="utf-8")
+    html_text = html_text.replace('<html lang="en">', '<html lang="zh-CN">')
     html_text = html_text.replace("<title>Suwayomi</title>", "<title>阅读器 · fake-komga-115</title>")
     if "<style>" not in html_text:
         html_text = html_text.replace(
@@ -95,6 +96,68 @@ export default defineConfig(() => ({
             "<style>html,body,#root{background:#000;margin:0;padding:0;}</style></head>",
         )
     idx_html.write_text(html_text, encoding="utf-8")
+
+    # 4b. Default localization to Simplified Chinese (zh-Hans) and await catalog before initial render
+    i18n_ts = root / "src" / "i18n" / "index.ts"
+    replace_exact(
+        i18n_ts,
+        "const DEFAULT_LOCALE = 'en';",
+        "const DEFAULT_LOCALE = 'zh-Hans';",
+    )
+
+    iso_lang_ts = root / "src" / "lib" / "ISOLanguageUtil.ts"
+    replace_exact(
+        iso_lang_ts,
+        "export const DEFAULT_LANGUAGE = 'en';\n\nexport const SELECTED_LANGUAGE_CODE_KEY = 'i18n:selected-language';",
+        "export const DEFAULT_LANGUAGE = 'zh-Hans';\n\nexport const SELECTED_LANGUAGE_CODE_KEY = 'fk115:reader:language';",
+    )
+    replace_exact(
+        iso_lang_ts,
+        """export function detectLocale(): string {
+    const storedLanguage = AppStorage.local.getItem(SELECTED_LANGUAGE_CODE_KEY);
+    const preferredLanguages = getPreferredISOLanguageCodes();
+    const languageCodes = [storedLanguage, ...preferredLanguages];
+
+    const normalizedLanguageCodes = languageCodes
+        .filter((code) => code !== null)
+        .filter((code) => getISOLanguage(code))
+        .filter((code) => i18nResources.includes(code as (typeof i18nResources)[number]));
+
+    return normalizedLanguageCodes[0] ?? DEFAULT_LANGUAGE;
+}""",
+        """export function detectLocale(): string {
+    const storedLanguage = AppStorage.local.getItem(SELECTED_LANGUAGE_CODE_KEY);
+    if (storedLanguage && i18nResources.includes(storedLanguage as (typeof i18nResources)[number])) {
+        return storedLanguage;
+    }
+    return DEFAULT_LANGUAGE;
+}""",
+    )
+
+    entry_tsx = root / "src" / "index.tsx"
+    replace_exact(
+        entry_tsx,
+        """initializeLocalization().catch(defaultPromiseErrorHandler('i18n', true));
+
+const container = document.getElementById('root');
+const root = createRoot(container!);
+root.render(
+    <StrictMode>
+        <App />
+    </StrictMode>,
+);""",
+        """const container = document.getElementById('root');
+const root = createRoot(container!);
+initializeLocalization()
+    .catch(defaultPromiseErrorHandler('i18n', true))
+    .finally(() => {
+        root.render(
+            <StrictMode>
+                <App />
+            </StrictMode>,
+        );
+    });""",
+    )
 
     # 5. SubpathUtil: Router basename = '/reader', API base URL = root origin (no '/reader' suffix)
     subpath_ts = root / "src" / "lib" / "utils" / "SubpathUtil.ts"

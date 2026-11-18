@@ -21,7 +21,29 @@ var (
 	ErrLibraryHidden       = errors.New("library is hidden")
 )
 
-const maxScrapeStoredErrors = 20
+const (
+	maxScrapeStoredErrors = 20
+
+	ScrapeModeIncremental    = "incremental"
+	ScrapeModeRetryUnmatched = "retry_unmatched"
+	ScrapeModeForce          = "force"
+)
+
+func NormalizeScrapeMode(raw string, legacyForce bool) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case ScrapeModeForce:
+		return ScrapeModeForce
+	case ScrapeModeRetryUnmatched, "retry", "unmatched":
+		return ScrapeModeRetryUnmatched
+	case ScrapeModeIncremental:
+		return ScrapeModeIncremental
+	default:
+		if legacyForce {
+			return ScrapeModeForce
+		}
+		return ScrapeModeIncremental
+	}
+}
 
 type Service struct {
 	store   *database.Store
@@ -42,7 +64,7 @@ type Service struct {
 type scrapeJob struct {
 	runID     string
 	libraryID string // empty means all enabled libraries
-	force     bool
+	mode      string
 }
 
 func NewService(store *database.Store, dataDir string, logger *slog.Logger) (*Service, error) {
@@ -156,18 +178,20 @@ func (s *Service) SearchCandidates(
 	queryText string,
 ) ([]SubjectCandidate, ParsedQuery, error) {
 	queryText = strings.TrimSpace(queryText)
+	var parsed ParsedQuery
 	if queryText == "" {
 		queryText = series.Name
+		parsed = ParseSeriesWithPath(series.Name, series.RelativePath)
+	} else if queryText == series.Name {
+		parsed = ParseSeriesWithPath(series.Name, series.RelativePath)
+	} else {
+		parsed = ParseSeriesName(queryText)
 	}
-	parsed := ParseSeriesName(queryText)
 
 	if id, ok := ParseSubjectIDInput(queryText); ok {
 		cand, err := s.live.SubjectByID(ctx, id)
 		if err == nil {
 			return []SubjectCandidate{cand}, parsed, nil
-		}
-		if errors.Is(err, ErrNSFWBlocked) {
-			return nil, parsed, err
 		}
 		if localCand, ok, lErr := s.archive.SubjectByID(ctx, id); lErr == nil && ok {
 			return []SubjectCandidate{localCand}, parsed, nil
@@ -186,6 +210,16 @@ func (s *Service) SearchCandidates(
 			if !seen[item.ID] {
 				seen[item.ID] = true
 				merged = append(merged, item)
+			}
+		}
+	}
+	if queryText == series.Name && len(parsed.Candidates) > 1 && len(merged) < 5 {
+		if liveAlt, err := s.live.Search(ctx, parsed.Candidates[1], parsed, series.OneShot, 10); err == nil {
+			for _, item := range liveAlt {
+				if !seen[item.ID] {
+					seen[item.ID] = true
+					merged = append(merged, item)
+				}
 			}
 		}
 	}
@@ -210,9 +244,6 @@ func (s *Service) BindSubject(
 ) (database.SeriesMetadata, error) {
 	cand, err := s.live.SubjectByID(ctx, subjectID)
 	if err != nil {
-		if errors.Is(err, ErrNSFWBlocked) {
-			return database.SeriesMetadata{}, err
-		}
 		localCand, ok, localErr := s.archive.SubjectByID(ctx, subjectID)
 		if localErr != nil || !ok {
 			return database.SeriesMetadata{}, fmt.Errorf("fetch Bangumi subject %d: %w", subjectID, err)
@@ -220,7 +251,8 @@ func (s *Service) BindSubject(
 		cand = localCand
 	}
 	cand.Confidence = 1.0
-	scraped := ToScrapedMetadata(series.Name, cand)
+	parsed := ParseSeriesWithPath(series.Name, series.RelativePath)
+	scraped := ToScrapedMetadataWithQuery(series.Name, parsed, cand)
 	return s.store.ApplyScrapedMetadata(ctx, series, scraped)
 }
 
@@ -229,7 +261,7 @@ func (s *Service) AutoScrapeOne(
 	ctx context.Context,
 	series database.Series,
 ) (matched bool, meta database.SeriesMetadata, err error) {
-	parsed := ParseSeriesName(series.Name)
+	parsed := ParseSeriesWithPath(series.Name, series.RelativePath)
 	var candidates []SubjectCandidate
 	if s.archive.Ready() {
 		candidates, err = s.archive.Search(ctx, parsed, series.OneShot, 10)
@@ -237,9 +269,21 @@ func (s *Service) AutoScrapeOne(
 			return false, database.SeriesMetadata{}, err
 		}
 	} else if len(parsed.Candidates) > 0 {
-		candidates, err = s.live.Search(ctx, parsed.Candidates[0], parsed, series.OneShot, 10)
-		if err != nil {
-			return false, database.SeriesMetadata{}, err
+		maxTries := min(2, len(parsed.Candidates))
+		for i := 0; i < maxTries; i++ {
+			res, sErr := s.live.Search(ctx, parsed.Candidates[i], parsed, series.OneShot, 10)
+			if sErr != nil {
+				if i == 0 {
+					return false, database.SeriesMetadata{}, sErr
+				}
+				break
+			}
+			if len(res) > 0 && (len(candidates) == 0 || res[0].Confidence > candidates[0].Confidence) {
+				candidates = res
+			}
+			if len(candidates) > 0 && candidates[0].Confidence >= AutoMatchMinConfidence {
+				break
+			}
 		}
 	}
 	if len(candidates) == 0 || candidates[0].Confidence < AutoMatchMinConfidence {
@@ -247,7 +291,8 @@ func (s *Service) AutoScrapeOne(
 		if len(candidates) > 0 {
 			bestConf = candidates[0].Confidence
 		}
-		if mErr := s.store.MarkSeriesScrapeStatus(ctx, series, database.ScrapeStatusUnmatched, bestConf); mErr != nil {
+		inferredNSFW := InferPathNSFW(series.Name, series.RelativePath)
+		if mErr := s.store.MarkSeriesScrapeStatusWithNSFW(ctx, series, database.ScrapeStatusUnmatched, bestConf, inferredNSFW); mErr != nil {
 			return false, database.SeriesMetadata{}, mErr
 		}
 		cur, _ := s.store.SeriesMetadataByID(ctx, series)
@@ -261,7 +306,7 @@ func (s *Service) AutoScrapeOne(
 			best = full
 		}
 	}
-	scraped := ToScrapedMetadata(series.Name, best)
+	scraped := ToScrapedMetadataWithQuery(series.Name, parsed, best)
 	meta, err = s.store.ApplyScrapedMetadata(ctx, series, scraped)
 	if err != nil {
 		return false, database.SeriesMetadata{}, err
@@ -274,6 +319,16 @@ func (s *Service) StartBatch(
 	libraryID string,
 	force bool,
 ) (database.BangumiScrapeRun, error) {
+	return s.StartBatchWithMode(ctx, libraryID, NormalizeScrapeMode("", force))
+}
+
+func (s *Service) StartBatchWithMode(
+	ctx context.Context,
+	libraryID string,
+	rawMode string,
+) (database.BangumiScrapeRun, error) {
+	baseMode := NormalizeScrapeMode(rawMode, false)
+	force := baseMode == ScrapeModeForce
 	libraryID = strings.TrimSpace(libraryID)
 	if libraryID != "" {
 		lib, err := s.store.LibraryBasic(ctx, libraryID)
@@ -297,14 +352,11 @@ func (s *Service) StartBatch(
 	s.queued[queueKey] = runID
 	s.mu.Unlock()
 
-	mode := "incremental"
-	if force {
-		mode = "force"
-	}
+	modeLabel := baseMode
 	if s.archive.Ready() {
-		mode += ":offline"
+		modeLabel += ":offline"
 	} else {
-		mode += ":online"
+		modeLabel += ":online"
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var libParam any
@@ -317,7 +369,7 @@ func (s *Service) StartBatch(
 	}
 	if _, err := s.store.DB().ExecContext(ctx, `
 INSERT INTO bangumi_scrape_runs(id,library_id,mode,force,status,created_at)
-VALUES(?,?,?,?,'queued',?)`, runID, libParam, mode, forceInt, now); err != nil {
+VALUES(?,?,?,?,'queued',?)`, runID, libParam, modeLabel, forceInt, now); err != nil {
 		s.releaseQueued(queueKey)
 		return database.BangumiScrapeRun{}, err
 	}
@@ -327,7 +379,7 @@ VALUES(?,?,?,?,'queued',?)`, runID, libParam, mode, forceInt, now); err != nil {
 		return database.BangumiScrapeRun{}, err
 	}
 	select {
-	case s.jobs <- scrapeJob{runID: runID, libraryID: libraryID, force: force}:
+	case s.jobs <- scrapeJob{runID: runID, libraryID: libraryID, mode: baseMode}:
 		return run, nil
 	case <-s.ctx.Done():
 		s.releaseQueued(queueKey)
@@ -504,7 +556,7 @@ func (s *Service) executeBatch(item scrapeJob) {
 			}
 			run.ProcessedSeries++
 			run.SkippedCount++
-		} else if !item.force && (target.scrapeStatus == database.ScrapeStatusMatched || target.scrapeStatus == database.ScrapeStatusUnmatched) {
+		} else if shouldSkipByMode(item.mode, target.scrapeStatus) {
 			run.ProcessedSeries++
 			run.SkippedCount++
 		} else {
@@ -555,6 +607,17 @@ func (s *Service) executeBatch(item scrapeJob) {
 type scrapeTarget struct {
 	series       database.Series
 	scrapeStatus string
+}
+
+func shouldSkipByMode(mode string, scrapeStatus string) bool {
+	switch mode {
+	case ScrapeModeForce:
+		return false
+	case ScrapeModeRetryUnmatched:
+		return scrapeStatus == database.ScrapeStatusMatched
+	default:
+		return scrapeStatus == database.ScrapeStatusMatched || scrapeStatus == database.ScrapeStatusUnmatched
+	}
 }
 
 func (s *Service) loadTargetSeries(ctx context.Context, libraryID string) ([]scrapeTarget, error) {

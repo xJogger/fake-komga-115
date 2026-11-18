@@ -26,6 +26,7 @@ type ScrapedMetadata struct {
 	Authors         []Author
 	AlternateTitles []AlternateTitle
 	Links           []WebLink
+	IsNSFW          bool
 }
 
 type SeriesMetadataPatch struct {
@@ -64,6 +65,8 @@ type SeriesMetadataPatch struct {
 	SharingLabels       *[]string         `json:"sharingLabels"`
 	SharingLabelsLock   *bool             `json:"sharingLabelsLock"`
 	CoverSource         *string           `json:"coverSource"`
+	IsNSFW              *bool             `json:"isNsfw"`
+	NSFWLock            *bool             `json:"nsfwLock"`
 }
 
 func defaultSeriesMetadata(series Series) SeriesMetadata {
@@ -95,7 +98,7 @@ language,language_lock,total_book_count,total_book_count_lock,
 release_date,release_date_lock,
 genres_json,genres_lock,tags_json,tags_lock,
 authors_json,authors_lock,alternate_titles_json,alternate_titles_lock,
-links_json,links_lock,sharing_labels_json,sharing_labels_lock,updated_at`
+links_json,links_lock,sharing_labels_json,sharing_labels_lock,is_nsfw,nsfw_lock,updated_at`
 
 func scanSeriesMetadataRow(scanner interface{ Scan(...any) error }) (SeriesMetadata, error) {
 	var (
@@ -127,6 +130,8 @@ func scanSeriesMetadataRow(scanner interface{ Scan(...any) error }) (SeriesMetad
 		linksLock          int
 		sharingJSON        string
 		sharingLock        int
+		isNSFW             int
+		nsfwLock           int
 		updatedAt          string
 	)
 	err := scanner.Scan(
@@ -139,7 +144,7 @@ func scanSeriesMetadataRow(scanner interface{ Scan(...any) error }) (SeriesMetad
 		&m.ReleaseDate, &releaseDateLock,
 		&genresJSON, &genresLock, &tagsJSON, &tagsLock,
 		&authorsJSON, &authorsLock, &altTitlesJSON, &altTitlesLock,
-		&linksJSON, &linksLock, &sharingJSON, &sharingLock, &updatedAt,
+		&linksJSON, &linksLock, &sharingJSON, &sharingLock, &isNSFW, &nsfwLock, &updatedAt,
 	)
 	if err != nil {
 		return SeriesMetadata{}, err
@@ -180,6 +185,8 @@ func scanSeriesMetadataRow(scanner interface{ Scan(...any) error }) (SeriesMetad
 	m.AlternateTitlesLock = altTitlesLock != 0
 	m.LinksLock = linksLock != 0
 	m.SharingLabelsLock = sharingLock != 0
+	m.IsNSFW = isNSFW != 0
+	m.NSFWLock = nsfwLock != 0
 
 	_ = json.Unmarshal([]byte(genresJSON), &m.Genres)
 	if m.Genres == nil {
@@ -346,6 +353,9 @@ func (s *Store) ApplyScrapedMetadata(
 	if !current.LinksLock && incoming.Links != nil {
 		current.Links = cleanWebLinks(incoming.Links)
 	}
+	if !current.NSFWLock {
+		current.IsNSFW = incoming.IsNSFW
+	}
 	if err := s.saveSeriesMetadata(ctx, current, now); err != nil {
 		return SeriesMetadata{}, err
 	}
@@ -358,6 +368,16 @@ func (s *Store) MarkSeriesScrapeStatus(
 	status string,
 	confidence float64,
 ) error {
+	return s.MarkSeriesScrapeStatusWithNSFW(ctx, series, status, confidence, false)
+}
+
+func (s *Store) MarkSeriesScrapeStatusWithNSFW(
+	ctx context.Context,
+	series Series,
+	status string,
+	confidence float64,
+	inferredNSFW bool,
+) error {
 	current, err := s.SeriesMetadataByID(ctx, series)
 	if err != nil {
 		return err
@@ -366,6 +386,9 @@ func (s *Store) MarkSeriesScrapeStatus(
 	current.ScrapeStatus = status
 	current.ScrapeConfidence = confidence
 	current.ScrapeSyncedAt = &now
+	if !current.NSFWLock && inferredNSFW {
+		current.IsNSFW = true
+	}
 	return s.saveSeriesMetadata(ctx, current, now)
 }
 
@@ -380,6 +403,9 @@ func (s *Store) ClearSeriesBangumiBinding(ctx context.Context, series Series) (S
 	current.BgmCoverURL = ""
 	current.BgmCoverPath = ""
 	current.BgmScore = nil
+	if !current.NSFWLock {
+		current.IsNSFW = false
+	}
 	if !current.TitleLock {
 		current.Title = series.Name
 	}
@@ -519,6 +545,12 @@ func (s *Store) PatchSeriesMetadata(
 	if patch.SharingLabelsLock != nil {
 		current.SharingLabelsLock = *patch.SharingLabelsLock
 	}
+	if patch.IsNSFW != nil {
+		current.IsNSFW = *patch.IsNSFW
+	}
+	if patch.NSFWLock != nil {
+		current.NSFWLock = *patch.NSFWLock
+	}
 	if patch.CoverSource != nil {
 		switch strings.ToLower(strings.TrimSpace(*patch.CoverSource)) {
 		case CoverSourceBangumi:
@@ -569,7 +601,7 @@ INSERT INTO series_metadata(
  ?,?,
  ?,?,?,?,
  ?,?,?,?,
- ?,?,?,?,?
+ ?,?,?,?,?,?,?
 )
 ON CONFLICT(series_id) DO UPDATE SET
  bgm_subject_id=excluded.bgm_subject_id,
@@ -596,6 +628,7 @@ ON CONFLICT(series_id) DO UPDATE SET
  alternate_titles_json=excluded.alternate_titles_json,alternate_titles_lock=excluded.alternate_titles_lock,
  links_json=excluded.links_json,links_lock=excluded.links_lock,
  sharing_labels_json=excluded.sharing_labels_json,sharing_labels_lock=excluded.sharing_labels_lock,
+ is_nsfw=excluded.is_nsfw,nsfw_lock=excluded.nsfw_lock,
  updated_at=excluded.updated_at`,
 		m.SeriesID, nullableInt64Ptr(m.BgmSubjectID), m.ScrapeStatus, m.ScrapeConfidence, nullableStringPtr(m.ScrapeSyncedAt),
 		m.CoverSource, m.BgmCoverURL, m.BgmCoverPath, nullableFloat64Ptr(m.BgmScore),
@@ -606,7 +639,8 @@ ON CONFLICT(series_id) DO UPDATE SET
 		m.ReleaseDate, boolInt(m.ReleaseDateLock),
 		string(genresJSON), boolInt(m.GenresLock), string(tagsJSON), boolInt(m.TagsLock),
 		string(authorsJSON), boolInt(m.AuthorsLock), string(altTitlesJSON), boolInt(m.AlternateTitlesLock),
-		string(linksJSON), boolInt(m.LinksLock), string(sharingJSON), boolInt(m.SharingLabelsLock), now,
+		string(linksJSON), boolInt(m.LinksLock), string(sharingJSON), boolInt(m.SharingLabelsLock),
+		boolInt(m.IsNSFW), boolInt(m.NSFWLock), now,
 	)
 	if err != nil {
 		return err
@@ -661,6 +695,9 @@ FROM series_metadata sm
 JOIN series s ON s.id=sm.series_id
 JOIN libraries l ON l.id=s.library_id AND l.enabled=1
 WHERE sm.publisher<>''`
+	if !s.ShowNSFW(ctx) {
+		query += ` AND sm.is_nsfw=0`
+	}
 	var args []any
 	if len(libraryIDs) > 0 {
 		query += ` AND s.library_id IN ` + Placeholders(len(libraryIDs))
@@ -696,6 +733,9 @@ FROM series_authors sa
 JOIN series s ON s.id=sa.series_id
 JOIN libraries l ON l.id=s.library_id AND l.enabled=1
 WHERE sa.name<>''`
+	if !s.ShowNSFW(ctx) {
+		query += ` AND NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=s.id AND sm_nsfw.is_nsfw=1)`
+	}
 	var args []any
 	if len(libraryIDs) > 0 {
 		query += ` AND s.library_id IN ` + Placeholders(len(libraryIDs))
@@ -729,12 +769,30 @@ WHERE sa.name<>''`
 }
 
 func (s *Store) ScrapeSummary(ctx context.Context) (matched, unmatched, total int64, err error) {
-	err = s.db.QueryRowContext(ctx, `
+	if s.ShowNSFW(ctx) {
+		err = s.db.QueryRowContext(ctx, `
 SELECT
  (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.scrape_status='matched'),
  (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.scrape_status='unmatched'),
  (SELECT count(*) FROM series s JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1)`).Scan(&matched, &unmatched, &total)
+		return
+	}
+	err = s.db.QueryRowContext(ctx, `
+SELECT
+ (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.is_nsfw=0 AND sm.scrape_status='matched'),
+ (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.is_nsfw=0 AND sm.scrape_status='unmatched'),
+ (SELECT count(*) FROM series s JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND NOT EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.is_nsfw=1))`).Scan(&matched, &unmatched, &total)
 	return
+}
+
+func (s *Store) NSFWSeriesCount(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT count(*) FROM series_metadata sm
+JOIN series s ON s.id=sm.series_id
+JOIN libraries l ON l.id=s.library_id
+WHERE l.enabled=1 AND sm.is_nsfw=1`).Scan(&count)
+	return count, err
 }
 
 func (s *Store) distinctSeriesValues(
@@ -748,6 +806,9 @@ FROM ` + table + ` t
 JOIN series s ON s.id=t.series_id
 JOIN libraries l ON l.id=s.library_id AND l.enabled=1
 WHERE t.` + column + `<>''`
+	if !s.ShowNSFW(ctx) {
+		query += ` AND NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=s.id AND sm_nsfw.is_nsfw=1)`
+	}
 	var args []any
 	if len(libraryIDs) > 0 {
 		query += ` AND s.library_id IN ` + Placeholders(len(libraryIDs))
