@@ -90,61 +90,14 @@ func PlatformCodeFromString(label string) int {
 // ScoreCandidate evaluates how well a Bangumi SubjectCandidate matches a ParsedQuery.
 // Returns a confidence score in [0, 1].
 func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bool) float64 {
-	var candKeys []string
-	primaryKeys := map[string]bool{}
-	addKey := func(raw string, primary bool) {
-		k := NormalizeMatchKey(raw)
-		if k == "" {
-			return
-		}
-		candKeys = appendUniqueText(candKeys, k)
-		if primary {
-			primaryKeys[k] = true
-		}
-		simp := ToSimplified(raw)
-		stripped := NormalizeMatchKey(editionRe.ReplaceAllString(simp, " "))
-		if stripped != "" && stripped != k {
-			candKeys = appendUniqueText(candKeys, stripped)
-		}
-		noParen := NormalizeMatchKey(stripTrailingParens(simp))
-		if noParen != "" && noParen != k {
-			candKeys = appendUniqueText(candKeys, noParen)
-			if primary {
-				primaryKeys[noParen] = true
-			}
-		}
-	}
-	addKey(cand.NameCN, true)
-	addKey(cand.Name, true)
-	for _, alt := range cand.AlternateTitles {
-		addKey(alt.Title, false)
-	}
-	if len(candKeys) == 0 {
-		return 0
-	}
-
-	bestTitleScore := 0.0
-	matchedIdx := 0
-	matchedQueryKey := ""
-	matchedQueryRaw := ""
-	for idx, qRaw := range query.Candidates {
-		qk := NormalizeMatchKey(qRaw)
-		if qk == "" {
-			continue
-		}
-		rankPenalty := 0.0
-		if idx > 1 {
-			rankPenalty = float64(idx-1) * 0.02
-		}
-		for _, ck := range candKeys {
-			s := compareNormalizedKeys(qk, ck, primaryKeys[ck])
-			if s-rankPenalty > bestTitleScore {
-				bestTitleScore = s - rankPenalty
-				matchedIdx = idx
-				matchedQueryKey = qk
-				matchedQueryRaw = qRaw
-			}
-		}
+	var bestTitleScore float64
+	var matchedIdx int
+	var matchedQueryKey, matchedQueryRaw string
+	if len(query.compoundTitles) > 0 {
+		bestTitleScore, matchedQueryRaw = compoundTitleScore(query.compoundTitles, cand)
+		matchedQueryKey = exactTitleKey(matchedQueryRaw)
+	} else {
+		bestTitleScore, matchedIdx, matchedQueryKey, matchedQueryRaw = ordinaryTitleScore(query, cand)
 	}
 	if bestTitleScore < 0.35 {
 		return 0
@@ -152,41 +105,43 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 
 	score := bestTitleScore
 
-	// Platform weighting: strongly prefer Manga over Light Novel / Artbook
+	// An explicit novel category favors the novel over its manga adaptation.
+	// Without the hint, keep the existing preference for manga.
 	switch cand.Platform {
 	case PlatformComic:
-		score += 0.08
+		if query.IsNovelHint {
+			score -= 0.18
+		} else {
+			score += 0.08
+		}
 	case 0:
 		score += 0.02
 	case PlatformNovel:
-		score -= 0.22
+		if query.IsNovelHint {
+			score += 0.08
+		} else {
+			score -= 0.22
+		}
 	case PlatformIllustration, 1005, 1006:
 		score -= 0.18
 	}
 
 	// Series vs One-Shot weighting
-	if !targetIsOneShot {
-		if cand.IsSeries {
-			score += 0.06
-		}
+	if !targetIsOneShot && cand.IsSeries {
+		score += 0.06
 	}
 
 	// Edition hint alignment (e.g. "完全版" in folder name matches "完全版" in Bangumi title)
+	combinedTitle := ToSimplified(cand.NameCN + " " + cand.Name)
 	if len(query.EditionHints) > 0 {
-		combinedTitle := ToSimplified(cand.NameCN + " " + cand.Name)
-		matchedEd := false
 		for _, ed := range query.EditionHints {
 			if strings.Contains(combinedTitle, ed) {
-				matchedEd = true
+				score += 0.04
 				break
 			}
 		}
-		if matchedEd {
-			score += 0.04
-		}
 	} else {
 		// When folder has NO edition hint, slightly prefer main entry over "完全版 / 原画集 / 公式书 / 外传"
-		combinedTitle := ToSimplified(cand.NameCN + " " + cand.Name)
 		for _, suffix := range []string{"完全版", "爱藏版", "新装版", "文库版", "画集", "公式", "外传", "选集", "公式ガイド"} {
 			if strings.Contains(combinedTitle, suffix) {
 				score -= 0.05
@@ -228,10 +183,8 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 	}
 
 	// Short single-character titles require stricter exactness
-	if matchedQueryKey != "" && len([]rune(matchedQueryKey)) <= 1 {
-		if bestTitleScore < 0.90 {
-			score -= 0.25
-		}
+	if matchedQueryKey != "" && len([]rune(matchedQueryKey)) <= 1 && bestTitleScore < 0.90 {
+		score -= 0.25
 	}
 
 	// Subtle popularity tie-breaker (0 to +0.02)
@@ -241,13 +194,106 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 		score += 0.005
 	}
 
-	if score > 0.99 {
-		score = 0.99
+	return math.Round(min(0.99, max(0, score))*1000) / 1000
+}
+
+func compoundTitleScore(groups []compoundTitle, cand SubjectCandidate) (best float64, whole string) {
+	exact := map[string]float64{}
+	add := func(title string, score float64) {
+		if key := exactTitleKey(title); key != "" {
+			exact[key] = max(exact[key], score)
+		}
 	}
-	if score < 0 {
-		score = 0
+	add(cand.Name, 0.88)
+	add(cand.NameCN, 0.88)
+	for _, alias := range cand.AlternateTitles {
+		add(alias.Title, 0.83)
 	}
-	return math.Round(score*1000) / 1000
+	for _, g := range groups {
+		score := exact[exactTitleKey(g.whole)]
+		// The weaker of the exact titles wins; a prefix or stripped edition
+		// is not proof that the two names identify the same subject.
+		partsScore, distinct := 0.88, map[string]bool{}
+		for _, part := range g.parts {
+			key := exactTitleKey(part)
+			partsScore = min(partsScore, exact[key])
+			distinct[key] = true
+		}
+		if len(distinct) > 1 {
+			score = max(score, partsScore)
+		}
+		if score > best {
+			best, whole = score, g.whole
+		}
+	}
+	return best, whole
+}
+
+func ordinaryTitleScore(query ParsedQuery, cand SubjectCandidate) (bestTitleScore float64, matchedIdx int, matchedQueryKey, matchedQueryRaw string) {
+	var candKeys []string
+	primaryKeys := map[string]bool{}
+	addKey := func(raw string, primary bool) {
+		k := NormalizeMatchKey(raw)
+		if k == "" {
+			return
+		}
+		candKeys = appendUniqueText(candKeys, k)
+		if primary {
+			primaryKeys[k] = true
+		}
+		simp := ToSimplified(raw)
+		stripped := NormalizeMatchKey(editionRe.ReplaceAllString(simp, " "))
+		if stripped != "" && stripped != k {
+			candKeys = appendUniqueText(candKeys, stripped)
+		}
+		noParen := NormalizeMatchKey(stripTrailingParens(simp))
+		if noParen != "" && noParen != k {
+			candKeys = appendUniqueText(candKeys, noParen)
+			if primary {
+				primaryKeys[noParen] = true
+			}
+		}
+		if withX := crossTitleKey(simp); withX != "" && withX != k {
+			candKeys = appendUniqueText(candKeys, withX)
+			if primary {
+				primaryKeys[withX] = true
+			}
+		}
+	}
+	addKey(cand.NameCN, true)
+	addKey(cand.Name, true)
+	for _, alt := range cand.AlternateTitles {
+		addKey(alt.Title, false)
+	}
+	if len(candKeys) == 0 {
+		return 0, 0, "", ""
+	}
+
+	for idx, qRaw := range query.Candidates {
+		qk := NormalizeMatchKey(qRaw)
+		if qk == "" {
+			continue
+		}
+		rankPenalty := 0.0
+		if idx > 1 {
+			rankPenalty = float64(idx-1) * 0.02
+		}
+		for _, key := range [...]string{qk, crossTitleKey(qRaw)} {
+			if key == "" {
+				continue
+			}
+			for _, ck := range candKeys {
+				s := compareNormalizedKeys(key, ck, primaryKeys[ck])
+				if s-rankPenalty > bestTitleScore {
+					bestTitleScore = s - rankPenalty
+					matchedIdx = idx
+					matchedQueryKey = qk
+					matchedQueryRaw = qRaw
+				}
+			}
+		}
+	}
+	return bestTitleScore, matchedIdx, matchedQueryKey, matchedQueryRaw
 }
 
 func authorsMatch(queryAuthor, candAuthor string) bool {

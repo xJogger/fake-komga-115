@@ -44,9 +44,10 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1
 1. **多规则漫画目录名清洗器（`parser.go` + `cjk.go`）**：
    - 扩充繁简、台湾异体字与日文新字体归一映射表；
    - 支持 `[标题][作者]` 与 `[作者][标题]` 双序多方括号提取、小写 `x` 合著切分、括号内外双标题提取、中英边界切分、扫图组噪音黑名单以及通用子目录（`台版`、`特别篇`、`单行本` 等）向父目录回溯并追加显示后缀（如 `水星领航员（台版）`）。
+   - `+` / `&` 拆出的标题只用于检索，不单独展示或评分；候选条目必须有完整标题或同时覆盖各部分的正式标题/别名。手动输入关键词与直接按条目 ID 绑定不受目录名限制。
 2. **引擎一：官方 `bangumi/Archive` 本地离线 SQLite 索引（批量主力）**：
    - 流式解析 `subject.jsonlines` 与 `subject-relations.jsonlines`，导入全量 `type=1` 书籍主条目（记录官方布尔 `is_nsfw`，剔除 `relation_type=1003` 单行本分卷），写入 `data/bangumi/bangumi-archive.db`。
-   - 启动时若检测到本地 `terms_schema_version` 落后，自动在本地从 `bgm_subjects` 秒级重建 `bgm_terms` 词表，无需重新下载快照压缩包。
+   - 启动时若检测到本地 `terms_schema_version` 落后，从 `bgm_subjects` 在事务内重建 `bgm_terms` 词表，无需重新下载快照或重刮书库。
    - 批量刮削支持 `incremental`（仅新增）、`retry_unmatched`（重试未命中 + 新增）与 `force`（全量）三档模式。
 3. **引擎二：实时 `api.bgm.tv/v0` 客户端与独立代理**：
    - 支持按关键词或 Subject ID 实时搜索绑定；独立代理配置统一作用于离线包下载、API 查询与封面抓取。

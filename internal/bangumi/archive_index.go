@@ -29,7 +29,7 @@ import (
 const (
 	DefaultArchiveMetaURL     = "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json"
 	archiveUserAgent          = "xJogger/fake-komga-115/2.0 (https://github.com/xJogger/fake-komga-115)"
-	currentTermsSchemaVersion = "2"
+	currentTermsSchemaVersion = "3"
 )
 
 type ArchiveStatus struct {
@@ -658,6 +658,11 @@ func insertSubjectTerms(
 				}
 			}
 		}
+		if key := crossTitleKey(simp); key != "" && key != k {
+			if _, err := termStmt.ExecContext(ctx, key, subjectID, primary); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	if err := insertRaw(nameCN, 1); err != nil {
@@ -711,54 +716,81 @@ func (a *ArchiveIndex) upgradeExistingIndexIfNeeded() {
 	}
 	defer rwDB.Close()
 
-	ctx := context.Background()
-	if !hasNSFWCol {
-		_, _ = rwDB.ExecContext(ctx, `ALTER TABLE bgm_subjects ADD COLUMN is_nsfw INTEGER NOT NULL DEFAULT 0`)
-	}
-	if schemaVer != currentTermsSchemaVersion {
-		type subjTermSource struct {
-			id          int64
-			name        string
-			nameCN      string
-			aliasesJSON string
+	count, err := upgradeArchiveTerms(context.Background(), rwDB, !hasNSFWCol, schemaVer != currentTermsSchemaVersion)
+	if a.logger != nil {
+		if err != nil {
+			a.logger.Warn("upgrade Bangumi offline index terms", "error", err)
+		} else {
+			a.logger.Info("Bangumi offline index terms upgraded locally", "subjects", count, "schema", currentTermsSchemaVersion)
 		}
-		rows, qErr := rwDB.QueryContext(ctx, `SELECT id,name,name_cn,aliases_json FROM bgm_subjects`)
-		if qErr == nil {
-			var sources []subjTermSource
-			for rows.Next() {
-				var item subjTermSource
-				if rows.Scan(&item.id, &item.name, &item.nameCN, &item.aliasesJSON) == nil {
-					sources = append(sources, item)
-				}
-			}
-			rows.Close()
+	}
+}
 
-			tx, txErr := rwDB.BeginTx(ctx, nil)
-			if txErr == nil {
-				_, _ = tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_bgm_terms_key; DELETE FROM bgm_terms;`)
-				stmt, pErr := tx.PrepareContext(ctx, `
+func upgradeArchiveTerms(ctx context.Context, db *sql.DB, addNSFW, rebuild bool) (int, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if addNSFW {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE bgm_subjects ADD COLUMN is_nsfw INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return 0, err
+		}
+	}
+	if !rebuild {
+		return 0, tx.Commit()
+	}
+	type termSource struct {
+		id                        int64
+		name, nameCN, aliasesJSON string
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,name,name_cn,aliases_json FROM bgm_subjects`)
+	if err != nil {
+		return 0, err
+	}
+	var sources []termSource
+	for rows.Next() {
+		var item termSource
+		if err := rows.Scan(&item.id, &item.name, &item.nameCN, &item.aliasesJSON); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		sources = append(sources, item)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_bgm_terms_key; DELETE FROM bgm_terms;`); err != nil {
+		return 0, err
+	}
+	stmt, err := tx.PrepareContext(ctx, `
 INSERT INTO bgm_terms(term_key,subject_id,is_primary) VALUES(?,?,?)
 ON CONFLICT(term_key,subject_id) DO UPDATE SET is_primary=MAX(bgm_terms.is_primary, excluded.is_primary)`)
-				if pErr == nil {
-					for _, src := range sources {
-						var aliases []database.AlternateTitle
-						_ = json.Unmarshal([]byte(src.aliasesJSON), &aliases)
-						_ = insertSubjectTerms(ctx, stmt, src.id, src.nameCN, src.name, aliases)
-					}
-					stmt.Close()
-					_, _ = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_bgm_terms_key ON bgm_terms(term_key)`)
-					_, _ = tx.ExecContext(ctx, `
-INSERT INTO meta(key,value) VALUES('terms_schema_version',?)
-ON CONFLICT(key) DO UPDATE SET value=excluded.value`, currentTermsSchemaVersion)
-					if cErr := tx.Commit(); cErr == nil && a.logger != nil {
-						a.logger.Info("Bangumi offline index terms upgraded locally", "subjects", len(sources), "schema", currentTermsSchemaVersion)
-					}
-				} else {
-					_ = tx.Rollback()
-				}
-			}
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	for _, src := range sources {
+		var aliases []database.AlternateTitle
+		if err := json.Unmarshal([]byte(src.aliasesJSON), &aliases); err != nil {
+			return 0, fmt.Errorf("decode aliases for subject %d: %w", src.id, err)
+		}
+		if err := insertSubjectTerms(ctx, stmt, src.id, src.nameCN, src.name, aliases); err != nil {
+			return 0, err
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_bgm_terms_key ON bgm_terms(term_key)`); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO meta(key,value) VALUES('terms_schema_version',?)
+ON CONFLICT(key) DO UPDATE SET value=excluded.value`, currentTermsSchemaVersion); err != nil {
+		return 0, err
+	}
+	return len(sources), tx.Commit()
 }
 
 func (a *ArchiveIndex) openExistingIfPresent() {
@@ -823,8 +855,11 @@ func (a *ArchiveIndex) Search(
 	}
 
 	var keys []string
-	for _, cand := range parsed.Candidates {
+	for _, cand := range parsed.lookupTitles() {
 		if k := NormalizeMatchKey(cand); k != "" {
+			keys = appendUniqueText(keys, k)
+		}
+		if k := crossTitleKey(cand); k != "" {
 			keys = appendUniqueText(keys, k)
 		}
 	}

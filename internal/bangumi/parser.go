@@ -13,6 +13,13 @@ type ParsedQuery struct {
 	Publisher       string   `json:"publisher"`
 	EditionHints    []string `json:"editionHints"`
 	SubfolderSuffix string   `json:"subfolderSuffix,omitempty"`
+	IsNovelHint     bool     `json:"isNovelHint,omitempty"`
+	compoundTitles  []compoundTitle
+}
+
+type compoundTitle struct {
+	whole string
+	parts []string
 }
 
 var (
@@ -21,15 +28,20 @@ var (
 	trailingParenRe    = regexp.MustCompile(`\s*(?:\([^()]*\)|（[^（）]*）)\s*$`)
 	leadingDateRe      = regexp.MustCompile(`^\s*\d{4}[.\-/年]\d{1,2}(?:[.\-/月]\d{1,2}日?)?[.\-_\s]*`)
 	leadingOKRe        = regexp.MustCompile(`(?i)^\s*ok\s*[-_]+\s*`)
-	leadingTagBeforeBr = regexp.MustCompile(`(?i)^\s*(?:[a-z]|\d{1,4})\s*([\[【])`)
-	leadingNumRe       = regexp.MustCompile(`^\s*\d{1,4}\s*[._\-、]\s*`)
-	trailingVolRe      = regexp.MustCompile(`(?i)[\s_\-]*(?:第?\s*\d+(?:\s*[-~～]\s*\d+)?\s*[卷册冊话話集部篇期巻](?:全|完|未完)?|(?:vol|chap|ch|episode|ep)\.?\s*\d+(?:\s*[-~～]\s*\d+)?|v\d+(?:\s*[-~～]\s*v?\d+)?|全\s*\d+\s*[卷册冊话話集巻]?|全[一1][卷册冊]|\d+\s*[-~～]\s*\d+\s*(?:完|未|未完|卷全|册全)?|\d+\s*(?:完|未|未完|卷全|册全)|(?:上下[卷册冊]?|上中下)|[\s_\-]+(?:完结|已完结|连载中|未完))\s*$`)
-	editionRe          = regexp.MustCompile(`(?i)(数码全彩版?|全彩汉化版|全彩版?|彩色版|彩版|完全版|爱藏版|新装再编版|新装版|文库版|豪华版|珍藏版|典藏版|特装版|限定版|纪念版|总集篇|单行本|合集|短篇集|外传|漫画版|コミカライズ|[@＠]\s*comic)`)
-	noiseWordRe        = regexp.MustCompile(`(?i)^(?:一般コミック|成年コミック|少年コミック|青年コミック|少女コミック|女性コミック|ボーイズラブ|漫画|コミック|comic|comics|manga|汉化|中文|繁体|繁中|简体|简中|港版|台版|日版|韩版|美版|英文版|境外版|电子版|数码版|高清|扫图|自扫|自购|无水印|有水印|双页|单页|digital|dl版|epub|mobi|pdf|zip|cbz|cbr|rar|raw|raws|scan|scans|chn|jpn|eng|enu|esp|kor|cht|chs|cs|连载中?|未完|完结?|已完结|全\d+[卷册话巻]?|\d+[-~～]\d+.*|\d+卷?(?:完|未|全)?|(?:vol|chap|ch)\.?\s*\d+.*|v\d+.*|\d{4}(?:[.\-/年]\d{1,2})?年?|\d{3,4}[px]|\d+x\d+)$`)
-	scanlatorSuffixRe  = regexp.MustCompile(`(?i)(?:汉化组|汉化社|翻译组|制作组|扫图组|数码组|个人汉化|联合汉化|自扫|自购|手打|出品|压制|收集|整理|补档)$`)
-	coAuthorSplitRe    = regexp.MustCompile(`\s*[×✕xX]\s*`)
-	numberedSubfolder  = regexp.MustCompile(`(?i)^\s*(?:\d{1,2}\s*[._\- ]+\s*)?(第一部|第二部|第三部|第四部|第\d+部|前篇|后篇|本篇|正篇|外传|番外|番外篇|特别篇|短篇|短篇集|新版|旧版|新系列|r系列|sp|ova|oad|oped|特典|单行本|非单行本|连载|连载汉化|台版|港版|日版|完全版|爱藏版|新装版|文库版|全彩版|彩版|合集|公式书|设定集|画集)\s*$`)
-	r18BoundaryRe      = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(r-?18|18\+|18禁|18rin)(?:$|[^a-z0-9])`)
+	leadingTagBeforeBr = regexp.MustCompile(`(?i)^\s*(?:[a-z]|0\d{1,3})\s*([\[【])`)
+	// Strip index prefixes like "005. 孤独摇滚", "12_海贼王", "01.Title" while preserving decimal titles like "2.5次元男友"
+	leadingZeroNumRe       = regexp.MustCompile(`^\s*0\d{1,3}\s*[._\-、]\s*`)
+	leadingSpacedNumRe     = regexp.MustCompile(`^\s*\d{1,4}(?:\s*[._\-、]\s+|\s*[、_]\s*)`)
+	trailingVolRe          = regexp.MustCompile(`(?i)(?:[\s_\-]*(?:第?\s*\d+(?:\s*[-~～]\s*\d+)?\s*[卷册冊话話集部篇期巻](?:全|完|未完)?|(?:vol|chap|ch|episode|ep)\.?\s*\d+(?:\s*[-~～]\s*\d+)?|v\d+(?:\s*[-~～]\s*v?\d+)?|全\s*\d+\s*[卷册冊话話集巻]?|全[一1][卷册冊]|\d+(?:\s*\+\s*\d+\s*[完未全]?)+|\d+\s*[-~～]\s*\d+\s*(?:完|未|全|未完|卷全|册全)?|\d+\s*(?:完|未|全|未完|卷全|册全)(?:\s*\+\s*\d+\s*[完未全]?)*|上下[卷册冊]?|上中下)|[\s_\-]+(?:完结|已完结|连载中|未完))\s*$`)
+	revisionAfterBracketRe = regexp.MustCompile(`(?i)([\]】])[\s_-]*rev\d*\s*$`)
+	bareNumericTitleRe     = regexp.MustCompile(`^[0-9]{1,4}$`)
+	editionRe              = regexp.MustCompile(`(?i)(数码全彩版?|全彩汉化版|全彩版?|彩色版|彩版|复刻爱藏版|复刻版|完全版|爱藏版|爱蔵版|新装再编版|新装版|盒装版|文库版|豪华版|珍藏版|典藏版|特装版|限定版|纪念版|大全集|杰作集|总集篇|画业\d+周年|单行本|合集|短篇集|外传|漫画版|コミカライズ|[@＠]\s*comic)`)
+	novelHintRe            = regexp.MustCompile(`(?:\[\s*轻?小说\s*\]|【\s*轻?小说\s*】)`)
+	noiseWordRe            = regexp.MustCompile(`(?i)^(?:一般コミック|成年コミック|少年コミック|青年コミック|少女コミック|女性コミック|ボーイズラブ|漫画|コミック|comic|comics|manga|汉化|中文|繁体|繁中|简体|简中|港版|台版|日版|韩版|美版|英文版|境外版|电子版|数码版|高清|扫图|自扫|自购|无水印|有水印|双页|单页|digital|dl版|epub|mobi|pdf|zip|cbz|cbr|rar|raw|raws|scan|scans|chn|jpn|eng|enu|esp|kor|cht|chs|cs|连载中?|未完|完结?|已完结|全\d+[卷册话巻]?|\d+[-~～]\d+.*|\d+卷?(?:完|未|全)?|(?:vol|chap|ch)\.?\s*\d+.*|v\d+.*|\d{4}(?:[.\-/年]\d{1,2})?年?|\d{3,4}[px]|\d+x\d+)$`)
+	scanlatorSuffixRe      = regexp.MustCompile(`(?i)(?:汉化组|汉化社|翻译组|制作组|扫图组|数码组|个人汉化|联合汉化|自扫|自购|手打|出品|压制|收集|整理|补档)$`)
+	coAuthorSplitRe        = regexp.MustCompile(`\s*[×✕xX]\s*`)
+	numberedSubfolder      = regexp.MustCompile(`(?i)^\s*(?:\d{1,2}\s*[._\- ]+\s*)?(第一部|第二部|第三部|第四部|第\d+部|前篇|后篇|本篇|正篇|外传|番外|番外篇|特别篇|短篇|短篇集|新版|旧版|新系列|r系列|sp|ova|oad|oped|特典|单行本|非单行本|连载|连载汉化|台版|港版|日版|完全版|爱藏版|新装版|文库版|全彩版|彩版|合集|公式书|设定集|画集)\s*$`)
+	r18BoundaryRe          = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(r-?18|18\+|18禁|18rin)(?:$|[^a-z0-9])`)
 
 	knownPublishers = []string{
 		"东立", "尖端", "青文", "玉皇朝", "天下", "文化传信", "长鸿", "台湾角川", "角川",
@@ -100,19 +112,38 @@ func ParseSeriesWithPath(rawName, relativePath string) ParsedQuery {
 	if rawName == "" {
 		return ParsedQuery{}
 	}
+	isNovel := hasNovelHint(rawName, relativePath)
 	if parentName, suffix := detectGenericSubfolder(rawName, relativePath); parentName != "" {
 		parentParsed := parseCoreName(parentName)
 		if len(parentParsed.Candidates) > 0 {
 			parentParsed.Raw = rawName
 			parentParsed.SubfolderSuffix = suffix
+			parentParsed.IsNovelHint = isNovel
 			return parentParsed
 		}
 	}
-	return parseCoreName(rawName)
+	out := parseCoreName(rawName)
+	out.IsNovelHint = isNovel
+	return out
+}
+
+func hasNovelHint(rawName, relativePath string) bool {
+	if novelHintRe.MatchString(ToSimplified(rawName)) {
+		return true
+	}
+	parts := strings.FieldsFunc(ToSimplified(relativePath), func(r rune) bool { return r == '/' || r == '\\' })
+	for _, parent := range parts[:max(0, len(parts)-1)] {
+		parent = strings.TrimSpace(parent)
+		if parent == "小说" || strings.HasSuffix(parent, "轻小说") || novelHintRe.MatchString(parent) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseCoreName(rawName string) ParsedQuery {
 	simp := preprocessSurface(ToSimplified(rawName))
+	simp = revisionAfterBracketRe.ReplaceAllString(simp, "$1")
 
 	var (
 		brackets     []string
@@ -152,6 +183,7 @@ func parseCoreName(rawName string) ParsedQuery {
 
 	var (
 		cleanBrackets   []string
+		coAuthorAtZero  string
 		ambiguousAtZero string
 	)
 	for idx, token := range brackets {
@@ -168,6 +200,9 @@ func parseCoreName(rawName string) ParsedQuery {
 			continue
 		}
 		lowerTok := strings.ToLower(strings.TrimSpace(token))
+		if lowerTok == "小说" || lowerTok == "轻小说" {
+			continue
+		}
 		if ambiguousScanlators[lowerTok] {
 			if outside != "" || idx >= 2 || len(cleanBrackets) >= 2 {
 				continue
@@ -178,6 +213,9 @@ func parseCoreName(rawName string) ParsedQuery {
 			}
 		}
 		if isCoAuthorBracket(token) {
+			if outside == "" && idx == 0 {
+				coAuthorAtZero = token
+			}
 			for _, a := range splitAuthorsToken(token) {
 				authors = appendUniqueText(authors, a)
 			}
@@ -203,6 +241,10 @@ func parseCoreName(rawName string) ParsedQuery {
 				authors = appendUniqueText(authors, a)
 			}
 		}
+		if coAuthorAtZero != "" {
+			// The first bracket may be a title that looks like two co-authors.
+			titleTokens = append(titleTokens, coAuthorAtZero)
+		}
 		if ambiguousAtZero != "" {
 			// Put real title bracket(s) ahead of ambiguous scanlator name, but keep it as fallback
 			// so genuine manga "[押见修造][恶之华]" or "[恶之华]" still matches!
@@ -211,6 +253,7 @@ func parseCoreName(rawName string) ParsedQuery {
 	}
 
 	var candidates []string
+	var compoundTitles []compoundTitle
 	var addCandidate func(val string, depth int)
 	addCandidate = func(val string, depth int) {
 		if depth > 2 {
@@ -229,32 +272,44 @@ func parseCoreName(rawName string) ParsedQuery {
 		}
 		if len([]rune(cleaned)) > 0 && !isNoiseBracket(cleaned) {
 			candidates = appendUniqueText(candidates, cleaned)
+			if parts := splitCompoundTitle(cleaned); len(parts) > 1 {
+				// A component can help retrieve a candidate, but is not a title
+				// candidate by itself. One Bangumi subject must cover the whole name.
+				compoundTitles = append(compoundTitles, compoundTitle{whole: cleaned, parts: parts})
+				return
+			}
 
 			strippedEd := cleanTitleSurface(editionRe.ReplaceAllString(cleaned, " "))
 			if strippedEd != "" && strippedEd != cleaned && !isNoiseBracket(strippedEd) {
 				candidates = appendUniqueText(candidates, strippedEd)
 			}
 
-			// Split subtitle / bilingual separators
-			for _, sep := range []string{"_", "／", "/", " - ", " — ", " ─ ", "※", "：", ":", "～", "~", "-"} {
-				if strings.Contains(cleaned, sep) {
-					parts := strings.Split(cleaned, sep)
-					for _, sub := range parts {
-						sub = cleanTitleSurface(sub)
-						if sep == "-" && !isStrongDashPart(sub) {
-							continue
-						}
-						if len([]rune(sub)) >= 2 && !isNoiseBracket(sub) {
-							candidates = appendUniqueText(candidates, sub)
+			// Split subtitle / bilingual separators. Compounds are handled above.
+			bases := []string{cleaned}
+			if strippedEd != "" && strippedEd != cleaned {
+				bases = append(bases, strippedEd)
+			}
+			for _, base := range bases {
+				for _, sep := range []string{"_", "／", "/", " - ", " — ", " ─ ", "※", "：", ":", "～", "~", "-"} {
+					if strings.Contains(base, sep) {
+						parts := strings.Split(base, sep)
+						for _, sub := range parts {
+							sub = cleanTitleSurface(sub)
+							if sep == "-" && !isStrongDashPart(sub) {
+								continue
+							}
+							if len([]rune(sub)) >= 2 && !isNoiseBracket(sub) {
+								candidates = appendUniqueText(candidates, sub)
+							}
 						}
 					}
 				}
-			}
 
-			// Split CJK <-> Latin bilingual concatenated titles (e.g. "ARIA 水星领航员", "BASARA婆娑罗", "死神BLEACH")
-			for _, part := range splitLatinCJKPair(cleaned) {
-				if len([]rune(part)) >= 2 && !isNoiseBracket(part) {
-					candidates = appendUniqueText(candidates, part)
+				// Split CJK <-> Latin bilingual concatenated titles (e.g. "ARIA 水星领航员", "猫之眼CAT'S EYE", "死神BLEACH")
+				for _, part := range splitLatinCJKPair(base) {
+					if len([]rune(part)) >= 2 && !isNoiseBracket(part) {
+						candidates = appendUniqueText(candidates, part)
+					}
 				}
 			}
 		}
@@ -267,7 +322,10 @@ func parseCoreName(rawName string) ParsedQuery {
 		}
 	}
 
-	if outside != "" {
+	if bareNumericTitleRe.MatchString(outside) {
+		// A number outside the metadata brackets may be the actual title (86).
+		candidates = appendUniqueText(candidates, outside)
+	} else if outside != "" {
 		if len(authors) == 0 && strings.Contains(outsideWithParens, " - ") {
 			parts := strings.SplitN(outsideWithParens, " - ", 2)
 			left := cleanTitleSurface(parts[0])
@@ -296,12 +354,41 @@ func parseCoreName(rawName string) ParsedQuery {
 	}
 
 	return ParsedQuery{
-		Raw:          rawName,
-		Candidates:   candidates,
-		Authors:      authors,
-		Publisher:    publisher,
-		EditionHints: editionHints,
+		Raw:            rawName,
+		Candidates:     candidates,
+		Authors:        authors,
+		Publisher:      publisher,
+		EditionHints:   editionHints,
+		compoundTitles: compoundTitles,
 	}
+}
+
+func splitCompoundTitle(s string) []string {
+	if !strings.ContainsAny(s, "+&") {
+		return nil
+	}
+	var parts []string
+	for _, raw := range strings.FieldsFunc(s, func(r rune) bool { return r == '+' || r == '&' }) {
+		if part := cleanTitleSurface(raw); NormalizeMatchKey(part) != "" {
+			parts = append(parts, part)
+		}
+	}
+	return parts
+}
+
+// lookupTitles provides retrieval hints, never evidence for a partial match.
+func (p ParsedQuery) lookupTitles() []string {
+	if len(p.compoundTitles) == 0 {
+		return p.Candidates
+	}
+	var terms []string
+	for _, group := range p.compoundTitles {
+		terms = appendUniqueText(terms, group.whole)
+		for _, part := range group.parts {
+			terms = appendUniqueText(terms, part)
+		}
+	}
+	return terms
 }
 
 func preprocessSurface(s string) string {
@@ -316,7 +403,8 @@ func cleanTitleSurface(s string) string {
 	s = strings.TrimSpace(s)
 	s = leadingDateRe.ReplaceAllString(s, "")
 	s = leadingOKRe.ReplaceAllString(s, "")
-	s = leadingNumRe.ReplaceAllString(s, "")
+	s = leadingZeroNumRe.ReplaceAllString(s, "")
+	s = leadingSpacedNumRe.ReplaceAllString(s, "")
 	for {
 		next := strings.TrimSpace(trailingVolRe.ReplaceAllString(s, ""))
 		if next == s {
@@ -324,7 +412,7 @@ func cleanTitleSurface(s string) string {
 		}
 		s = next
 	}
-	s = strings.Trim(s, " \t\r\n-–—─_·•・:：/\\|[]【】")
+	s = strings.Trim(s, " \t\r\n-–—─+_·•・:：/\\|[]【】")
 	s = strings.Join(strings.Fields(s), " ")
 	return s
 }

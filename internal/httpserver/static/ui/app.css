@@ -54,13 +54,27 @@ html, body {
   margin: 0;
   padding: 0;
   min-height: 100%;
-  overflow-x: clip;
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 14px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+}
+
+.app-root {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+body.modal-open {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+html.kb-typing {
+  overflow-anchor: none;
 }
 
 a {
@@ -262,6 +276,8 @@ button, input, select, textarea {
   align-items: center;
   justify-content: center;
   gap: 6px;
+  max-width: 100%;
+  min-width: 0;
   height: 36px;
   padding: 0 14px;
   border-radius: var(--radius-sm);
@@ -272,6 +288,25 @@ button, input, select, textarea {
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+
+.btn-cta-read {
+  gap: 0;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.btn-part-fixed {
+  flex-shrink: 0;
+}
+
+.btn-part-ellipsis {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .btn:hover:not(:disabled) {
@@ -423,6 +458,8 @@ button, input, select, textarea {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  max-width: 100%;
+  min-width: 0;
   padding: 9px 14px;
   border-radius: var(--radius);
   background: var(--bg-card);
@@ -440,6 +477,11 @@ button, input, select, textarea {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 2px 7px;
   border-radius: 6px;
   font-size: 11px;
@@ -669,8 +711,10 @@ button, input, select, textarea {
 /* Series Detail */
 .detail-hero {
   display: grid;
-  grid-template-columns: 230px 1fr;
+  grid-template-columns: 230px minmax(0, 1fr);
   gap: 26px;
+  min-width: 0;
+  max-width: 100%;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -727,10 +771,18 @@ button, input, select, textarea {
   box-shadow: 0 1px 3px rgba(0,0,0,0.2);
 }
 
-.detail-main h1 {
+.detail-main {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.detail-main h1,
+.card h1 {
   margin: 4px 0 6px;
   font-size: 24px;
   line-height: 1.3;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .detail-orig {
@@ -745,6 +797,8 @@ button, input, select, textarea {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 14px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .detail-cta {
@@ -752,6 +806,8 @@ button, input, select, textarea {
   flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 16px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .detail-summary {
@@ -759,6 +815,8 @@ button, input, select, textarea {
   white-space: pre-line;
   margin: 0 0 16px;
   line-height: 1.65;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .chip-group {
@@ -767,11 +825,18 @@ button, input, select, textarea {
   gap: 6px;
   align-items: center;
   margin-bottom: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .chip {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 3px 9px;
   border-radius: 999px;
   font-size: 12px;
@@ -1006,17 +1071,42 @@ table.data-table th {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .modal-head h3 {
   margin: 0;
   font-size: 17px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.modal-subhead {
+  padding: 12px 20px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--bg-card);
+}
+
+.bgm-parsed-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .modal-body {
   padding: 18px 20px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   flex: 1;
+  min-height: 0;
 }
 
 .modal-foot {
@@ -1025,6 +1115,7 @@ table.data-table th {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .bgm-candidate {
@@ -1089,6 +1180,67 @@ table.data-table th {
 }
 
 @media (max-width: 780px) {
+  html.kb-typing .topbar:not(:focus-within) {
+    position: relative;
+  }
+  html.kb-typing .topbar {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .auth-screen {
+    min-height: 100svh;
+    align-items: flex-start;
+    padding: 20px 14px 40px;
+  }
+  .auth-card {
+    padding: 22px 18px;
+  }
+  .modal-backdrop {
+    align-items: flex-start;
+    padding: 8px;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .modal-dialog {
+    max-height: calc(var(--vvh, 100dvh) - 16px);
+  }
+  .modal-head {
+    padding: 12px 14px;
+  }
+  .modal-head h3 {
+    font-size: 15.5px;
+  }
+  .modal-subhead {
+    padding: 10px 14px;
+  }
+  .bgm-parsed-hint {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .modal-body {
+    padding: 12px 14px;
+  }
+  .modal-foot {
+    padding: 10px 14px;
+  }
+  .bgm-candidate {
+    gap: 10px;
+    padding: 10px;
+    overflow-wrap: anywhere;
+  }
+  input[type="text"],
+  input[type="password"],
+  input[type="number"],
+  input[type="url"],
+  input[type="search"],
+  select,
+  textarea,
+  .filter-row select,
+  .filter-row input[type="text"] {
+    font-size: 16px;
+  }
   .topbar-inner {
     flex-wrap: wrap;
     height: auto;
@@ -1105,11 +1257,15 @@ table.data-table th {
     margin-left: 0;
   }
   .detail-hero {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
   }
   .detail-cover-col {
     max-width: 210px;
     margin: 0 auto;
+  }
+  .continue-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
   .poster-grid {
     grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));

@@ -70,6 +70,71 @@
   }
   setThemeMode(state.themeMode);
 
+  // Sync visualViewport height into --vvh and track mobile keyboard focus to prevent
+  // Android WebView (e.g. Mihon) vertical layout oscillations while typing.
+  function isEditableInput(el) {
+    if (!el || !el.tagName) return false;
+    if (el.tagName === 'TEXTAREA') return !el.readOnly && !el.disabled;
+    if (el.tagName === 'INPUT') {
+      const t = (el.type || 'text').toLowerCase();
+      if (['button', 'checkbox', 'radio', 'submit', 'reset', 'file', 'hidden', 'range', 'color'].includes(t)) return false;
+      return !el.readOnly && !el.disabled;
+    }
+    return !!el.isContentEditable;
+  }
+
+  function focusIfDesktop(el) {
+    if (!el) return;
+    if (window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
+      el.focus();
+    }
+  }
+
+  (() => {
+    let lastVVH = 0;
+    let vvRaf = 0;
+    const syncVVH = () => {
+      vvRaf = 0;
+      const h = Math.round((window.visualViewport ? window.visualViewport.height : window.innerHeight) || 0);
+      if (h > 0 && Math.abs(h - lastVVH) >= 1) {
+        lastVVH = h;
+        document.documentElement.style.setProperty('--vvh', `${h}px`);
+      }
+    };
+    const scheduleVVH = () => {
+      if (!vvRaf) vvRaf = window.requestAnimationFrame(syncVVH);
+    };
+    syncVVH();
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', scheduleVVH, { passive: true });
+    }
+    window.addEventListener('resize', scheduleVVH, { passive: true });
+
+    let blurTimer = null;
+    document.addEventListener('focusin', (e) => {
+      if (blurTimer) {
+        clearTimeout(blurTimer);
+        blurTimer = null;
+      }
+      if (isEditableInput(e.target)) {
+        document.documentElement.classList.add('kb-typing');
+        scheduleVVH();
+      } else {
+        document.documentElement.classList.remove('kb-typing');
+      }
+    });
+    document.addEventListener('focusout', () => {
+      if (blurTimer) clearTimeout(blurTimer);
+      blurTimer = setTimeout(() => {
+        blurTimer = null;
+        if (!isEditableInput(document.activeElement)) {
+          document.documentElement.classList.remove('kb-typing');
+        }
+        scheduleVVH();
+      }, 120);
+    });
+  })();
+
   function esc(val) {
     if (val === null || val === undefined) return '';
     return String(val)
@@ -203,20 +268,33 @@
     return data;
   }
 
+  let modalScroll = null;
   function closeModal() {
     const root = document.getElementById('modal-root');
-    if (root) root.innerHTML = '';
+    if (root) {
+      if (root.contains(document.activeElement)) document.activeElement.blur();
+      root.innerHTML = '';
+    }
+    document.body.classList.remove('modal-open');
+    if (modalScroll) {
+      const { x, y } = modalScroll;
+      modalScroll = null;
+      if (window.scrollX !== x || window.scrollY !== y) window.scrollTo(x, y);
+    }
   }
 
-  function openModal({ title, bodyHTML, footHTML = '', maxWidth = '760px', onMount }) {
+  function openModal({ title, subheadHTML = '', bodyHTML, footHTML = '', maxWidth = '760px', onMount }) {
     const root = document.getElementById('modal-root');
+    if (!modalScroll) modalScroll = { x: window.scrollX, y: window.scrollY };
+    document.body.classList.add('modal-open');
     root.innerHTML = `
       <div class="modal-backdrop" id="modal-backdrop">
         <div class="modal-dialog" style="max-width:${esc(maxWidth)}">
           <div class="modal-head">
             <h3>${esc(title)}</h3>
-            <button type="button" class="btn btn-sm" id="modal-close-btn">关闭</button>
+            <button type="button" class="btn btn-sm" style="flex-shrink:0" id="modal-close-btn">关闭</button>
           </div>
+          ${subheadHTML ? `<div class="modal-subhead" id="modal-subhead">${subheadHTML}</div>` : ''}
           <div class="modal-body" id="modal-body">${bodyHTML}</div>
           ${footHTML ? `<div class="modal-foot">${footHTML}</div>` : ''}
         </div>
@@ -352,7 +430,7 @@
         </form>
       </div>`;
     document.getElementById('setup-theme-btn').onclick = () => setThemeMode(nextThemeMode(state.themeMode));
-    document.getElementById('setup-user').focus();
+    focusIfDesktop(document.getElementById('setup-user'));
     document.getElementById('setup-form').onsubmit = async (e) => {
       e.preventDefault();
       const username = document.getElementById('setup-user').value.trim();
@@ -405,7 +483,7 @@
         </form>
       </div>`;
     document.getElementById('login-theme-btn').onclick = () => setThemeMode(nextThemeMode(state.themeMode));
-    document.getElementById('login-user').focus();
+    focusIfDesktop(document.getElementById('login-user'));
     document.getElementById('login-form').onsubmit = async (e) => {
       e.preventDefault();
       const username = document.getElementById('login-user').value.trim();
@@ -725,14 +803,51 @@
 
   function pickStartBook(books) {
     if (!books || books.length === 0) return null;
+    const bookLabel = (b) => (b.metadata && b.metadata.title) ? b.metadata.title : b.name;
     const inProg = books.find((b) => b.readProgress && !b.readProgress.completed && b.readProgress.page > 0);
-    if (inProg) return { book: inProg, page: inProg.readProgress.page, label: `继续阅读 · ${inProg.metadata ? inProg.metadata.title : inProg.name}（第 ${inProg.readProgress.page} 页）` };
+    if (inProg) {
+      const mid = bookLabel(inProg);
+      const page = inProg.readProgress.page;
+      return {
+        book: inProg,
+        page,
+        prefix: '继续阅读 ·\u00a0',
+        middle: mid,
+        suffix: `（第 ${page} 页）`,
+        fullLabel: `继续阅读 · ${mid}（第 ${page} 页）`,
+      };
+    }
     const firstUnread = books.find((b) => !b.readProgress || !b.readProgress.completed);
     if (firstUnread) {
       const hasAnyRead = books.some((b) => b.readProgress && b.readProgress.completed);
-      return { book: firstUnread, page: 1, label: hasAnyRead ? `继续读下一卷 · ${firstUnread.metadata ? firstUnread.metadata.title : firstUnread.name}` : '开始阅读' };
+      if (hasAnyRead) {
+        const mid = bookLabel(firstUnread);
+        return {
+          book: firstUnread,
+          page: 1,
+          prefix: '继续读下一卷 ·\u00a0',
+          middle: mid,
+          suffix: '',
+          fullLabel: `继续读下一卷 · ${mid}`,
+        };
+      }
+      return {
+        book: firstUnread,
+        page: 1,
+        prefix: '开始阅读',
+        middle: '',
+        suffix: '',
+        fullLabel: '开始阅读',
+      };
     }
-    return { book: books[0], page: 1, label: '从第一卷重读' };
+    return {
+      book: books[0],
+      page: 1,
+      prefix: '从第一卷重读',
+      middle: '',
+      suffix: '',
+      fullLabel: '从第一卷重读',
+    };
   }
 
   async function renderSeriesDetail(seriesID) {
@@ -771,7 +886,7 @@
     if (!content) return;
 
     content.innerHTML = `
-      <div style="margin-bottom:12px;font-size:13px;color:var(--text-muted)">
+      <div style="margin-bottom:12px;font-size:13px;color:var(--text-muted);overflow-wrap:anywhere;word-break:break-word">
         <a href="/libraries/${encodeURIComponent(lib.id || '')}" data-nav style="color:var(--accent)">${esc(lib.name || '书库')}</a>
         <span> / </span>
         <span>${esc(title)}</span>
@@ -809,7 +924,7 @@
           </div>
 
           <div class="detail-cta">
-            ${startTarget ? `<a href="/reader/series/${encodeURIComponent(seriesID)}/book/${encodeURIComponent(startTarget.book.id)}?page=${startTarget.page}" class="btn btn-primary btn-lg">▶ ${esc(startTarget.label)}</a>` : ''}
+            ${startTarget ? `<a href="/reader/series/${encodeURIComponent(seriesID)}/book/${encodeURIComponent(startTarget.book.id)}?page=${startTarget.page}" class="btn btn-primary btn-lg btn-cta-read" title="${esc(startTarget.fullLabel)}"><span class="btn-part-fixed">▶\u00a0${esc(startTarget.prefix)}</span>${startTarget.middle ? `<span class="btn-part-ellipsis">${esc(startTarget.middle)}</span>` : ''}${startTarget.suffix ? `<span class="btn-part-fixed">${esc(startTarget.suffix)}</span>` : ''}</a>` : ''}
             <button type="button" class="btn btn-bgm" id="btn-open-bgm">Bangumi 刮削 / 匹配</button>
             <button type="button" class="btn" id="btn-edit-meta">编辑元数据</button>
             <button type="button" class="btn btn-sm" id="btn-mark-series-read">全部标为已读</button>
@@ -1027,28 +1142,35 @@
     const rawMeta = detail.rawMeta || {};
     openModal({
       title: `Bangumi 元数据匹配 · ${detail.originalName}`,
-      bodyHTML: `
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
-          <input type="text" id="bgm-search-q" value="${esc(detail.originalName)}" placeholder="输入漫画标题关键词、Bangumi 条目 ID 或 bgm.tv 链接" style="flex:1;min-width:220px;height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+      subheadHTML: `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <input type="text" id="bgm-search-q" value="${esc(detail.originalName)}" placeholder="输入漫画标题关键词、Bangumi 条目 ID 或 bgm.tv 链接" style="flex:1 1 200px;min-width:0;height:38px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
           <button type="button" class="btn btn-primary" id="bgm-search-btn">搜索候选</button>
           <button type="button" class="btn btn-bgm" id="bgm-auto-btn">自动清洗匹配</button>
           ${rawMeta.bgmSubjectId ? `<button type="button" class="btn btn-danger" id="bgm-clear-btn">解除绑定 (#${rawMeta.bgmSubjectId})</button>` : ''}
         </div>
-        <div id="bgm-parsed-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:10px">支持直接粘贴 Subject ID（如 24596）或 https://bgm.tv/subject/... 链接（部分受限条目需登录 bgm.tv 才能在网页端打开）。</div>
+        <div id="bgm-parsed-hint" class="bgm-parsed-hint">支持直接粘贴 Subject ID（如 24596）或 https://bgm.tv/subject/... 链接（部分受限条目需登录 bgm.tv 才能在网页端打开）。</div>
+      `,
+      bodyHTML: `
         <div id="bgm-candidates-box"><div class="boot-splash" style="min-height:140px"><div class="spinner"></div><p>正在搜索 Bangumi…</p></div></div>
       `,
       onMount: () => {
+        const searchInput = document.getElementById('bgm-search-q');
+        const box = document.getElementById('bgm-candidates-box');
+        const hint = document.getElementById('bgm-parsed-hint');
+        const defaultHint = hint.textContent;
+        let searchID = 0;
         const doSearch = async (qVal) => {
-          const box = document.getElementById('bgm-candidates-box');
-          if (!box) return;
+          const id = ++searchID;
           box.innerHTML = `<div class="boot-splash" style="min-height:140px"><div class="spinner"></div><p>正在搜索 Bangumi…</p></div>`;
           try {
             const res = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/candidates?q=${encodeURIComponent(qVal)}`);
+            if (id !== searchID || !box.isConnected) return;
             const parsed = res.parsed || {};
-            const hint = document.getElementById('bgm-parsed-hint');
-            if (hint && parsed.candidates && parsed.candidates.length > 0) {
-              hint.textContent = `清洗候选词：${parsed.candidates.join(' / ')}${parsed.authors && parsed.authors.length ? ` · 识别作者：${parsed.authors.join('、')}` : ''}${parsed.publisher ? ` · 版本/出版社：${parsed.publisher}` : ''}`;
-            }
+            hint.textContent = parsed.candidates && parsed.candidates.length > 0
+              ? `清洗候选词：${parsed.candidates.join(' / ')}${parsed.authors && parsed.authors.length ? ` · 识别作者：${parsed.authors.join('、')}` : ''}${parsed.publisher ? ` · 版本/出版社：${parsed.publisher}` : ''}`
+              : defaultHint;
+            hint.title = hint.textContent;
             const cands = res.candidates || [];
             if (cands.length === 0) {
               box.innerHTML = `<div class="empty-box">未找到匹配的 Bangumi 书籍条目，请尝试缩短关键词或直接输入 Bangumi Subject ID。</div>`;
@@ -1104,15 +1226,16 @@
               };
             });
           } catch (err) {
+            if (id !== searchID || !box.isConnected) return;
             box.innerHTML = `<div class="empty-box" style="color:var(--danger)">${esc(err.message)}</div>`;
           }
         };
 
-        document.getElementById('bgm-search-btn').onclick = () => {
-          doSearch(document.getElementById('bgm-search-q').value.trim());
-        };
-        document.getElementById('bgm-search-q').addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') doSearch(document.getElementById('bgm-search-q').value.trim());
+        document.getElementById('bgm-search-btn').onclick = () => doSearch(searchInput.value.trim());
+        searchInput.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+          e.preventDefault();
+          doSearch(searchInput.value.trim());
         });
         document.getElementById('bgm-auto-btn').onclick = async () => {
           try {

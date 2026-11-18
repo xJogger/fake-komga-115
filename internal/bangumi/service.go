@@ -178,11 +178,10 @@ func (s *Service) SearchCandidates(
 	queryText string,
 ) ([]SubjectCandidate, ParsedQuery, error) {
 	queryText = strings.TrimSpace(queryText)
+	useSeriesName := queryText == "" || queryText == series.Name
 	var parsed ParsedQuery
-	if queryText == "" {
+	if useSeriesName {
 		queryText = series.Name
-		parsed = ParseSeriesWithPath(series.Name, series.RelativePath)
-	} else if queryText == series.Name {
 		parsed = ParseSeriesWithPath(series.Name, series.RelativePath)
 	} else {
 		parsed = ParseSeriesName(queryText)
@@ -199,8 +198,10 @@ func (s *Service) SearchCandidates(
 	}
 
 	searchKeyword := queryText
-	if queryText == series.Name && len(parsed.Candidates) > 0 {
-		searchKeyword = parsed.Candidates[0]
+	terms := parsed.lookupTitles()
+	useLookupTerms := useSeriesName || len(parsed.compoundTitles) > 0
+	if useLookupTerms && len(terms) > 0 {
+		searchKeyword = terms[0]
 	}
 
 	seen := map[int64]bool{}
@@ -213,8 +214,8 @@ func (s *Service) SearchCandidates(
 			}
 		}
 	}
-	if queryText == series.Name && len(parsed.Candidates) > 1 && len(merged) < 5 {
-		if liveAlt, err := s.live.Search(ctx, parsed.Candidates[1], parsed, series.OneShot, 10); err == nil {
+	if useLookupTerms && len(terms) > 1 && len(merged) < 5 {
+		if liveAlt, err := s.live.Search(ctx, terms[1], parsed, series.OneShot, 10); err == nil {
 			for _, item := range liveAlt {
 				if !seen[item.ID] {
 					seen[item.ID] = true
@@ -262,16 +263,17 @@ func (s *Service) AutoScrapeOne(
 	series database.Series,
 ) (matched bool, meta database.SeriesMetadata, err error) {
 	parsed := ParseSeriesWithPath(series.Name, series.RelativePath)
+	terms := parsed.lookupTitles()
 	var candidates []SubjectCandidate
 	if s.archive.Ready() {
 		candidates, err = s.archive.Search(ctx, parsed, series.OneShot, 10)
 		if err != nil {
 			return false, database.SeriesMetadata{}, err
 		}
-	} else if len(parsed.Candidates) > 0 {
-		maxTries := min(2, len(parsed.Candidates))
+	} else if len(terms) > 0 {
+		maxTries := min(2, len(terms))
 		for i := 0; i < maxTries; i++ {
-			res, sErr := s.live.Search(ctx, parsed.Candidates[i], parsed, series.OneShot, 10)
+			res, sErr := s.live.Search(ctx, terms[i], parsed, series.OneShot, 10)
 			if sErr != nil {
 				if i == 0 {
 					return false, database.SeriesMetadata{}, sErr

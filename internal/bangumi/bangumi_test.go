@@ -100,6 +100,40 @@ func TestParseSeriesNameRealWorldPatterns(t *testing.T) {
 			wantAuthor: "滨路晶",
 			wantPub:    "芳文社",
 		},
+		{
+			raw:       "2.5次元旅记",
+			wantTitle: "2.5次元旅记",
+		},
+		{
+			raw:        "[機械旅團][高橋明][文化傳信]7+1完",
+			wantTitle:  "机械旅团",
+			wantAuthor: "高桥明",
+			wantPub:    "文化传信",
+		},
+		{
+			raw:        "[嚙合偵探][松井優作][東立][ZERO][23完]",
+			wantTitle:  "啮合侦探",
+			wantAuthor: "松井优作",
+			wantPub:    "东立",
+		},
+		{
+			raw:        "[貓車站CAT'S STATION完全版][北村穗][玉皇朝]15完",
+			wantTitle:  "CAT'S STATION",
+			wantAuthor: "北村穗",
+			wantPub:    "玉皇朝",
+		},
+		{
+			raw:        "[暮色航線&DUSK LINE][冨田優][東立][3完]",
+			wantTitle:  "暮色航线&DUSK LINE",
+			wantAuthor: "富田优",
+			wantPub:    "东立",
+		},
+		{
+			raw:        "[林檎x茶葉][宮川美穗][尖端][ZERO][22完]",
+			wantTitle:  "林檎x茶叶",
+			wantAuthor: "宫川美穗",
+			wantPub:    "尖端",
+		},
 	}
 	for _, tc := range cases {
 		parsed := ParseSeriesWithPath(tc.raw, tc.relPath)
@@ -134,6 +168,27 @@ func TestParseSeriesNameRealWorldPatterns(t *testing.T) {
 	realAku := ParseSeriesName("[押見修造][惡之華][東立][11完]")
 	if conf := ScoreCandidate(realAku, candAkuNoHana, false); conf < 0.95 {
 		t.Fatalf("expected genuine [押见修造][恶之华] to score >= 0.95, got %v", conf)
+	}
+
+	// Explicit [小說] / 轻小说 folder must allow PlatformNovel to score above threshold, while manga folders still penalize novels!
+	candNovel := SubjectCandidate{
+		ID:       909,
+		Platform: PlatformNovel,
+		IsSeries: true,
+		Name:     "雲と羅針盤",
+		NameCN:   "CLOUD×COMPASS！",
+		Authors:  []database.Author{{Name: "竹宫千佳", Role: "writer"}},
+	}
+	novelQuery := ParseSeriesWithPath("[小說][CLOUDxCOMPASS！][竹宮千佳][角川][10完]", "书库/译版轻小说/[小說][CLOUDxCOMPASS！]")
+	if !novelQuery.IsNovelHint {
+		t.Fatal("expected IsNovelHint=true for explicit [小說] folder")
+	}
+	if conf := ScoreCandidate(novelQuery, candNovel, false); conf < AutoMatchMinConfidence {
+		t.Fatalf("expected explicit novel folder to match PlatformNovel above threshold, got %v", conf)
+	}
+	mangaQuery := ParseSeriesName("[CLOUDxCOMPASS！][10完]")
+	if conf := ScoreCandidate(mangaQuery, candNovel, false); conf >= 0.80 {
+		t.Fatalf("expected non-novel folder to penalize PlatformNovel, got %v", conf)
 	}
 }
 

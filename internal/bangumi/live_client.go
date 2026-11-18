@@ -156,6 +156,9 @@ func (c *LiveClient) Search(
 		}
 		cand := mapAPISubject(item, nil)
 		cand.Confidence = ScoreCandidate(parsed, cand, targetIsOneShot)
+		if len(parsed.compoundTitles) > 0 && cand.Confidence == 0 {
+			continue
+		}
 		out = append(out, cand)
 	}
 	slices.SortFunc(out, func(a, b SubjectCandidate) int {
