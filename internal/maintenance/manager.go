@@ -85,6 +85,7 @@ type Manager struct {
 	mu          sync.Mutex
 	queued      map[string]string
 	activeRunID string
+	activeStop  context.CancelFunc
 }
 
 func New(
@@ -163,6 +164,11 @@ WHERE status IN ('queued','running')`, now)
 
 func (m *Manager) Close() {
 	m.cancel()
+	m.mu.Lock()
+	if m.activeStop != nil {
+		m.activeStop()
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) StartBookIndex(
@@ -267,7 +273,36 @@ WHERE id=? AND status IN ('queued','running')`, runID)
 	if affected == 0 {
 		return sql.ErrNoRows
 	}
+	m.mu.Lock()
+	if m.activeRunID == runID && m.activeStop != nil {
+		m.activeStop()
+	}
+	m.mu.Unlock()
 	return nil
+}
+
+func (m *Manager) CancelLibrary(ctx context.Context, libraryID string) {
+	rows, err := m.store.DB().QueryContext(ctx, `
+SELECT id FROM maintenance_runs
+WHERE status IN ('queued','running')
+ AND (
+  EXISTS (SELECT 1 FROM series s WHERE s.id=maintenance_runs.series_id AND s.library_id=?)
+  OR EXISTS (SELECT 1 FROM books b WHERE b.id=maintenance_runs.book_id AND b.library_id=?)
+ )`, libraryID, libraryID)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		_ = m.Cancel(ctx, id)
+	}
 }
 
 func (m *Manager) Runs(ctx context.Context, filter ListFilter) ([]Run, error) {
@@ -357,17 +392,20 @@ func (m *Manager) worker() {
 }
 
 func (m *Manager) execute(item job) {
-	ctx := m.ctx
+	ctx, cancel := context.WithCancel(m.ctx)
 	m.mu.Lock()
 	m.activeRunID = item.runID
+	m.activeStop = cancel
 	m.mu.Unlock()
 	defer func() {
+		cancel()
 		m.mu.Lock()
 		m.activeRunID = ""
+		m.activeStop = nil
 		m.mu.Unlock()
 	}()
 
-	run, err := m.Run(ctx, item.runID)
+	run, err := m.Run(m.ctx, item.runID)
 	if err != nil {
 		return
 	}
@@ -377,7 +415,7 @@ func (m *Manager) execute(item job) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = m.store.DB().ExecContext(ctx,
+	_, _ = m.store.DB().ExecContext(m.ctx,
 		`UPDATE maintenance_runs SET status='running',started_at=? WHERE id=?`,
 		now, run.ID)
 
@@ -397,35 +435,56 @@ func (m *Manager) execute(item job) {
 func (m *Manager) executeBookIndex(ctx context.Context, run *Run) {
 	book, err := m.store.BookByID(ctx, run.BookID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, context.Canceled) || ctx.Err() != nil || m.cancelRequested(m.ctx, run.ID) {
+			m.finish(*run, "canceled")
+			return
+		}
 		run.Errors = append(run.Errors, safeError(err))
 		m.finish(*run, "failed")
 		return
 	}
 	m.processBook(ctx, run, book)
+	if ctx.Err() != nil || m.cancelRequested(m.ctx, run.ID) {
+		m.finish(*run, "canceled")
+		return
+	}
 	m.finishWithCounts(*run)
 }
 
 func (m *Manager) executeSeriesIndex(ctx context.Context, run *Run) {
+	if _, err := m.store.SeriesByID(ctx, run.SeriesID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			m.finish(*run, "canceled")
+			return
+		}
+		run.Errors = append(run.Errors, safeError(err))
+		m.finish(*run, "failed")
+		return
+	}
 	books, _, err := m.store.BooksPage(ctx, database.BookQuery{
 		SeriesID: run.SeriesID, Unpaged: true,
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			m.finish(*run, "canceled")
+			return
+		}
 		run.Errors = append(run.Errors, safeError(err))
 		m.finish(*run, "failed")
 		return
 	}
 	run.TotalItems = len(books)
-	if err := m.updateProgress(ctx, run); err != nil {
+	if err := m.updateProgress(m.ctx, run); err != nil {
 		m.finish(*run, "canceled")
 		return
 	}
 	for _, book := range books {
-		if m.cancelRequested(ctx, run.ID) {
+		if ctx.Err() != nil || m.cancelRequested(m.ctx, run.ID) {
 			m.finish(*run, "canceled")
 			return
 		}
 		m.processBook(ctx, run, book)
-		if err := m.updateProgress(ctx, run); err != nil {
+		if ctx.Err() != nil || m.updateProgress(m.ctx, run) != nil {
 			m.finish(*run, "canceled")
 			return
 		}
@@ -434,12 +493,20 @@ func (m *Manager) executeSeriesIndex(ctx context.Context, run *Run) {
 }
 
 func (m *Manager) executeSeriesThumbnail(ctx context.Context, run *Run) {
-	if m.cancelRequested(ctx, run.ID) {
+	if ctx.Err() != nil || m.cancelRequested(m.ctx, run.ID) {
+		m.finish(*run, "canceled")
+		return
+	}
+	if _, err := m.store.SeriesByID(ctx, run.SeriesID); err != nil {
 		m.finish(*run, "canceled")
 		return
 	}
 	run.CurrentItem = run.TargetName
 	generated, err := m.buildCover(ctx, run.SeriesID, run.Force)
+	if errors.Is(err, context.Canceled) || ctx.Err() != nil || m.cancelRequested(m.ctx, run.ID) {
+		m.finish(*run, "canceled")
+		return
+	}
 	run.ProcessedItems++
 	switch {
 	case err != nil:

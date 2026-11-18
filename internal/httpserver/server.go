@@ -113,7 +113,7 @@ func (s *Server) routes() chi.Router {
 	r.Get("/setup", s.serveSPA)
 	r.Get("/login", s.serveSPA)
 	r.Get("/libraries", s.serveSPA)
-	r.Get("/libraries/{libraryID}", s.serveSPA)
+	r.Get("/libraries/{libraryID}", s.serveLibraryPageOrSPA)
 	r.Get("/series/{seriesID}", s.serveSeriesPageOrSPA)
 	r.Get("/book/{bookID}", s.serveBookPageOrSPA)
 	r.Get("/books/{bookID}", s.serveBookPageOrSPA)
@@ -154,6 +154,24 @@ func (s *Server) serveSPA(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(data)
+}
+
+func (s *Server) serveLibraryPageOrSPA(w http.ResponseWriter, r *http.Request) {
+	libraryID := chi.URLParam(r, "libraryID")
+	lib, err := s.store.LibraryBasic(r.Context(), libraryID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.renderNotFound(w)
+			return
+		}
+		s.renderWebError(w, err)
+		return
+	}
+	if !lib.Enabled {
+		s.renderNotFound(w)
+		return
+	}
+	s.serveSPA(w, r)
 }
 
 func (s *Server) serveSeriesPageOrSPA(w http.ResponseWriter, r *http.Request) {
@@ -218,13 +236,53 @@ func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
 		if cut := strings.IndexByte(bookID, '/'); cut >= 0 {
 			bookID = bookID[:cut]
 		}
-		if book, err := s.store.BookByID(r.Context(), bookID); err == nil {
-			target := "/reader/series/" + book.SeriesID + "/book/" + book.ID
-			if r.URL.RawQuery != "" {
-				target += "?" + r.URL.RawQuery
+		book, err := s.store.BookByID(r.Context(), bookID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				s.renderNotFound(w)
+				return
 			}
-			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+			s.renderWebError(w, err)
 			return
+		}
+		target := "/reader/series/" + book.SeriesID + "/book/" + book.ID
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+		return
+	}
+
+	// Gate direct reader entry URLs (/reader/series/{seriesID}/book/{bookID}) when series/book is missing or library is hidden
+	if strings.HasPrefix(rel, "series/") {
+		parts := strings.Split(strings.TrimPrefix(rel, "series/"), "/")
+		seriesID := parts[0]
+		if seriesID == "" {
+			s.renderNotFound(w)
+			return
+		}
+		if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				s.renderNotFound(w)
+				return
+			}
+			s.renderWebError(w, err)
+			return
+		}
+		if len(parts) >= 3 && parts[1] == "book" && parts[2] != "" {
+			book, err := s.store.BookByID(r.Context(), parts[2])
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					s.renderNotFound(w)
+					return
+				}
+				s.renderWebError(w, err)
+				return
+			}
+			if book.SeriesID != seriesID {
+				s.renderNotFound(w)
+				return
+			}
 		}
 	}
 

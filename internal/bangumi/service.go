@@ -16,7 +16,10 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
-var ErrScrapeAlreadyQueued = errors.New("a Bangumi scrape job is already queued or running for this target")
+var (
+	ErrScrapeAlreadyQueued = errors.New("a Bangumi scrape job is already queued or running for this target")
+	ErrLibraryHidden       = errors.New("library is hidden")
+)
 
 const maxScrapeStoredErrors = 20
 
@@ -273,8 +276,12 @@ func (s *Service) StartBatch(
 ) (database.BangumiScrapeRun, error) {
 	libraryID = strings.TrimSpace(libraryID)
 	if libraryID != "" {
-		if _, err := s.store.LibraryBasic(ctx, libraryID); err != nil {
+		lib, err := s.store.LibraryBasic(ctx, libraryID)
+		if err != nil {
 			return database.BangumiScrapeRun{}, err
+		}
+		if !lib.Enabled {
+			return database.BangumiScrapeRun{}, ErrLibraryHidden
 		}
 	}
 	queueKey := libraryID
@@ -346,12 +353,31 @@ WHERE id=? AND status IN ('queued','running')`, strings.TrimSpace(runID))
 	return nil
 }
 
+func (s *Service) CancelLibrary(ctx context.Context, libraryID string) {
+	rows, err := s.store.DB().QueryContext(ctx,
+		`SELECT id FROM bangumi_scrape_runs WHERE library_id=? AND status IN ('queued','running')`, libraryID)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		_ = s.CancelBatch(ctx, id)
+	}
+}
+
 func (s *Service) Runs(ctx context.Context, limit int) ([]database.BangumiScrapeRun, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 30
 	}
 	rows, err := s.store.DB().QueryContext(ctx, `
-SELECT r.id,r.library_id,coalesce(l.name,'全部启用书库'),r.mode,r.force,r.status,
+SELECT r.id,r.library_id,coalesce(l.name,'全部未隐藏书库'),r.mode,r.force,r.status,
  r.total_series,r.processed_series,r.matched_count,r.unmatched_count,r.skipped_count,r.failed_count,
  r.current_series,r.errors_json,r.cancel_requested,r.started_at,r.completed_at,r.created_at
 FROM bangumi_scrape_runs r
@@ -374,7 +400,7 @@ ORDER BY r.created_at DESC LIMIT ?`, limit)
 
 func (s *Service) Run(ctx context.Context, runID string) (database.BangumiScrapeRun, error) {
 	row := s.store.DB().QueryRowContext(ctx, `
-SELECT r.id,r.library_id,coalesce(l.name,'全部启用书库'),r.mode,r.force,r.status,
+SELECT r.id,r.library_id,coalesce(l.name,'全部未隐藏书库'),r.mode,r.force,r.status,
  r.total_series,r.processed_series,r.matched_count,r.unmatched_count,r.skipped_count,r.failed_count,
  r.current_series,r.errors_json,r.cancel_requested,r.started_at,r.completed_at,r.created_at
 FROM bangumi_scrape_runs r
@@ -441,7 +467,7 @@ func (s *Service) executeBatch(item scrapeJob) {
 	if err != nil {
 		return
 	}
-	if run.CancelRequested {
+	if run.CancelRequested || (item.libraryID != "" && !s.store.IsLibraryEnabled(ctx, item.libraryID)) {
 		s.finishRun(item.runID, run, "canceled")
 		return
 	}
@@ -459,13 +485,26 @@ func (s *Service) executeBatch(item scrapeJob) {
 	_, _ = s.store.DB().ExecContext(ctx,
 		`UPDATE bangumi_scrape_runs SET total_series=? WHERE id=?`, run.TotalSeries, item.runID)
 
+	libEnabledCache := map[string]bool{}
 	lastFlush := time.Now()
 	for i, target := range targets {
 		if ctx.Err() != nil {
 			s.finishRun(item.runID, run, "canceled")
 			return
 		}
-		if !item.force && (target.scrapeStatus == database.ScrapeStatusMatched || target.scrapeStatus == database.ScrapeStatusUnmatched) {
+		libOK, seenLib := libEnabledCache[target.series.LibraryID]
+		if !seenLib {
+			libOK = s.store.IsLibraryEnabled(ctx, target.series.LibraryID)
+			libEnabledCache[target.series.LibraryID] = libOK
+		}
+		if !libOK {
+			if item.libraryID != "" {
+				s.finishRun(item.runID, run, "canceled")
+				return
+			}
+			run.ProcessedSeries++
+			run.SkippedCount++
+		} else if !item.force && (target.scrapeStatus == database.ScrapeStatusMatched || target.scrapeStatus == database.ScrapeStatusUnmatched) {
 			run.ProcessedSeries++
 			run.SkippedCount++
 		} else {
@@ -492,6 +531,7 @@ func (s *Service) executeBatch(item scrapeJob) {
 		// Flush progress every 25 items or 400ms so 60k-series offline runs don't bottleneck on progress writes!
 		if i == len(targets)-1 || run.ProcessedSeries%25 == 0 || time.Since(lastFlush) >= 400*time.Millisecond {
 			lastFlush = time.Now()
+			clear(libEnabledCache)
 			if err := s.flushRunProgress(ctx, item.runID, run); err != nil {
 				s.finishRun(item.runID, run, "canceled")
 				return
@@ -525,7 +565,7 @@ JOIN libraries l ON l.id=s.library_id
 LEFT JOIN series_metadata sm ON sm.series_id=s.id`
 	var args []any
 	if libraryID != "" {
-		query += ` WHERE s.library_id=?`
+		query += ` WHERE s.library_id=? AND l.enabled=1`
 		args = append(args, libraryID)
 	} else {
 		query += ` WHERE l.enabled=1`

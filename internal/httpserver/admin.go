@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net"
@@ -101,6 +102,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
 	}
+	hiddenLibraries, _ := s.store.HiddenLibraryCount(r.Context())
 	performance, err := s.store.GlobalPerformance(r.Context())
 	if err != nil {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
@@ -108,20 +110,21 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	matched, unmatched, _, _ := s.store.ScrapeSummary(r.Context())
 	writeJSON(w, 200, map[string]any{
-		"configured":     account.RefreshToken != "" || len(webdavAccounts) > 0 || libraries > 0,
-		"configured115":  account.RefreshToken != "",
-		"webdavAccounts": len(webdavAccounts),
-		"libraries":      libraries,
-		"series":         series,
-		"books":          books,
-		"comicBytes":     comicBytes,
-		"bgmMatched":     matched,
-		"bgmUnmatched":   unmatched,
-		"version":        buildinfo.Version,
-		"dataDir":        s.runtime.DataDir,
-		"adminUrl":       localServiceURL(s.runtime.Host, s.runtime.Port),
-		"mihonAddresses": mihonAddresses(s.runtime.Host, s.runtime.Port),
-		"performance":    performance,
+		"configured":      account.RefreshToken != "" || len(webdavAccounts) > 0 || (libraries+hiddenLibraries) > 0,
+		"configured115":   account.RefreshToken != "",
+		"webdavAccounts":  len(webdavAccounts),
+		"libraries":       libraries,
+		"hiddenLibraries": hiddenLibraries,
+		"series":          series,
+		"books":           books,
+		"comicBytes":      comicBytes,
+		"bgmMatched":      matched,
+		"bgmUnmatched":    unmatched,
+		"version":         buildinfo.Version,
+		"dataDir":         s.runtime.DataDir,
+		"adminUrl":        localServiceURL(s.runtime.Host, s.runtime.Port),
+		"mihonAddresses":  mihonAddresses(s.runtime.Host, s.runtime.Port),
+		"performance":     performance,
 	})
 }
 
@@ -584,17 +587,25 @@ func (s *Server) updateLibrary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
 	}
+	wasEnabled := item.Enabled
 	var request struct {
-		Name    string `json:"name"`
-		Enabled bool   `json:"enabled"`
-		OneShot *bool  `json:"oneShot"`
+		Name    *string `json:"name"`
+		Enabled *bool   `json:"enabled"`
+		OneShot *bool   `json:"oneShot"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	if strings.TrimSpace(request.Name) == "" {
-		writeError(w, 400, "INVALID_LIBRARY", "name is required")
-		return
+	if request.Name != nil {
+		cleanName := strings.TrimSpace(*request.Name)
+		if cleanName == "" {
+			writeError(w, 400, "INVALID_LIBRARY", "name is required")
+			return
+		}
+		item.Name = cleanName
+	}
+	if request.Enabled != nil {
+		item.Enabled = *request.Enabled
 	}
 	if request.OneShot != nil && *request.OneShot != item.OneShot {
 		var active int
@@ -611,13 +622,30 @@ SELECT count(*) FROM scan_runs WHERE library_id=? AND status IN ('queued','runni
 		}
 		item.OneShot = *request.OneShot
 	}
-	item.Name, item.Enabled = strings.TrimSpace(request.Name), request.Enabled
 	if err := s.store.UpsertLibrary(r.Context(), item); err != nil {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
 	}
+	if wasEnabled && !item.Enabled {
+		s.cancelLibraryJobs(r.Context(), item.ID)
+	}
 	item, _ = s.store.Library(r.Context(), item.ID)
 	writeJSON(w, 200, item)
+}
+
+func (s *Server) cancelLibraryJobs(ctx context.Context, libraryID string) {
+	if s.scanner != nil {
+		s.scanner.CancelLibrary(ctx, libraryID)
+	}
+	if s.covers != nil {
+		s.covers.CancelLibrary(ctx, libraryID)
+	}
+	if s.bangumi != nil {
+		s.bangumi.CancelLibrary(ctx, libraryID)
+	}
+	if s.tasks != nil {
+		s.tasks.CancelLibrary(ctx, libraryID)
+	}
 }
 
 func (s *Server) deleteLibrary(w http.ResponseWriter, r *http.Request) {

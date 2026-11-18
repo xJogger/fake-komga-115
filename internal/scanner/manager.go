@@ -133,7 +133,10 @@ func (m *Manager) StartAll(ctx context.Context, trigger string) ([]database.Scan
 	return runs, nil
 }
 
-var ErrAlreadyQueued = errors.New("library scan is already queued or running")
+var (
+	ErrAlreadyQueued = errors.New("library scan is already queued or running")
+	ErrLibraryHidden = errors.New("library is hidden")
+)
 
 func (m *Manager) StartLibrary(ctx context.Context, libraryID, trigger string) (database.ScanRun, error) {
 	library, err := m.store.LibraryBasic(ctx, libraryID)
@@ -141,7 +144,7 @@ func (m *Manager) StartLibrary(ctx context.Context, libraryID, trigger string) (
 		return database.ScanRun{}, err
 	}
 	if !library.Enabled {
-		return database.ScanRun{}, errors.New("library is disabled")
+		return database.ScanRun{}, ErrLibraryHidden
 	}
 	m.mu.Lock()
 	if _, exists := m.queued[libraryID]; exists {
@@ -193,6 +196,25 @@ func (m *Manager) Cancel(ctx context.Context, runID string) error {
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+func (m *Manager) CancelLibrary(ctx context.Context, libraryID string) {
+	rows, err := m.store.DB().QueryContext(ctx,
+		`SELECT id FROM scan_runs WHERE library_id=? AND status IN ('queued','running')`, libraryID)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		_ = m.Cancel(ctx, id)
+	}
 }
 
 func (m *Manager) Runs(ctx context.Context, limit int) ([]database.ScanRun, error) {
@@ -277,6 +299,10 @@ func (m *Manager) execute(item job) {
 	}
 	if canceled {
 		m.finish(item, "canceled", counters{}, "scan canceled before start")
+		return
+	}
+	if !m.store.IsLibraryEnabled(ctx, item.library.ID) {
+		m.finish(item, "canceled", counters{}, "library is hidden")
 		return
 	}
 

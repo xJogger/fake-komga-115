@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -203,6 +204,25 @@ VALUES(?,?,?,?,'p','v01.cbz',100,'',1,?,?, 'scan1')`, "b_"+row.id, row.id, lib.I
 	}
 	if _, ok, _ := thumbSvc.Get(ctx, "s_slam"); ok {
 		t.Fatal("expected no book thumbnail yet when coverSource='book'")
+	}
+
+	// Hiding the library excludes it from ScrapeSummary and rejects StartBatch, while preserving scraped rows
+	lib.Enabled = false
+	if err := store.UpsertLibrary(ctx, lib); err != nil {
+		t.Fatal(err)
+	}
+	if mCount, uCount, tot, err := store.ScrapeSummary(ctx); err != nil || mCount != 0 || uCount != 0 || tot != 0 {
+		t.Fatalf("expected 0/0/0 ScrapeSummary when library is hidden, got %d/%d/%d err=%v", mCount, uCount, tot, err)
+	}
+	if _, err := svc.StartBatch(ctx, lib.ID, false); !errors.Is(err, ErrLibraryHidden) {
+		t.Fatalf("StartBatch on hidden library = %v, want ErrLibraryHidden", err)
+	}
+	lib.Enabled = true
+	if err := store.UpsertLibrary(ctx, lib); err != nil {
+		t.Fatal(err)
+	}
+	if mCount, uCount, tot, err := store.ScrapeSummary(ctx); err != nil || mCount != 1 || uCount != 2 || tot != 3 {
+		t.Fatalf("expected 1/2/3 ScrapeSummary after unhiding library, got %d/%d/%d err=%v", mCount, uCount, tot, err)
 	}
 }
 

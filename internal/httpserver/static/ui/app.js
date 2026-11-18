@@ -429,9 +429,9 @@
           <div class="card" style="text-align:center;padding:38px 20px">
             <h2>欢迎来到 fake-komga-115 书架</h2>
             <p style="color:var(--text-secondary);max-width:540px;margin:8px auto 18px">
-              当前尚未添加任何书库。支持挂载 <strong>115 网盘目录</strong>、<strong>本地磁盘目录</strong> 与 <strong>WebDAV 远程目录</strong>，并支持 Bangumi 中文元数据刮削与内置双页阅读器。
+              当前暂无可展示的书库（尚未创建书库，或所有书库均已设为隐藏）。支持挂载 <strong>115 网盘目录</strong>、<strong>本地磁盘目录</strong> 与 <strong>WebDAV 远程目录</strong>，并支持 Bangumi 中文元数据刮削与内置双页阅读器。
             </p>
-            <a href="/admin?tab=libraries" data-nav class="btn btn-primary btn-lg">前往管理后台添加书库</a>
+            <a href="/admin?tab=libraries" data-nav class="btn btn-primary btn-lg">前往管理后台管理书库</a>
           </div>`;
       } else {
         html += `
@@ -1391,7 +1391,7 @@
     const addrs = st.mihonAddresses || [];
     body.innerHTML = `
       <div class="stat-grid">
-        <div class="stat-box"><div class="k">书库总数</div><div class="v">${st.libraries}</div></div>
+        <div class="stat-box"><div class="k">有效书库数</div><div class="v">${st.libraries}${st.hiddenLibraries > 0 ? `<span style="font-size:12px;font-weight:500;color:var(--text-muted);margin-left:6px">（已隐藏 ${st.hiddenLibraries}）</span>` : ''}</div></div>
         <div class="stat-box"><div class="k">漫画系列总数</div><div class="v">${Number(st.series || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">漫画文件总数</div><div class="v">${Number(st.books || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">漫画总容量</div><div class="v">${fmtBytes(st.comicBytes)}</div></div>
@@ -1414,7 +1414,7 @@
         <div class="card">
           <h3>全局索引与流式读取统计</h3>
           <div style="display:grid;gap:8px;font-size:13px;color:var(--text-secondary)">
-            <div>已建立归档索引单册：<strong>${Number(perf.indexedBooksCount || 0).toLocaleString()}</strong></div>
+            <div>已建立归档索引单册：<strong>${Number(perf.indexCount ?? perf.indexedBooksCount ?? 0).toLocaleString()}</strong></div>
             <div>累计真实 Range 读取流量：<strong>${fmtBytes(perf.downloadBytes || 0)}</strong>（${Number(perf.downloadSamples || 0).toLocaleString()} 次请求）</div>
           </div>
         </div>
@@ -1612,6 +1612,9 @@
       api('/admin/api/libraries'),
       api('/admin/api/webdav-accounts'),
     ]);
+    const allLibs = libs || [];
+    const hiddenLibCount = allLibs.filter((l) => !l.enabled).length;
+    const activeLibCount = allLibs.length - hiddenLibCount;
 
     body.innerHTML = `
       <div class="card">
@@ -1673,33 +1676,38 @@
 
       <div class="card">
         <div class="section-head">
-          <h3>已配置书库（${(libs || []).length}）</h3>
-          <button type="button" class="btn btn-sm" id="lib-scan-all">扫描全部启用书库</button>
+          <h3>已配置书库（${allLibs.length}${hiddenLibCount > 0 ? ` · 已隐藏 ${hiddenLibCount}` : ''}）</h3>
+          <button type="button" class="btn btn-sm" id="lib-scan-all" ${activeLibCount === 0 ? 'disabled' : ''}>扫描全部未隐藏书库</button>
         </div>
-        ${(libs || []).length === 0
+        ${allLibs.length === 0
           ? `<div class="empty-box">暂无书库。</div>`
           : `<div style="display:grid;gap:12px">
-              ${libs.map((l) => `
-                <div style="padding:14px;border-radius:10px;background:var(--bg-elevated);border:1px solid var(--border)">
+              ${allLibs.map((l) => `
+                <div style="padding:14px;border-radius:10px;background:var(--bg-elevated);border:1px ${l.enabled ? 'solid' : 'dashed'} var(--border);${l.enabled ? '' : 'opacity:0.74;'}">
                   <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
                     <div>
                       <strong style="font-size:15.5px">${esc(l.name)}</strong>
                       <span class="badge" style="margin-left:6px">${esc(providerLabel(l.providerType))}</span>
                       ${l.oneShot ? `<span class="badge badge-accent">单本 One-Shots</span>` : ''}
-                      ${!l.enabled ? `<span class="badge badge-warn">已停用</span>` : ''}
+                      ${!l.enabled ? `<span class="badge badge-warn">已隐藏</span>` : ''}
                       <div style="font-size:12px;color:var(--text-muted);margin-top:4px">
                         定位标识：<code>${esc(l.providerType === '115' ? `CID:${l.rootCid}` : l.rootPath || l.rootCid)}</code>
-                        · ${Number(l.seriesCount || 0).toLocaleString()} 系列 · ${Number(l.booksCount || 0).toLocaleString()} 册 · ${fmtBytes(l.comicBytes)}
+                        · ${Number(l.seriesCount || 0).toLocaleString()} 系列 · ${Number(l.bookCount ?? l.booksCount ?? 0).toLocaleString()} 册 · ${fmtBytes(l.comicBytes)}
                       </div>
                       <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
-                        最近扫描：${esc(l.lastScanStatus || '从未')} ${l.lastScanCompletedAt ? `(${fmtTime(l.lastScanCompletedAt)})` : ''}
+                        ${!l.enabled ? `<span>已隐藏：保留全部数据与缓存，不参与前台书架、客户端与扫描/刮削等其余操作 · </span>` : ''}最近扫描：${esc(l.lastScanStatus || '从未')} ${l.lastScanCompletedAt ? `(${fmtTime(l.lastScanCompletedAt)})` : ''}
                         ${l.lastScanError ? `<span style="color:var(--danger)"> · ${esc(l.lastScanError)}</span>` : ''}
                       </div>
                     </div>
                     <div style="display:flex;flex-wrap:wrap;gap:6px">
-                      <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">扫描</button>
-                      <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
-                      <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}">补齐首卷封面</button>
+                      ${l.enabled ? `
+                        <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">扫描</button>
+                        <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
+                        <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}">补齐首卷封面</button>
+                        <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
+                      ` : `
+                        <button type="button" class="btn btn-primary btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="true">取消隐藏</button>
+                      `}
                       <button type="button" class="btn btn-sm" data-lib-edit='${esc(JSON.stringify(l))}'>编辑</button>
                       <button type="button" class="btn btn-sm btn-danger" data-lib-del="${esc(l.id)}">删除</button>
                     </div>
@@ -1748,10 +1756,32 @@
     document.getElementById('lib-scan-all').onclick = async () => {
       try {
         await api('/admin/api/scans', { method: 'POST', body: {} });
-        toast('已启动全部启用书库扫描');
+        toast('已启动全部未隐藏书库扫描');
         navigate('/admin?tab=jobs');
       } catch (err) { toast(err.message, 'error'); }
     };
+
+    body.querySelectorAll('button[data-lib-toggle-hide]').forEach((btn) => {
+      btn.onclick = async () => {
+        const libID = btn.getAttribute('data-lib-toggle-hide');
+        const libName = btn.getAttribute('data-lib-name') || '';
+        const nextEnabled = btn.getAttribute('data-lib-next-enabled') === 'true';
+        btn.disabled = true;
+        try {
+          await api(`/admin/api/libraries/${encodeURIComponent(libID)}`, {
+            method: 'PUT',
+            body: { enabled: nextEnabled },
+          });
+          toast(nextEnabled
+            ? `已恢复显示书库「${libName}」`
+            : `已隐藏书库「${libName}」（数据完整保留，相关运行中任务已自动中止）`);
+          renderAdminLibraries(body);
+        } catch (err) {
+          btn.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    });
 
     body.querySelectorAll('button[data-lib-scan]').forEach((btn) => {
       btn.onclick = async () => {
@@ -1788,7 +1818,7 @@
           maxWidth: '460px',
           bodyHTML: `
             <div class="field"><label>书库名称</label><input type="text" id="el-name" value="${esc(l.name)}"></div>
-            <div class="field"><label class="check-row"><input type="checkbox" id="el-enabled" ${l.enabled ? 'checked' : ''}><span>启用此书库</span></label></div>
+            <div class="field"><label class="check-row"><input type="checkbox" id="el-hidden" ${!l.enabled ? 'checked' : ''}><span>隐藏此书库（保留全部数据，不参与展示、客户端、扫描与刮削等其余操作）</span></label></div>
             <div class="field"><label class="check-row"><input type="checkbox" id="el-oneshot" ${l.oneShot ? 'checked' : ''}><span>One-Shots 单本漫画库模式（修改后需重扫）</span></label></div>
           `,
           footHTML: `<button type="button" class="btn btn-primary" id="el-save">保存</button>`,
@@ -1799,7 +1829,7 @@
                   method: 'PUT',
                   body: {
                     name: document.getElementById('el-name').value.trim(),
-                    enabled: document.getElementById('el-enabled').checked,
+                    enabled: !document.getElementById('el-hidden').checked,
                     oneShot: document.getElementById('el-oneshot').checked,
                   },
                 });
@@ -2021,8 +2051,8 @@
           <div class="field">
             <label>选择目标书库</label>
             <select id="bgm-batch-lib">
-              <option value="">全部启用书库</option>
-              ${libs.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('')}
+              <option value="">全部未隐藏书库</option>
+              ${(libs || []).filter((l) => l.enabled !== false).map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('')}
             </select>
           </div>
           <div class="field">
@@ -2049,7 +2079,7 @@
                   const pct = r.totalSeries > 0 ? Math.min(100, Math.round((r.processedSeries / r.totalSeries) * 100)) : 0;
                   return `
                     <tr>
-                      <td><strong>${esc(r.libraryName || '全部启用书库')}</strong></td>
+                      <td><strong>${esc(r.libraryName || '全部未隐藏书库')}</strong></td>
                       <td><span class="badge">${esc(r.mode)}</span></td>
                       <td><span class="badge ${r.status === 'completed' ? 'badge-success' : r.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(r.status)}</span></td>
                       <td style="min-width:140px">
@@ -2201,7 +2231,7 @@
                 <tr>
                   <td><strong>${esc(s.libraryName || s.libraryId)}</strong></td>
                   <td><span class="badge ${s.status === 'completed' ? 'badge-success' : s.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(s.status)}</span></td>
-                  <td>目录 ${s.directoriesScanned || 0} · 系列 ${s.seriesFound || 0} · 单册 ${s.booksFound || 0}</td>
+                  <td>目录 ${s.directoriesSeen ?? s.directoriesScanned ?? 0} · 系列 ${s.seriesSeen ?? s.seriesFound ?? 0} · 单册 ${s.booksSeen ?? s.booksFound ?? 0}</td>
                   <td>${fmtTime(s.startedAt)}</td>
                   <td style="color:var(--danger);font-size:12px">${esc(s.error || '')}</td>
                   <td>${isActive(s) ? `<button type="button" class="btn btn-sm btn-danger" data-cancel-scan="${esc(s.id)}">取消</button>` : ''}</td>

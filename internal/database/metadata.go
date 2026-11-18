@@ -731,9 +731,9 @@ WHERE sa.name<>''`
 func (s *Store) ScrapeSummary(ctx context.Context) (matched, unmatched, total int64, err error) {
 	err = s.db.QueryRowContext(ctx, `
 SELECT
- (SELECT count(*) FROM series_metadata WHERE scrape_status='matched'),
- (SELECT count(*) FROM series_metadata WHERE scrape_status='unmatched'),
- (SELECT count(*) FROM series)`).Scan(&matched, &unmatched, &total)
+ (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.scrape_status='matched'),
+ (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.scrape_status='unmatched'),
+ (SELECT count(*) FROM series s JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1)`).Scan(&matched, &unmatched, &total)
 	return
 }
 

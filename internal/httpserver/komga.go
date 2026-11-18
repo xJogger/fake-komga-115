@@ -51,8 +51,8 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Get("/books/{bookID}/pages", s.komgaPages)
 	r.Get("/books/{bookID}/pages/{pageNumber}", s.komgaPageImage)
 	r.Get("/books/{bookID}/pages/{pageNumber}/raw", s.komgaPageImage)
-	r.Get("/books/{bookID}/pages/{pageNumber}/thumbnail", func(w http.ResponseWriter, _ *http.Request) { s.writePlaceholder(w) })
-	r.Get("/books/{bookID}/thumbnail", func(w http.ResponseWriter, _ *http.Request) { s.writePlaceholder(w) })
+	r.Get("/books/{bookID}/pages/{pageNumber}/thumbnail", s.komgaBookPlaceholderThumbnail)
+	r.Get("/books/{bookID}/thumbnail", s.komgaBookPlaceholderThumbnail)
 
 	r.Get("/collections", s.emptyPage)
 	r.Get("/collections/{id}/series", s.emptyPage)
@@ -298,7 +298,16 @@ func (s *Server) komgaAuthorNames(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) komgaSeriesBooks(w http.ResponseWriter, r *http.Request) {
-	s.komgaBookPage(w, r, chi.URLParam(r, "seriesID"))
+	seriesID := chi.URLParam(r, "seriesID")
+	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		return
+	}
+	s.komgaBookPage(w, r, seriesID)
 }
 
 func (s *Server) komgaBooks(w http.ResponseWriter, r *http.Request) {
@@ -588,8 +597,29 @@ func (s *Server) komgaPageImage(w http.ResponseWriter, r *http.Request) {
 	s.archive.PrefetchNextVolumeIndex(book, pageNumber, page.TotalPages)
 }
 
+func (s *Server) komgaBookPlaceholderThumbnail(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.store.BookByID(r.Context(), chi.URLParam(r, "bookID")); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Book not found.")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		return
+	}
+	s.writePlaceholder(w)
+}
+
 func (s *Server) komgaSeriesThumbnail(w http.ResponseWriter, r *http.Request) {
-	data, ok, err := s.thumbs.Get(r.Context(), chi.URLParam(r, "seriesID"))
+	seriesID := chi.URLParam(r, "seriesID")
+	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		return
+	}
+	data, ok, err := s.thumbs.Get(r.Context(), seriesID)
 	if err != nil {
 		s.logger.Error("series thumbnail", "error", err)
 		s.writeUncachedPlaceholder(w)

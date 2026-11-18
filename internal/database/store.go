@@ -194,7 +194,7 @@ LEFT JOIN webdav_accounts w ON w.id=l.webdav_account_id`
 	if enabledOnly {
 		query += ` WHERE l.enabled=1`
 	}
-	query += ` ORDER BY l.name COLLATE NOCASE,l.id`
+	query += ` ORDER BY l.enabled DESC,l.name COLLATE NOCASE,l.id`
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -230,7 +230,7 @@ LEFT JOIN webdav_accounts w ON w.id=l.webdav_account_id`
 	if enabledOnly {
 		query += ` WHERE l.enabled=1`
 	}
-	query += ` ORDER BY l.name COLLATE NOCASE,l.id`
+	query += ` ORDER BY l.enabled DESC,l.name COLLATE NOCASE,l.id`
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -326,6 +326,20 @@ ON CONFLICT(id) DO UPDATE SET
 func (s *Store) DeleteLibrary(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM libraries WHERE id=?`, id)
 	return err
+}
+
+func (s *Store) HiddenLibraryCount(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM libraries WHERE enabled=0`).Scan(&count)
+	return count, err
+}
+
+func (s *Store) IsLibraryEnabled(ctx context.Context, id string) bool {
+	var enabled int
+	if err := s.db.QueryRowContext(ctx, `SELECT enabled FROM libraries WHERE id=?`, id).Scan(&enabled); err != nil {
+		return false
+	}
+	return enabled != 0
 }
 
 func nowText() string { return time.Now().UTC().Format(time.RFC3339Nano) }

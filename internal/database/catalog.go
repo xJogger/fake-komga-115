@@ -105,7 +105,9 @@ func (s *Store) SeriesByID(ctx context.Context, id string) (Series, error) {
 	err := s.db.QueryRowContext(ctx, `
 SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified_at,s.created_at,s.updated_at,
  (SELECT count(*) FROM books b WHERE b.series_id=s.id)
-FROM series s WHERE s.id=?`, id).Scan(
+FROM series s
+JOIN libraries l ON l.id=s.library_id AND l.enabled=1
+WHERE s.id=?`, id).Scan(
 		&item.ID, &item.LibraryID, &item.CID, &item.Name, &item.RelativePath, &item.OneShot,
 		&modified, &created, &updated, &item.BooksCount,
 	)
@@ -184,7 +186,10 @@ func (s *Store) BookByID(ctx context.Context, id string) (Book, error) {
 SELECT b.id,b.series_id,b.library_id,b.file_id,b.parent_cid,b.name,b.size,b.pick_code,b.sha1,
  b.file_created_at,b.file_modified_at,b.number_sort,b.created_at,b.updated_at,
  coalesce(z.page_count,0)
-FROM books b LEFT JOIN zip_indexes z ON z.book_id=b.id WHERE b.id=?`, id).Scan(
+FROM books b
+JOIN libraries l ON l.id=b.library_id AND l.enabled=1
+LEFT JOIN zip_indexes z ON z.book_id=b.id
+WHERE b.id=?`, id).Scan(
 		&item.ID, &item.SeriesID, &item.LibraryID, &item.FileID, &item.ParentCID,
 		&item.Name, &item.Size, &item.PickCode, &item.SHA1, &fileCreated, &fileModified,
 		&item.NumberSort, &created, &updated, &item.PageCount,
@@ -212,7 +217,9 @@ func (s *Store) SeriesByIDs(ctx context.Context, ids []string) (map[string]Serie
 	query := `
 SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified_at,s.created_at,s.updated_at,
  (SELECT count(*) FROM books b WHERE b.series_id=s.id)
-FROM series s WHERE s.id IN ` + Placeholders(len(args))
+FROM series s
+JOIN libraries l ON l.id=s.library_id AND l.enabled=1
+WHERE s.id IN ` + Placeholders(len(args))
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -289,9 +296,9 @@ func (s *Store) Counts(
 	err = s.db.QueryRowContext(ctx, `
 SELECT
  (SELECT count(*) FROM libraries WHERE enabled=1),
- (SELECT count(*) FROM series),
- (SELECT count(*) FROM books),
- (SELECT coalesce(sum(size),0) FROM books)`).
+ (SELECT count(*) FROM series s JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1),
+ (SELECT count(*) FROM books b JOIN libraries l ON l.id=b.library_id WHERE l.enabled=1),
+ (SELECT coalesce(sum(b.size),0) FROM books b JOIN libraries l ON l.id=b.library_id WHERE l.enabled=1)`).
 		Scan(&libraries, &series, &books, &comicBytes)
 	return
 }

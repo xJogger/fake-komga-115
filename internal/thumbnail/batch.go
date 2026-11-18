@@ -26,6 +26,7 @@ const (
 
 var (
 	ErrBatchAlreadyQueued = errors.New("thumbnail job is already queued or running for this library")
+	ErrLibraryHidden      = errors.New("library is hidden")
 	urlPattern            = regexp.MustCompile(`https?://\S+`)
 )
 
@@ -143,8 +144,12 @@ func (m *BatchManager) Start(
 	all bool,
 	limit int,
 ) (BatchRun, error) {
-	if _, err := m.store.Library(ctx, libraryID); err != nil {
+	lib, err := m.store.LibraryBasic(ctx, libraryID)
+	if err != nil {
 		return BatchRun{}, err
+	}
+	if !lib.Enabled {
+		return BatchRun{}, ErrLibraryHidden
 	}
 	if all {
 		limit = 0
@@ -215,6 +220,25 @@ WHERE id=? AND status IN ('queued','running')`, runID)
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+func (m *BatchManager) CancelLibrary(ctx context.Context, libraryID string) {
+	rows, err := m.store.DB().QueryContext(ctx,
+		`SELECT id FROM thumbnail_runs WHERE library_id=? AND status IN ('queued','running')`, libraryID)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		_ = m.Cancel(ctx, id)
+	}
 }
 
 func (m *BatchManager) Runs(ctx context.Context, limit int) ([]BatchRun, error) {
@@ -304,7 +328,7 @@ func (m *BatchManager) execute(item batchJob) {
 	if err != nil {
 		return
 	}
-	if run.CancelRequested {
+	if run.CancelRequested || !m.store.IsLibraryEnabled(ctx, item.libraryID) {
 		m.finish(item, run, "canceled")
 		return
 	}

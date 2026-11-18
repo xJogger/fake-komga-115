@@ -565,6 +565,131 @@ INSERT INTO books(
 		t.Fatalf("compiled /reader HTML missing /reader/assets/ bundle reference")
 	}
 
+	// 9. Hidden library lifecycle: retains data, isolates all browse/direct/reader/API/job/stat operations, restores cleanly
+	var initialAdminLibs []database.Library
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/libraries", &initialAdminLibs)
+	for _, lib := range initialAdminLibs {
+		if !lib.Enabled {
+			r := requestJSONWithClient(t, sessionClient, http.MethodPut, server.URL+"/admin/api/libraries/"+lib.ID, map[string]any{"enabled": true})
+			r.Body.Close()
+		}
+	}
+
+	var statusBeforeHide map[string]any
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/status", &statusBeforeHide)
+	activeLibsBefore := int(statusBeforeHide["libraries"].(float64))
+	activeSeriesBefore := int(statusBeforeHide["series"].(float64))
+
+	hideResp := requestJSONWithClient(t, sessionClient, http.MethodPut, server.URL+"/admin/api/libraries/"+libraryID, map[string]any{
+		"enabled": false,
+	})
+	var hiddenLibDTO database.Library
+	decodeResponseJSON(t, hideResp, &hiddenLibDTO)
+	if hiddenLibDTO.Enabled || hiddenLibDTO.Name != "Comics" || hiddenLibDTO.SeriesCount != 2 || hiddenLibDTO.BookCount != 3 {
+		t.Fatalf("hidden library DTO unexpected: %+v", hiddenLibDTO)
+	}
+
+	// Admin library list still retains hidden library (sorted to bottom) with intact counts
+	var adminLibs []database.Library
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/libraries", &adminLibs)
+	if len(adminLibs) < 2 || adminLibs[len(adminLibs)-1].ID != libraryID || adminLibs[len(adminLibs)-1].Enabled {
+		t.Fatalf("expected hidden library sorted last in admin list, got %+v", adminLibs)
+	}
+
+	// Admin status excludes hidden library from active totals and reports hiddenLibraries=1
+	var statusDuringHide map[string]any
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/status", &statusDuringHide)
+	if int(statusDuringHide["libraries"].(float64)) != activeLibsBefore-1 ||
+		int(statusDuringHide["hiddenLibraries"].(float64)) != 1 ||
+		int(statusDuringHide["series"].(float64)) != activeSeriesBefore-2 {
+		t.Fatalf("status during hide unexpected: %+v", statusDuringHide)
+	}
+
+	// Direct browser routes, reader entry routes, Komga single-item routes, and rich detail routes must 404 while hidden
+	for _, hiddenGetURL := range []string{
+		server.URL + "/libraries/" + libraryID,
+		server.URL + "/series/" + seriesID,
+		server.URL + "/book/" + bookID,
+		server.URL + "/books/" + bookID,
+		server.URL + "/reader/book/" + bookID,
+		server.URL + "/reader/series/" + seriesID + "/book/" + bookID,
+		server.URL + "/api/v1/series/" + seriesID,
+		server.URL + "/api/v1/series/" + seriesID + "/books",
+		server.URL + "/api/v1/series/" + seriesID + "/thumbnail",
+		server.URL + "/api/v1/books/" + bookID,
+		server.URL + "/api/v1/books/" + bookID + "/pages",
+		server.URL + "/api/v1/books/" + bookID + "/pages/1",
+		server.URL + "/admin/api/series/" + seriesID + "/detail",
+		server.URL + "/admin/api/books/" + bookID + "/detail",
+	} {
+		resp, hErr := noRedirSession.Get(hiddenGetURL)
+		if hErr != nil {
+			t.Fatal(hErr)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("hidden library route %s returned %d, want 404", hiddenGetURL, resp.StatusCode)
+		}
+	}
+
+	hiddenProgResp := requestJSONWithClient(t, sessionClient, http.MethodPatch, server.URL+"/api/v1/books/"+bookID+"/read-progress", map[string]any{
+		"page": 1,
+	})
+	hiddenProgResp.Body.Close()
+	if hiddenProgResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("PATCH read-progress on hidden book status=%d, want 404", hiddenProgResp.StatusCode)
+	}
+
+	// Background scan, cover job, and maintenance job must reject hidden library
+	scanHiddenResp := requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/admin/api/scans", map[string]any{
+		"libraryId": libraryID,
+	})
+	scanHiddenResp.Body.Close()
+	if scanHiddenResp.StatusCode != http.StatusConflict {
+		t.Fatalf("scan on hidden library status=%d, want 409", scanHiddenResp.StatusCode)
+	}
+	coverHiddenResp := requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/admin/api/cover-jobs", map[string]any{
+		"libraryId": libraryID,
+		"all":       false,
+	})
+	coverHiddenResp.Body.Close()
+	if coverHiddenResp.StatusCode != http.StatusConflict {
+		t.Fatalf("cover job on hidden library status=%d, want 409", coverHiddenResp.StatusCode)
+	}
+	maintHiddenResp := requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/admin/api/maintenance-jobs", map[string]any{
+		"operation": "series_thumbnail",
+		"seriesId":  seriesID,
+	})
+	maintHiddenResp.Body.Close()
+	if maintHiddenResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("maintenance job on hidden series status=%d, want 404", maintHiddenResp.StatusCode)
+	}
+
+	// Un-hide library and confirm data, thumbnail, and read progress are 100% preserved
+	unhideResp := requestJSONWithClient(t, sessionClient, http.MethodPut, server.URL+"/admin/api/libraries/"+libraryID, map[string]any{
+		"enabled": true,
+	})
+	decodeResponseJSON(t, unhideResp, &hiddenLibDTO)
+	if !hiddenLibDTO.Enabled {
+		t.Fatal("library should be visible again after unhide")
+	}
+	_ = getTextWithClient(t, sessionClient, server.URL+"/libraries/"+libraryID, http.StatusOK)
+	_ = getTextWithClient(t, sessionClient, server.URL+"/series/"+seriesID, http.StatusOK)
+	var restoredBook map[string]any
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/books/"+bookID, &restoredBook)
+	restoredProg, _ := restoredBook["readProgress"].(map[string]any)
+	if restoredProg == nil || restoredProg["completed"] != true {
+		t.Fatalf("expected preserved readProgress after unhide, got %#v", restoredBook["readProgress"])
+	}
+	restoredThumb, err := sessionClient.Get(server.URL + "/api/v1/series/" + seriesID + "/thumbnail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredThumb.Body.Close()
+	if restoredThumb.StatusCode != http.StatusOK || restoredThumb.Header.Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("restored thumbnail status=%d type=%q", restoredThumb.StatusCode, restoredThumb.Header.Get("Content-Type"))
+	}
+
 	_ = getTextWithClient(t, sessionClient, server.URL+"/series/non-existent", http.StatusNotFound)
 	notFoundHTML := getTextWithClient(t, sessionClient, server.URL+"/missing-page", http.StatusNotFound)
 	if !strings.Contains(notFoundHTML, "没有找到这个页面") {
