@@ -63,12 +63,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker buildx imagetools inspect "$IMAGE:$RELEASE_TAG" --format '{{json .Manifest}}' |
-            jq -e --arg digest "$IMAGE_DIGEST" '
-              (.digest == $digest) and
-              any(.manifests[]?; .platform.os == "linux" and .platform.architecture == "amd64") and
-              any(.manifests[]?; .platform.os == "linux" and .platform.architecture == "arm64")
-            '
-          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$IMAGE_DIGEST"
-          actual="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{.Manifest.Digest}}')"
+          docker buildx imagetools inspect "$IMAGE:$RELEASE_TAG" --raw > release-index.json
+          actual="sha256:$(sha256sum release-index.json | cut -d ' ' -f 1)"
           test "$actual" = "$IMAGE_DIGEST"
+          jq -e '
+            any(.manifests[]?; .platform.os == "linux" and .platform.architecture == "amd64") and
+            any(.manifests[]?; .platform.os == "linux" and .platform.architecture == "arm64")
+          ' release-index.json
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$IMAGE_DIGEST"
+          docker buildx imagetools inspect "$IMAGE:latest" --raw > latest-index.json
+          cmp -s release-index.json latest-index.json
