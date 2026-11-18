@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Require release notes before building
+        run: test -s "docs/release-notes/${GITHUB_REF_NAME}.md"
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -87,9 +89,12 @@ jobs:
             -ldflags="-s -w -X github.com/xJogger/fake-komga-115/internal/buildinfo.Version=${tag}" \
             -o "dist/${package}/${executable}" \
             ./cmd/server
-          cp README.md LICENSE "dist/${package}/"
+          cp README.md LICENSE SECURITY.md AGENTS.md "dist/${package}/"
           cp web/reader/LICENSE "dist/${package}/LICENSE-Suwayomi-MPL-2.0.txt"
-          mkdir -p "dist/${package}/docs"
+          mkdir -p "dist/${package}/docs/release-notes" "dist/${package}/web/reader"
+          cp docs/AGENT_API.md docs/ARCHITECTURE.md docs/RELEASING.md "dist/${package}/docs/"
+          cp "docs/release-notes/${tag}.md" "dist/${package}/docs/release-notes/"
+          cp web/reader/LICENSE "dist/${package}/web/reader/LICENSE"
           cp -R docs/images "dist/${package}/docs/"
 
           if [[ "${ARCHIVE}" == "zip" ]]; then

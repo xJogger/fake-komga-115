@@ -1588,6 +1588,14 @@
         <div class="card">
           <h3>115 开放平台令牌</h3>
           <p style="font-size:12.5px;color:var(--text-muted)">状态：RefreshToken ${acc115.hasRefreshToken ? '✅ 已保存' : '❌ 未配置'} · AccessToken ${acc115.hasAccessToken ? '✅ 已保存' : '未缓存'} · 更新于 ${fmtTime(acc115.updatedAt)}</p>
+          <details class="field-hint"${acc115.hasRefreshToken ? '' : ' open'}>
+            <summary>如何获取 115 Token？</summary>
+            <ol>
+              <li>打开 <a href="https://api.oplist.org/" target="_blank" rel="noopener noreferrer">OpenList 授权工具 ↗</a>，选择 115 网盘的 OAuth2 授权登录。</li>
+              <li>勾选「使用 OpenList 提供的参数」，点击获取 Token，再在弹出的窗口登录 115 并确认授权。</li>
+              <li>将 <strong>Refresh Token</strong> 和 <strong>Access Token</strong>（可选）粘贴到下方同名字段，点击「保存并验证」。请勿分享或公开截图中的 Token。</li>
+            </ol>
+          </details>
           <div class="field">
             <label>Refresh Token（留空则保留现有）</label>
             <input type="password" id="s115-refresh" placeholder="输入新的 115 Refresh Token">

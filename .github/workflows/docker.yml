@@ -34,14 +34,15 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: blacktal/fake-komga-115
+          flavor: |
+            latest=false
           tags: |
-            type=raw,value=latest
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           labels: |
             org.opencontainers.image.title=fake-komga-115
-            org.opencontainers.image.description=Lightweight Komga-compatible gateway for 115 Open API
+            org.opencontainers.image.description=Multi-source Komga-compatible manga server with a built-in reader
             org.opencontainers.image.vendor=xJogger
 
       - name: Build and push Docker image

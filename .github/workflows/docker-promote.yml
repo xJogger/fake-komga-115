@@ -1,0 +1,74 @@
+name: Promote Docker latest
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable GitHub release tag, e.g. v2.0.0
+        required: true
+        type: string
+      digest:
+        description: Verified digest of the multi-platform Docker image index
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-latest
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: blacktal/fake-komga-115
+      RELEASE_TAG: ${{ inputs.version }}
+      IMAGE_DIGEST: ${{ inputs.digest }}
+    steps:
+      - name: Verify the stable GitHub release and its assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,assets |
+            jq -e --arg tag "$RELEASE_TAG" '
+              (.tagName == $tag) and (.isDraft == false) and (.isPrerelease == false) and
+              ([.assets[].name] | contains([
+                "SHA256SUMS",
+                "fake-komga-115_\($tag)_windows_amd64.zip",
+                "fake-komga-115_\($tag)_linux_amd64.tar.gz",
+                "fake-komga-115_\($tag)_linux_arm64.tar.gz",
+                "fake-komga-115_\($tag)_darwin_amd64.tar.gz",
+                "fake-komga-115_\($tag)_darwin_arm64.tar.gz"
+              ]))
+            '
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Verify and promote the published multi-platform image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE:$RELEASE_TAG" --format '{{json .Manifest}}' |
+            jq -e --arg digest "$IMAGE_DIGEST" '
+              (.digest == $digest) and
+              any(.manifests[]?; .platform.os == "linux" and .platform.architecture == "amd64") and
+              any(.manifests[]?; .platform.os == "linux" and .platform.architecture == "arm64")
+            '
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$IMAGE_DIGEST"
+          actual="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{.Manifest.Digest}}')"
+          test "$actual" = "$IMAGE_DIGEST"

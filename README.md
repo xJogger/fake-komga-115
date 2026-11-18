@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
-  <img src="docs/images/readme-hero.png" alt="fake-komga-115 多源按需流式漫画书库与内置阅读体验" width="920">
+  <img src="docs/images/readme-hero.jpg" alt="本地/NAS、115 和 WebDAV 汇入漫画书架，漫画页面按需传到手机" width="920">
 </p>
 
 `fake-komga-115` 是一个 **100% 纯 Go（`CGO_ENABLED=0`）自包含**的轻量级 Komga 兼容漫画书库与阅读服务端。它原生支持 **115 Open API**、**服务器本地 / SMB 挂载目录** 与 **WebDAV（CloudDrive2 / OpenList / NAS）** 三类存储源共存，内置 **响应式网页书架**、**简体中文双页网页阅读器**、**Bangumi (`bgm.tv`) 离线+在线双引擎元数据刮削中心** 与 **AI Agent 专用书库治理接口**，同时完整兼容 **Mihon（Komga 扩展）** 与 **Koharia** 客户端。
@@ -69,12 +69,14 @@
 ## 快速开始
 
 <p align="center">
-  <img src="docs/images/quick-start.png" alt="启动、初始化密码、挂载书库并开始阅读" width="920">
+  <img src="docs/images/quick-start.jpg" alt="四格漫画：下载并启动、设置管理员、添加书库并扫描、开始阅读" width="920">
 </p>
+
+**下载并启动 → 设置管理员 → 添加书库并扫描 → 开始阅读**
 
 ### 方式一：Windows 下载即用
 
-1. 前往 [Releases](https://github.com/xJogger/fake-komga-115/releases/latest) 下载 `windows_amd64.zip` 并解压。
+1. 从 [Releases](https://github.com/xJogger/fake-komga-115/releases/latest) 下载文件名以 `_windows_amd64.zip` 结尾的压缩包（例如 `fake-komga-115_v2.0.0_windows_amd64.zip`）并解压。
 2. 双击运行 `fake-komga-115.exe`，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置。
 3. 数据默认存储在 `%LOCALAPPDATA%\fake-komga-115\data`。
 
@@ -99,8 +101,10 @@ docker run -d \
   -v fake-komga-115-data:/data \
   -v /share/manga:/manga:ro \
   -e TZ=Asia/Shanghai \
-  blacktal/fake-komga-115:latest
+  blacktal/fake-komga-115:v2.0.0
 ```
+
+已有容器升级时，请保留挂载在 `/data` 的原数据卷。建议固定使用版本标签，避免自动更新工具在未备份时跨大版本升级。首次启动后同样需要在网页设置管理员。
 
 ### 方式四：从源码构建
 
@@ -128,7 +132,7 @@ make build
 ## 存储源、刮削与客户端使用提示
 
 ### 配置三类存储源
-1. **115 网盘**：可通过 [OpenList 115 授权页](https://api.oplist.org/) 获取 `Refresh Token`，填入「管理后台 -> 存储源 -> 115 开放平台令牌」保存验证，随后在「书库管理」中直接浏览文件夹创建书库。
+1. **115 网盘**：打开 [OpenList 授权工具](https://api.oplist.org/)，选择 115 网盘的 OAuth2 授权登录，勾选「使用 OpenList 提供的参数」，点击获取 Token，并在弹窗中登录 115、完成授权。将 `Refresh Token` 和 `Access Token` 分别粘贴到「管理后台 → 存储源 → 115 开放平台令牌」的同名字段（`Access Token` 可选），点击「保存并验证」。通过后，在「书库管理」添加一个或多个目录并启动扫描。不要分享或截图公开 Token。详见 [OpenList 的 115 授权说明](https://doc.oplist.org/guide/drivers/115_open)。
 2. **服务器本地 / SMB 挂载目录**：无需预配账号。Linux 上推荐通过 `cifs` 挂载 NAS 共享（如 `/share/manga`），Windows 上可使用映射盘符（如 `Z:\Manga`）或 UNC 路径（`\\nas\manga`），在「书库管理」中选择「服务器本地 / SMB 挂载目录」即可。
 3. **WebDAV（CloudDrive2 / OpenList / NAS）**：
    - **CloudDrive2** 默认 WebDAV 根地址一般为 `http://<IP>:19798/dav`；
@@ -142,23 +146,28 @@ make build
   这是 Bangumi 官网的未登录访问限制：部分带有受限标签（如 `R18`，即使官方 `nsfw: false`）的真实条目在未登录浏览器访问时会显示该提示页。只需在浏览器中登录你的 `bgm.tv` 账号后重新打开链接即可正常浏览。
 
 ### 连接 Mihon / Koharia 与 AI Agent
-- **Mihon / Koharia**：安装 Komga 扩展后填入 `http://<服务器IP>:25600`，可使用管理员账号密码（HTTP Basic）或在「账号与 API Key」中生成的专属 API Key 登录。
+- **Mihon**：安装 Komga 扩展，在扩展设置中填入 `http://<服务器IP>:25600` 和管理员账号密码。
+- **Koharia**：内置 Komga 支持，无需安装扩展。在应用中新增 Komga 服务器，填入服务地址和管理员账号密码。支持自定义鉴权请求头的工具也可以使用后台生成的 API Key。
 - **AI Agent 自动化治理**：携带 `Authorization: Bearer <API_KEY>` 请求 `GET /api/agent/v1/manifest` 即可发现全部管理能力，详见 [docs/AGENT_API.md](docs/AGENT_API.md)。
 
 ---
 
 ## 从 `v1.x` 升级与备份
 
-升级前建议先停止服务并完整备份 SQLite 主库文件（含 `-wal` / `-shm`）：
+**v2 是一次不兼容升级：** 第一次打开网页时需要设置管理员账号密码，随后在 Mihon/Koharia 补上认证信息。v1 的外部跨域（CORS）白名单已经移除，独立托管的网页阅读器不能继续按原方式直连；可改用本服务内置的书架和阅读器。已匹配且标为 NSFW 的系列默认隐藏，可在后台调整。
+
+1. 停止旧服务，备份整个数据目录（Docker 对应 `/data` 的数据卷或宿主机目录）。备份含凭据，请妥善保管。
+2. 以**同一个数据目录**启动 v2。首次启动会自动迁移 SQLite，保留原有 115 书库 ID、阅读进度、索引和封面；不必重新扫库。
+3. 在网页完成管理员初始化，确认书库和进度无误后，再配置阅读客户端。若需回退，不要让 v1 直接打开已升级的数据目录，应退出 v2 后用预先备份的数据恢复。
+
+Linux 的 systemd 部署示例（将 `data/` 和备份路径替换成你的实际位置）：
 
 ```bash
 systemctl --user stop fake-komga-115
-cp -a data/fake-komga-115.db* /path/to/backup/
-# 替换新版本二进制后启动
+cp -a data /path/to/backup/fake-komga-115-before-v2
+# 替换二进制，保留原来的 --data-dir
 systemctl --user start fake-komga-115
 ```
-
-启动时会自动执行幂等数据库迁移，原有 115 书库、阅读进度、ZIP/RAR 索引与封面缓存全部无损继承。
 
 ---
 
@@ -166,6 +175,7 @@ systemctl --user start fake-komga-115
 
 - [docs/AGENT_API.md](docs/AGENT_API.md)：AI Agent 专用书库管理接口（`/api/agent/v1`）参考手册
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：系统架构、鉴权、多源流式读取、Bangumi 双引擎与内置阅读器原理
+- [docs/RELEASING.md](docs/RELEASING.md)：维护者的发版、产物验证与 Docker `latest` 切换流程
 - [AGENTS.md](AGENTS.md)：面向开发者与 AI 编程助手的仓库规范与构建指引
 - [SECURITY.md](SECURITY.md)：安全模型与敏感信息保护边界
 
