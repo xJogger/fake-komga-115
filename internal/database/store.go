@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -16,6 +17,9 @@ import (
 
 type Store struct {
 	db *sql.DB
+
+	basicAuthMu    sync.RWMutex
+	basicAuthCache map[string]time.Time
 }
 
 func Open(path string) (*Store, error) {
@@ -42,7 +46,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	s := &Store{db: db}
+	s := &Store{
+		db:             db,
+		basicAuthCache: make(map[string]time.Time),
+	}
 	if err := s.ensureDefaults(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -69,7 +76,6 @@ func (s *Store) ensureDefaults(ctx context.Context) error {
 		"volume_index_prefetch_remaining_pages": "10",
 		"max_page_size":                         "104857600",
 		"downurl_ttl_seconds":                   "1200",
-		"cors_allowed_origins":                  "",
 	}
 	now := nowText()
 	for key, value := range defaults {
@@ -98,7 +104,7 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_
 }
 
 func (s *Store) Settings(ctx context.Context) (map[string]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT key,value FROM settings ORDER BY key`)
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value FROM settings WHERE key<>'cors_allowed_origins' ORDER BY key`)
 	if err != nil {
 		return nil, err
 	}
@@ -173,14 +179,15 @@ ON CONFLICT(provider) DO UPDATE SET
 	return err
 }
 
-func (s *Store) Libraries(ctx context.Context, enabledOnly bool) ([]Library, error) {
+// LibrariesBasic lists libraries without running per-library Series/Book/Bytes aggregate subqueries.
+// Use this on hot Komga client endpoints (GET /api/v1/libraries) and background schedulers.
+func (s *Store) LibrariesBasic(ctx context.Context, enabledOnly bool) ([]Library, error) {
 	query := `
-SELECT l.id,l.name,l.root_cid,l.enabled,l.one_shot,l.created_at,l.updated_at,
- l.last_scan_started_at,l.last_scan_completed_at,l.last_scan_status,l.last_scan_error,
- (SELECT count(*) FROM series s WHERE s.library_id=l.id),
- (SELECT count(*) FROM books b WHERE b.library_id=l.id),
- (SELECT coalesce(sum(b.size),0) FROM books b WHERE b.library_id=l.id)
-FROM libraries l`
+SELECT l.id,l.name,l.provider_type,l.root_cid,l.webdav_account_id,coalesce(w.name,''),l.root_path,
+ l.enabled,l.one_shot,l.created_at,l.updated_at,
+ l.last_scan_started_at,l.last_scan_completed_at,l.last_scan_status,l.last_scan_error
+FROM libraries l
+LEFT JOIN webdav_accounts w ON w.id=l.webdav_account_id`
 	if enabledOnly {
 		query += ` WHERE l.enabled=1`
 	}
@@ -194,12 +201,51 @@ FROM libraries l`
 	for rows.Next() {
 		var item Library
 		if err := rows.Scan(
-			&item.ID, &item.Name, &item.RootCID, &item.Enabled, &item.OneShot, &item.CreatedAt, &item.UpdatedAt,
+			&item.ID, &item.Name, &item.ProviderType, &item.RootCID,
+			&item.WebDAVAccountID, &item.WebDAVAccountName, &item.RootPath,
+			&item.Enabled, &item.OneShot, &item.CreatedAt, &item.UpdatedAt,
+			&item.LastScanStartedAt, &item.LastScanCompletedAt, &item.LastScanStatus, &item.LastScanError,
+		); err != nil {
+			return nil, err
+		}
+		item.ProviderType = item.EffectiveProvider()
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) Libraries(ctx context.Context, enabledOnly bool) ([]Library, error) {
+	query := `
+SELECT l.id,l.name,l.provider_type,l.root_cid,l.webdav_account_id,coalesce(w.name,''),l.root_path,
+ l.enabled,l.one_shot,l.created_at,l.updated_at,
+ l.last_scan_started_at,l.last_scan_completed_at,l.last_scan_status,l.last_scan_error,
+ (SELECT count(*) FROM series s WHERE s.library_id=l.id),
+ (SELECT count(*) FROM books b WHERE b.library_id=l.id),
+ (SELECT coalesce(sum(b.size),0) FROM books b WHERE b.library_id=l.id)
+FROM libraries l
+LEFT JOIN webdav_accounts w ON w.id=l.webdav_account_id`
+	if enabledOnly {
+		query += ` WHERE l.enabled=1`
+	}
+	query += ` ORDER BY l.name COLLATE NOCASE,l.id`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Library, 0)
+	for rows.Next() {
+		var item Library
+		if err := rows.Scan(
+			&item.ID, &item.Name, &item.ProviderType, &item.RootCID,
+			&item.WebDAVAccountID, &item.WebDAVAccountName, &item.RootPath,
+			&item.Enabled, &item.OneShot, &item.CreatedAt, &item.UpdatedAt,
 			&item.LastScanStartedAt, &item.LastScanCompletedAt, &item.LastScanStatus, &item.LastScanError,
 			&item.SeriesCount, &item.BookCount, &item.ComicBytes,
 		); err != nil {
 			return nil, err
 		}
+		item.ProviderType = item.EffectiveProvider()
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -208,28 +254,69 @@ FROM libraries l`
 func (s *Store) Library(ctx context.Context, id string) (Library, error) {
 	var item Library
 	err := s.db.QueryRowContext(ctx, `
-SELECT l.id,l.name,l.root_cid,l.enabled,l.one_shot,l.created_at,l.updated_at,
+SELECT l.id,l.name,l.provider_type,l.root_cid,l.webdav_account_id,coalesce(w.name,''),l.root_path,
+ l.enabled,l.one_shot,l.created_at,l.updated_at,
  l.last_scan_started_at,l.last_scan_completed_at,l.last_scan_status,l.last_scan_error,
  (SELECT count(*) FROM series s WHERE s.library_id=l.id),
  (SELECT count(*) FROM books b WHERE b.library_id=l.id),
  (SELECT coalesce(sum(b.size),0) FROM books b WHERE b.library_id=l.id)
-FROM libraries l WHERE l.id=?`, id).Scan(
-		&item.ID, &item.Name, &item.RootCID, &item.Enabled, &item.OneShot, &item.CreatedAt, &item.UpdatedAt,
+FROM libraries l
+LEFT JOIN webdav_accounts w ON w.id=l.webdav_account_id
+WHERE l.id=?`, id).Scan(
+		&item.ID, &item.Name, &item.ProviderType, &item.RootCID,
+		&item.WebDAVAccountID, &item.WebDAVAccountName, &item.RootPath,
+		&item.Enabled, &item.OneShot, &item.CreatedAt, &item.UpdatedAt,
 		&item.LastScanStartedAt, &item.LastScanCompletedAt, &item.LastScanStatus, &item.LastScanError,
 		&item.SeriesCount, &item.BookCount, &item.ComicBytes,
 	)
-	return item, err
+	if err != nil {
+		return Library{}, err
+	}
+	item.ProviderType = item.EffectiveProvider()
+	return item, nil
+}
+
+// LibraryBasic fetches a single library without running Series/Book aggregate subqueries.
+func (s *Store) LibraryBasic(ctx context.Context, id string) (Library, error) {
+	var item Library
+	err := s.db.QueryRowContext(ctx, `
+SELECT l.id,l.name,l.provider_type,l.root_cid,l.webdav_account_id,coalesce(w.name,''),l.root_path,
+ l.enabled,l.one_shot,l.created_at,l.updated_at,
+ l.last_scan_started_at,l.last_scan_completed_at,l.last_scan_status,l.last_scan_error
+FROM libraries l
+LEFT JOIN webdav_accounts w ON w.id=l.webdav_account_id
+WHERE l.id=?`, id).Scan(
+		&item.ID, &item.Name, &item.ProviderType, &item.RootCID,
+		&item.WebDAVAccountID, &item.WebDAVAccountName, &item.RootPath,
+		&item.Enabled, &item.OneShot, &item.CreatedAt, &item.UpdatedAt,
+		&item.LastScanStartedAt, &item.LastScanCompletedAt, &item.LastScanStatus, &item.LastScanError,
+	)
+	if err != nil {
+		return Library{}, err
+	}
+	item.ProviderType = item.EffectiveProvider()
+	return item, nil
 }
 
 func (s *Store) UpsertLibrary(ctx context.Context, item Library) error {
 	now := nowText()
+	provider := item.EffectiveProvider()
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO libraries(id,name,root_cid,enabled,one_shot,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?)
+INSERT INTO libraries(
+ id,name,provider_type,root_cid,webdav_account_id,root_path,enabled,one_shot,created_at,updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
- name=excluded.name,root_cid=excluded.root_cid,enabled=excluded.enabled,
- one_shot=excluded.one_shot,updated_at=excluded.updated_at`,
-		item.ID, strings.TrimSpace(item.Name), strings.TrimSpace(item.RootCID), item.Enabled, item.OneShot, now, now)
+ name=excluded.name,
+ provider_type=excluded.provider_type,
+ root_cid=excluded.root_cid,
+ webdav_account_id=excluded.webdav_account_id,
+ root_path=excluded.root_path,
+ enabled=excluded.enabled,
+ one_shot=excluded.one_shot,
+ updated_at=excluded.updated_at`,
+		item.ID, strings.TrimSpace(item.Name), provider, strings.TrimSpace(item.RootCID),
+		strings.TrimSpace(item.WebDAVAccountID), strings.TrimSpace(item.RootPath),
+		item.Enabled, item.OneShot, now, now)
 	return err
 }
 

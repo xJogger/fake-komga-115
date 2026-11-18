@@ -5,113 +5,47 @@
 
 ## 项目目标
 
-这是一个轻量 Komga 兼容层，不是真实 Komga，也不是 115 挂载工具。核心约束：
+这是一个轻量、纯 Go（`CGO_ENABLED=0`）自包含的 Komga 兼容漫画服务端，内置响应式书架、网页阅读器与 Bangumi 元数据刮削引擎，同时支持 115 Open API、服务器本地目录和 WebDAV 三类存储源。核心约束：
 
-1. 扫描阶段只读取 115 目录和文件元数据，不读取漫画内容。
-2. 只有用户请求页面时，才通过 downurl 和 HTTP Range 按需读取归档字节。
-3. 不在本地永久保存完整漫画文件。
-4. 兼容 Mihon Komga 扩展所需的 API，而不是完整实现 Komga。
-5. 当前安全模型是可信局域网单用户、整个服务免认证。
+1. **扫描只读目录结构**：扫描阶段只列出 115 / 本地 / WebDAV 的目录和归档文件大小、时间元数据，绝不读取压缩包内部字节。
+2. **严格按需流式读取**：115 与 WebDAV 仅在请求具体漫画归档索引或页面时通过 HTTP Range 分块读取；本地目录直接通过 `*os.File`（`io.ReaderAt`）随机读取，自动跳过 Range 分块磁盘缓存。
+3. **单管理员强制鉴权**：未完成首次管理员设密前，除 `/health`、`/setup` 与初始 Claim 端点外拒绝一切业务请求；设密完成后永久关闭初始化入口。
+4. **Bangumi 严格禁 NSFW**：离线索引库（`bangumi/Archive`）与实时搜索（`api.bgm.tv/v0`）均强制过滤 `nsfw=false`，不接收或暴露 NSFW 内容。
+5. **保持 100% 纯 Go 无 CGO**：便于跨平台交叉编译及后续 Android `gomobile` 原生封装。
 
-不要在没有明确需求时改变这些约束。
-
-## 开发命令
+## 开发与构建命令
 
 ```bash
+bash scripts/build-reader.sh
+node --check internal/httpserver/static/ui/app.js
 gofmt -w cmd internal
-go test ./...
+go test -race ./...
 go vet ./...
-go build -o /tmp/fake-komga-115 ./cmd/server
+CGO_ENABLED=0 go build -o /tmp/fake-komga-115 ./cmd/server
 ```
 
-提交前必须至少执行 `go test ./...`。涉及归档、数据库、扫描或 HTTP DTO 时，还要
-运行 `go vet ./...` 和构建命令。
+注意：`internal/httpserver/static/reader_dist/` 的编译产物已被 `.gitignore` 忽略（仅保留 `placeholder.txt` 使无前端产物的纯 Go 单测可直接编译）。正式打包二进制或镜像前必须先运行 `bash scripts/build-reader.sh`（或 `make build`）。
 
 ## 目录职责
 
 - `cmd/server`：CLI 参数、信号处理和进程生命周期。
-- `internal/app`：组装数据库、115 客户端、扫描器、缓存、归档和 HTTP 服务。
-- `internal/oneonefive`：115 SDK 封装、Token 刷新、限速、目录列表和 downurl。
-- `internal/database`：SQLite schema、迁移、查询和持久化模型。
-- `internal/scanner`：递归扫描、扫描状态、普通模式和 One-Shots 模式。
-- `internal/archive`：远程 ReaderAt、ZIP/RAR 索引与按页解压。
-- `internal/cache`：Range block 和已解压页面的磁盘缓存及 LRU 式淘汰。
-- `internal/thumbnail`：阅读触发的系列封面生成和手动批量封面任务。
-- `internal/maintenance`：详情页手动封面/索引任务、进度、取消和统计触发。
-- `internal/httpserver`：管理 API、管理页面和 Komga 兼容 API。
-- `internal/id`：稳定、可逆的 Library/Series/Book ID。
-- `internal/natsort`：漫画文件和页面的自然排序。
+- `internal/app`：组装数据库、115、WebDAV、Bangumi、扫描器、缓存、归档和 HTTP 服务，暴露 `Start()` / `ListenAddr()` / `Shutdown()` / `Close()`。
+- `internal/database`：SQLite schema、幂等升级迁移、鉴权哈希（`argon2id` + `SHA-256`）、多存储源、系列元数据与阅读进度查询。
+- `internal/oneonefive`：115 Open SDK 封装、Token 自动刷新、限速、目录列表与 `downurl` 获取。
+- `internal/localfs`：本地目录校验、后台文件夹浏览与递归扫描辅助。
+- `internal/webdav`：多账号 WebDAV `PROPFIND` 目录遍历、连接测试、限速与 HTTP `Range` 读取。
+- `internal/scanner`：多存储源统一递归扫描、普通模式与 One-Shots 事务暂存转换。
+- `internal/archive`：统一归档打开器（115/WebDAV 走 `RemoteReaderAt` + Range 缓存；本地文件走原生 `*os.File`）及 ZIP/RAR 索引与单页解压。
+- `internal/bangumi`：繁简归一词表、漫画目录名智能清洗器、MediaWiki Infobox 解析、`bangumi/Archive` 本地离线 SQLite 索引库与 `api.bgm.tv` 实时客户端。
+- `internal/cache`：Range block 与已解压页面的磁盘缓存与 LRU 淘汰。
+- `internal/thumbnail`：封面服务（支持 `auto`/`bangumi`/`book` 优先级与 Bangumi 封面按需 `singleflight` 懒缓存）及批量首卷封面任务。
+- `internal/maintenance`：Series / Book 手动索引与封面任务。
+- `internal/httpserver`：鉴权中间件、内置书架与 `/admin` SPA（`static/ui/`）、内置阅读器静态托管（`static/reader_dist/`）、管理 API 与 Komga v1/v2 兼容 API。
+- `web/reader` + `scripts/build-reader.sh`：基于上游 `Suwayomi-WebUI`（MPL-2.0）的独立 `/reader/*` Komga REST 宿主适配层与确定性构建脚本。
 
-## 不可破坏的行为
+## 安全与红线规则
 
-### 扫描
-
-- 普通模式：有直接漫画文件的每个目录是一个 Series；只有子目录的目录被忽略。
-- One-Shots：递归忽略目录层次，每个支持的归档文件独立成为 Series。
-- 支持的归档扩展名仅为 CBZ、ZIP、CBR、RAR。
-- 文件大小来自列表元数据，用于库容量统计；扫描不能读取归档内容。
-- 正常重扫可增量 upsert，只有扫描成功后才能删除未再次出现的旧记录。
-- 普通模式与 One-Shots 互相转换时必须使用 staging 表；失败、取消或重启必须
-  保留上一次完整结构。
-
-### 懒加载
-
-- 列出 Series/Book 不得触发 downurl 或归档读取。
-- 列出 Pages 可以读取归档索引所需的 Range。
-- 请求具体页面时只读取该页所需的数据块。
-- downurl 不支持 Range 时返回明确错误，不得静默下载整本漫画。
-
-### 缓存和封面
-
-- Range、Page、归档索引、系列封面必须可分别清理。
-- Range/Page 上限为 0 时表示不限制。
-- 封面只由 Series 第一本 Book 的第一页生成，最长边 300px，JPEG 质量 75。
-- 手动封面任务必须全局串行，已有有效封面跳过，单 Series 失败不能中断后续任务。
-- 最新 N 封面按 Series 中最新 Book 的 115 文件修改时间选择，默认 N 为 50。
-- 全库封面按钮必须保持警示样式和二次确认，并提供持久化进度与取消。
-- 缓存键必须包含足够的文件版本信息，避免文件变化后读取旧数据。
-
-### API
-
-- 保持 Komga DTO 字段名、分页结构、时间格式和 `oneshot` 语义。
-- 未实现的图片端点应返回占位图；适合空响应的集合端点返回空集合。
-- `/series/{id}`、`/book/{id}` 和 `/books/{id}` 信息页初始渲染不得触发 115 或归档读取；
-  只有用户点击手动维护按钮后才能后台生成封面或索引。
-- 普通 Book 信息页不显示封面；One-Shots 仅复用已有系列封面，不主动生成。
-- 管理页和 WebView 信息页应适配手机，并跟随系统深浅色主题。
-- 不要随意删除现有端点。新增行为需要相应集成测试。
-
-## 数据库修改规则
-
-1. 新安装的完整 schema 写入 `internal/database/schema.go`。
-2. 已有数据库需要的变更写入显式迁移，不能只修改 `CREATE TABLE IF NOT EXISTS`。
-3. 迁移必须可重复执行。
-4. 删除 Library/Series/Book 时检查外键级联对索引、封面和缓存元数据的影响。
-5. 时间统一保存为 UTC RFC3339Nano。
-
-## 安全规则
-
-- 绝不把 Token、Authorization、Cookie、真实 downurl 或用户文件路径写入日志。
-- 测试只能使用虚构 Token、CID、File ID、Pick Code 和 URL。
-- 不要提交 `data/`、数据库、缓存、日志、二进制、`.env` 或 `user_info`。
-- 新增管理字段时，GET API 不得返回 Token 原文。
-- 当前服务免认证；任何“公网可用”描述都必须明确依赖外部认证和 TLS。
-
-## 测试建议
-
-- 数据库变更：添加新库和旧 schema 升级测试。
-- 扫描规则：测试普通模式、One-Shots、同名文件、失败转换和取消。
-- ZIP/RAR：使用本地 mock HTTP Range 服务，不依赖真实 115 账号。
-- HTTP：通过 `httptest` 验证 Mihon/Komga 所需字段。
-- 并发和缓存：优先测试重复请求合并、淘汰和版本失效。
-- 维护任务：测试默认跳过、强制重建、取消和错误摘要脱敏。
-
-## 修改完成检查表
-
-- [ ] 没有改变按需读取原则。
-- [ ] 没有在日志或测试夹具中加入敏感信息。
-- [ ] schema 和迁移同时更新。
-- [ ] DTO 和过滤参数保持 Komga 兼容。
-- [ ] 新行为有测试。
-- [ ] `gofmt`、`go test ./...`、`go vet ./...`、构建均通过。
-- [ ] README 和 `docs/ARCHITECTURE.md` 与实现一致。
+- 绝不把真实 Token、WebDAV 密码、Session Cookie、API Key、真实 `downurl` 或私人库路径写入日志、代码或测试夹具。
+- 绝不在本公开仓库中引入任何私有仓库域名、内网 IP 或内部业务标识。
+- 已有 `115` 书库的 `Library` / `Series` / `Book` ID 生成公式不可更改，确保旧版数据库无缝原地升级。
+- 前端任务进度严禁在空闲状态下无条件轮询刷屏；仅当存在 `queued`/`running` 任务且页面处于前台可见状态时才按需轮询。

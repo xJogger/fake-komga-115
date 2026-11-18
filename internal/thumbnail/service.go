@@ -23,10 +23,13 @@ import (
 
 	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/xJogger/fake-komga-115/internal/archive"
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
+
+type CoverFetcher func(ctx context.Context, coverURL string, subjectID int64) ([]byte, error)
 
 const (
 	defaultMaxEdge = 300
@@ -60,7 +63,12 @@ type SeriesStats struct {
 type Service struct {
 	store  *database.Store
 	root   string
+	bgmDir string
 	logger *slog.Logger
+
+	bgmFetcher CoverFetcher
+	bgmFlight  singleflight.Group
+	bgmSem     chan struct{}
 
 	operationMu sync.RWMutex
 	inflightMu  sync.Mutex
@@ -71,13 +79,23 @@ func New(store *database.Store, root string, logger *slog.Logger) (*Service, err
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
+	bgmDir := filepath.Join(filepath.Dir(root), "bangumi")
+	if err := os.MkdirAll(bgmDir, 0o700); err != nil {
+		return nil, err
+	}
 	service := &Service{
-		store: store, root: root, logger: logger, inflight: make(map[string]struct{}),
+		store: store, root: root, bgmDir: bgmDir, logger: logger,
+		bgmSem:   make(chan struct{}, 3),
+		inflight: make(map[string]struct{}),
 	}
 	if err := service.cleanupOrphans(context.Background()); err != nil {
 		logger.Warn("clean orphan series thumbnails", "error", err)
 	}
 	return service, nil
+}
+
+func (s *Service) SetBangumiCoverFetcher(fetcher CoverFetcher) {
+	s.bgmFetcher = fetcher
 }
 
 func (s *Service) MaybeGenerate(book database.Book, pageNumber int, page []byte) {
@@ -172,6 +190,12 @@ UPDATE series_thumbnails SET generation_duration_ns=? WHERE series_id=?`,
 }
 
 func (s *Service) Get(ctx context.Context, seriesID string) (Data, bool, error) {
+	if data, ok, preferOnlyBgm := s.getBangumiCoverIfPreferred(ctx, seriesID); ok {
+		return data, true, nil
+	} else if preferOnlyBgm {
+		return Data{}, false, nil
+	}
+
 	s.operationMu.RLock()
 	defer s.operationMu.RUnlock()
 
@@ -201,6 +225,104 @@ func (s *Service) Get(ctx context.Context, seriesID string) (Data, bool, error) 
 	return Data{
 		Bytes: data, MediaType: item.MediaType, Width: item.Width, Height: item.Height,
 	}, true, nil
+}
+
+func (s *Service) getBangumiCoverIfPreferred(ctx context.Context, seriesID string) (Data, bool, bool) {
+	var (
+		bgmID       sql.NullInt64
+		coverSource string
+		coverURL    string
+		coverPath   string
+	)
+	err := s.store.DB().QueryRowContext(ctx, `
+SELECT bgm_subject_id,cover_source,bgm_cover_url,bgm_cover_path
+FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &coverURL, &coverPath)
+	if err != nil || !bgmID.Valid || bgmID.Int64 <= 0 {
+		return Data{}, false, false
+	}
+	if coverSource == database.CoverSourceBook {
+		return Data{}, false, false
+	}
+	forceOnlyBgm := coverSource == database.CoverSourceBangumi
+	subjectID := bgmID.Int64
+	expectedFile := fmt.Sprintf("bgm_%d.jpg", subjectID)
+	diskName := expectedFile
+	if coverPath != "" {
+		diskName = filepath.Base(coverPath)
+	}
+	diskFull := filepath.Join(s.bgmDir, diskName)
+	if raw, err := os.ReadFile(diskFull); err == nil && len(raw) > 0 {
+		return Data{Bytes: raw, MediaType: "image/jpeg"}, true, forceOnlyBgm
+	}
+	if s.bgmFetcher == nil {
+		return Data{}, false, forceOnlyBgm
+	}
+	flightKey := fmt.Sprintf("%d", subjectID)
+	val, fetchErr, _ := s.bgmFlight.Do(flightKey, func() (any, error) {
+		select {
+		case s.bgmSem <- struct{}{}:
+			defer func() { <-s.bgmSem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if raw, err := os.ReadFile(filepath.Join(s.bgmDir, expectedFile)); err == nil && len(raw) > 0 {
+			return raw, nil
+		}
+		dlCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		fetched, err := s.bgmFetcher(dlCtx, coverURL, subjectID)
+		if err != nil {
+			return nil, err
+		}
+		compressed, _, _, err := compressWithMaxEdge(fetched, 420)
+		if err != nil {
+			return nil, err
+		}
+		if err := writeAtomic(filepath.Join(s.bgmDir, expectedFile), compressed); err != nil {
+			return nil, err
+		}
+		return compressed, nil
+	})
+	if fetchErr != nil || val == nil {
+		if s.logger != nil && fetchErr != nil {
+			s.logger.Debug("lazy fetch Bangumi cover failed", "series", seriesID, "subject", subjectID, "error", fetchErr)
+		}
+		return Data{}, false, forceOnlyBgm
+	}
+	_ = s.store.SetSeriesBgmCoverPath(ctx, seriesID, expectedFile)
+	return Data{Bytes: val.([]byte), MediaType: "image/jpeg"}, true, forceOnlyBgm
+}
+
+func (s *Service) BangumiStats(ctx context.Context) (Stats, error) {
+	var st Stats
+	entries, err := os.ReadDir(s.bgmDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return st, nil
+		}
+		return st, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if info, err := entry.Info(); err == nil {
+			st.Files++
+			st.Bytes += info.Size()
+		}
+	}
+	return st, nil
+}
+
+func (s *Service) ClearBangumiCovers(ctx context.Context) error {
+	if err := os.RemoveAll(s.bgmDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.bgmDir, 0o700); err != nil {
+		return err
+	}
+	_, err := s.store.DB().ExecContext(ctx, `UPDATE series_metadata SET bgm_cover_path='' WHERE bgm_cover_path<>''`)
+	return err
 }
 
 func (s *Service) HasValid(ctx context.Context, seriesID string) (bool, error) {
@@ -414,6 +536,13 @@ func writeAtomic(path string, data []byte) error {
 }
 
 func compress(data []byte) ([]byte, int, int, error) {
+	return compressWithMaxEdge(data, defaultMaxEdge)
+}
+
+func compressWithMaxEdge(data []byte, maxEdge int) ([]byte, int, int, error) {
+	if maxEdge <= 0 {
+		maxEdge = defaultMaxEdge
+	}
 	config, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("decode cover image configuration: %w", err)
@@ -426,7 +555,7 @@ func compress(data []byte) ([]byte, int, int, error) {
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("decode cover image: %w", err)
 	}
-	width, height := scaledSize(config.Width, config.Height, defaultMaxEdge)
+	width, height := scaledSize(config.Width, config.Height, maxEdge)
 	target := image.NewRGBA(image.Rect(0, 0, width, height))
 	stddraw.Draw(target, target.Bounds(), &image.Uniform{C: color.White}, image.Point{}, stddraw.Src)
 	xdraw.CatmullRom.Scale(target, target.Bounds(), source, source.Bounds(), stddraw.Over, nil)

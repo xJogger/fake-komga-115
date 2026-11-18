@@ -1,84 +1,15 @@
 package httpserver
 
 import (
-	"database/sql"
-	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
-	"github.com/xJogger/fake-komga-115/internal/archive"
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
-
-type webSeriesPage struct {
-	ID           string
-	Name         string
-	LibraryName  string
-	RelativePath string
-	CoverURL     string
-	BooksCount   int
-	TotalSize    string
-	CreatedAt    string
-	LastModified string
-	OneShot      bool
-	ReadProgress string
-	HasInferred  bool
-	InferredLast string
-	InferredMax  string
-	InferredAt   string
-	InferredURL  string
-	IndexSummary string
-	CoverSummary string
-	DownloadStat string
-	Books        []webBookRow
-}
-
-type webBookRow struct {
-	Name         string
-	URL          string
-	Size         string
-	Pages        string
-	LastModified string
-	ReadState    string
-	PageProgress string
-	IndexStatus  string
-	DownloadStat string
-}
-
-type webBookPage struct {
-	ID            string
-	Name          string
-	SeriesName    string
-	SeriesURL     string
-	LibraryName   string
-	RelativePath  string
-	Size          string
-	Pages         string
-	MediaType     string
-	CreatedAt     string
-	LastModified  string
-	ShowCover     bool
-	CoverURL      string
-	OneShot       bool
-	ReadState     string
-	HasProgress   bool
-	LastProgress  string
-	MaxProgress   string
-	ProgressAt    string
-	IndexStatus   string
-	IndexDuration string
-	IndexUpdated  string
-	DownloadStat  string
-	DownloadBytes string
-	DownloadAt    string
-}
 
 func (s *Server) webStyles(w http.ResponseWriter, _ *http.Request) {
 	data, err := staticFiles.ReadFile("static/web.css")
@@ -91,203 +22,10 @@ func (s *Server) webStyles(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(data)
 }
 
-func (s *Server) webSeries(w http.ResponseWriter, r *http.Request) {
-	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
-	if errors.Is(err, sql.ErrNoRows) {
-		s.renderNotFound(w)
-		return
-	}
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	library, err := s.store.Library(r.Context(), series.LibraryID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	books, _, err := s.store.BooksPage(r.Context(), database.BookQuery{
-		SeriesID: series.ID, Unpaged: true,
-	})
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-
-	rows := make([]webBookRow, 0, len(books))
-	var totalSize int64
-	readProgress, err := s.store.SeriesReadProgress(r.Context(), series.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	readBooks, err := s.store.CompletedBookIDsBySeries(r.Context(), series.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	pageProgresses, err := s.store.BookPageProgressesBySeries(r.Context(), series.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	indexStats, err := s.store.ArchiveIndexStatsBySeries(r.Context(), series.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	downloadStats, err := s.store.BookDownloadStatsBySeries(r.Context(), series.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	currentVersions := make(map[string]string, len(books))
-	for _, book := range books {
-		totalSize += book.Size
-		version := archive.BookVersion(book)
-		currentVersions[book.ID] = version
-		rows = append(rows, webBookRow{
-			Name: book.Name, URL: "/book/" + book.ID, Size: formatBytes(book.Size),
-			Pages: pageCountText(book.PageCount), LastModified: bookModifiedTime(book),
-			ReadState:    readStateText(readBooks[book.ID]),
-			PageProgress: pageProgressInline(pageProgresses[book.ID]),
-			IndexStatus:  indexStatusInline(indexStats[book.ID], version),
-			DownloadStat: downloadStatInline(downloadStats[book.ID]),
-		})
-	}
-	performance, err := s.store.SeriesPerformance(r.Context(), series.ID, currentVersions)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	coverStats, hasCoverStats, err := s.thumbs.SeriesStats(r.Context(), series.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	performance.HasCoverDuration = false
-	performance.CoverDuration = 0
-	performance.CoverCompletedAt = time.Time{}
-	if hasCoverStats && coverStats.GenerationDuration > 0 {
-		performance.HasCoverDuration = true
-		performance.CoverDuration = coverStats.GenerationDuration
-		performance.CoverCompletedAt = coverStats.UpdatedAt
-	}
-	latestProgress, hasLatestProgress, err := s.store.LatestBookPageProgressInSeries(r.Context(), series.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	modified := series.UpdatedAt
-	if series.FileModifiedAt != nil {
-		modified = *series.FileModifiedAt
-	}
-	page := webSeriesPage{
-		ID: series.ID, Name: series.Name, LibraryName: library.Name, RelativePath: series.RelativePath,
-		CoverURL:   "/api/v1/series/" + series.ID + "/thumbnail",
-		BooksCount: len(books), TotalSize: formatBytes(totalSize),
-		CreatedAt: webTime(series.CreatedAt), LastModified: webTime(modified),
-		OneShot: series.OneShot, ReadProgress: seriesReadProgressText(readProgress), Books: rows,
-		IndexSummary: seriesIndexSummary(performance),
-		CoverSummary: seriesCoverSummary(performance),
-		DownloadStat: seriesDownloadSummary(performance),
-	}
-	if hasLatestProgress {
-		page.HasInferred = true
-		page.InferredLast = inferredProgressText(latestProgress.BookName, latestProgress.LastLoadedPage, latestProgress.PageCount)
-		page.InferredMax = inferredProgressText(latestProgress.BookName, latestProgress.MaxLoadedPage, latestProgress.PageCount)
-		page.InferredAt = webTime(latestProgress.UpdatedAt)
-		page.InferredURL = "/book/" + latestProgress.BookID
-	}
-	s.renderWeb(w, http.StatusOK, "web_series.html", page)
-}
-
-func (s *Server) webBook(w http.ResponseWriter, r *http.Request) {
-	book, err := s.store.BookByID(r.Context(), chi.URLParam(r, "bookID"))
-	if errors.Is(err, sql.ErrNoRows) {
-		s.renderNotFound(w)
-		return
-	}
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	series, err := s.store.SeriesByID(r.Context(), book.SeriesID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	library, err := s.store.Library(r.Context(), book.LibraryID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	completed, err := s.store.BookReadCompleted(r.Context(), book.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	pageProgress, hasPageProgress, err := s.store.BookPageProgress(r.Context(), book.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	indexStats, hasIndexStats, err := s.store.ArchiveIndexStats(r.Context(), book.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	downloadStats, hasDownloadStats, err := s.store.BookDownloadStats(r.Context(), book.ID)
-	if err != nil {
-		s.renderWebError(w, err)
-		return
-	}
-	created := book.CreatedAt
-	if book.FileCreatedAt != nil {
-		created = *book.FileCreatedAt
-	}
-	modified := book.UpdatedAt
-	if book.FileModifiedAt != nil {
-		modified = *book.FileModifiedAt
-	}
-	page := webBookPage{
-		ID: book.ID, Name: book.Name, SeriesName: series.Name, SeriesURL: "/series/" + series.ID,
-		LibraryName: library.Name, RelativePath: webBookPath(series, book),
-		Size: formatBytes(book.Size), Pages: pageCountText(book.PageCount),
-		MediaType: webArchiveType(book.Name), CreatedAt: webTime(created),
-		LastModified: webTime(modified), ShowCover: series.OneShot,
-		CoverURL: "/api/v1/series/" + series.ID + "/thumbnail", OneShot: series.OneShot,
-		ReadState:    readStateText(completed),
-		IndexStatus:  "尚未建立当前文件版本索引",
-		DownloadStat: "尚无真实 Range 下载统计",
-	}
-	currentVersion := archive.BookVersion(book)
-	if hasIndexStats && indexStats.Version == currentVersion {
-		page.IndexStatus = fmt.Sprintf("已建立，%d 页", indexStats.PageCount)
-		if indexStats.HasDuration {
-			page.IndexDuration = formatDuration(indexStats.Duration)
-		}
-		page.IndexUpdated = webTime(indexStats.CompletedAt)
-	} else if hasIndexStats {
-		page.IndexStatus = "已有旧文件版本索引，打开页面列表或手动生成后会更新"
-	}
-	if hasDownloadStats && downloadStats.HasDownload {
-		page.DownloadStat = formatSpeed(downloadStats.Bytes, downloadStats.Duration)
-		page.DownloadBytes = formatBytes(downloadStats.Bytes)
-		page.DownloadAt = webTime(downloadStats.UpdatedAt)
-	}
-	if hasPageProgress {
-		page.HasProgress = true
-		page.LastProgress = pageNumberText(pageProgress.LastLoadedPage, pageProgress.PageCount)
-		page.MaxProgress = pageNumberText(pageProgress.MaxLoadedPage, pageProgress.PageCount)
-		page.ProgressAt = webTime(pageProgress.UpdatedAt)
-	}
-	s.renderWeb(w, http.StatusOK, "web_book.html", page)
-}
-
 func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") ||
-		strings.HasPrefix(r.URL.Path, "/admin/api/") {
+		strings.HasPrefix(r.URL.Path, "/admin/api/") ||
+		r.URL.Path == "/api" || r.URL.Path == "/admin/api" {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Endpoint not found.")
 		return
 	}
@@ -320,32 +58,6 @@ func webBookPath(series database.Series, book database.Book) string {
 		return series.RelativePath
 	}
 	return path.Join(series.RelativePath, book.Name)
-}
-
-func pageCountText(count int) string {
-	if count <= 0 {
-		return "尚未建立页面索引"
-	}
-	return strconv.Itoa(count) + " 页"
-}
-
-func readStateText(completed bool) string {
-	if completed {
-		return "已读"
-	}
-	return "未读"
-}
-
-func seriesReadProgressText(progress database.SeriesReadProgress) string {
-	if progress.BooksCount == 0 {
-		return "暂无漫画文件"
-	}
-	return fmt.Sprintf(
-		"已读 %d / %d 本，连续读到 %s",
-		progress.BooksReadCount,
-		progress.BooksCount,
-		formatNumberSort(progress.LastReadContinuousNumberSort),
-	)
 }
 
 func pageProgressInline(progress database.BookPageProgress) string {
@@ -425,13 +137,6 @@ func pageNumberText(pageNumber, pageCount int) string {
 	return fmt.Sprintf("第 %d / %d 页", pageNumber, pageCount)
 }
 
-func formatNumberSort(value float64) string {
-	if math.Trunc(value) == value {
-		return strconv.FormatInt(int64(value), 10)
-	}
-	return strconv.FormatFloat(value, 'f', -1, 64)
-}
-
 func formatDuration(value time.Duration) string {
 	if value <= 0 {
 		return "0 ms"
@@ -457,14 +162,6 @@ func formatSpeed(bytes int64, duration time.Duration) string {
 	}
 	mbps := (float64(bytes) / 1024 / 1024) / duration.Seconds()
 	return fmt.Sprintf("%.2f MB/s", mbps)
-}
-
-func bookModifiedTime(book database.Book) string {
-	value := book.UpdatedAt
-	if book.FileModifiedAt != nil {
-		value = *book.FileModifiedAt
-	}
-	return webTime(value)
 }
 
 func webTime(value time.Time) string {

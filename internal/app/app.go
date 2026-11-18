@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/archive"
+	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/httpserver"
@@ -19,6 +21,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
+	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
 type Options struct {
@@ -29,13 +32,15 @@ type Options struct {
 }
 
 type App struct {
-	server  *http.Server
-	store   *database.Store
-	scanner *scanner.Manager
-	covers  *thumbnail.BatchManager
-	tasks   *maintenance.Manager
-	archive *archive.Service
-	logger  *slog.Logger
+	server     *http.Server
+	store      *database.Store
+	scanner    *scanner.Manager
+	covers     *thumbnail.BatchManager
+	tasks      *maintenance.Manager
+	archive    *archive.Service
+	bangumi    *bangumi.Service
+	logger     *slog.Logger
+	listenAddr atomic.Value
 }
 
 func New(_ context.Context, options Options) (*App, error) {
@@ -60,17 +65,30 @@ func New(_ context.Context, options Options) (*App, error) {
 		return nil, err
 	}
 	client := oneonefive.New(store, options.Logger)
-	scanManager := scanner.New(store, client, options.Logger)
-	archiveService := archive.NewService(store, client, cacheManager, options.Logger)
-	thumbnailService, err := thumbnail.New(
-		store, filepath.Join(dataDir, "thumbnails", "series"), options.Logger,
-	)
+	webdavManager := webdav.NewManager()
+	scanManager := scanner.NewWithWebDAV(store, client, webdavManager, options.Logger)
+	archiveService := archive.NewServiceWithWebDAV(store, client, webdavManager, cacheManager, options.Logger)
+
+	bangumiService, err := bangumi.NewService(store, filepath.Join(dataDir, "bangumi"), options.Logger)
 	if err != nil {
 		archiveService.Close()
 		scanManager.Close()
 		store.Close()
 		return nil, err
 	}
+
+	thumbnailService, err := thumbnail.New(
+		store, filepath.Join(dataDir, "thumbnails", "series"), options.Logger,
+	)
+	if err != nil {
+		_ = bangumiService.Close()
+		archiveService.Close()
+		scanManager.Close()
+		store.Close()
+		return nil, err
+	}
+	thumbnailService.SetBangumiCoverFetcher(bangumiService.FetchCoverBytes)
+
 	coverManager := thumbnail.NewBatchManager(
 		store, archiveService, thumbnailService, options.Logger,
 	)
@@ -84,7 +102,8 @@ func New(_ context.Context, options Options) (*App, error) {
 			Host:    options.Host,
 			Port:    options.Port,
 		}, options.Logger,
-	)
+	).WithServices(webdavManager, bangumiService)
+
 	server := &http.Server{
 		Addr:              net.JoinHostPort(options.Host, strconv.Itoa(options.Port)),
 		Handler:           handler.Handler(),
@@ -93,7 +112,8 @@ func New(_ context.Context, options Options) (*App, error) {
 	}
 	return &App{
 		server: server, store: store, scanner: scanManager, covers: coverManager,
-		tasks: maintenanceManager, archive: archiveService, logger: options.Logger,
+		tasks: maintenanceManager, archive: archiveService, bangumi: bangumiService,
+		logger: options.Logger,
 	}, nil
 }
 
@@ -105,6 +125,14 @@ func (a *App) Run() error {
 	return <-errCh
 }
 
+// ListenAddr returns the bound TCP address after Start succeeds (useful when Port is 0, e.g., embedded mobile runtimes).
+func (a *App) ListenAddr() string {
+	if v, ok := a.listenAddr.Load().(string); ok {
+		return v
+	}
+	return a.server.Addr
+}
+
 // Start binds the listening socket before returning. Callers can safely open a
 // browser after this succeeds without racing a later bind failure.
 func (a *App) Start() (<-chan error, error) {
@@ -112,7 +140,9 @@ func (a *App) Start() (<-chan error, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.logger.Info("server listening", "address", listener.Addr().String())
+	addr := listener.Addr().String()
+	a.listenAddr.Store(addr)
+	a.logger.Info("server listening", "address", addr)
 	errCh := make(chan error, 1)
 	go func() {
 		err := a.server.Serve(listener)
@@ -132,5 +162,8 @@ func (a *App) Close() error {
 	a.covers.Close()
 	a.scanner.Close()
 	a.archive.Close()
+	if a.bangumi != nil {
+		_ = a.bangumi.Close()
+	}
 	return a.store.Close()
 }

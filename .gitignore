@@ -16,3 +16,8 @@
 *.sqlite-wal
 coverage.out
 .DS_Store
+/.cache/
+/bin/
+/dist/
+internal/httpserver/static/reader_dist/*
+!internal/httpserver/static/reader_dist/placeholder.txt

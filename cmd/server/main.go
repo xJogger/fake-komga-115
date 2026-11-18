@@ -30,7 +30,7 @@ func main() {
 		openBrowser = flag.Bool(
 			"open-browser",
 			envBool("FK115_OPEN_BROWSER", runtime.GOOS == "windows"),
-			"open the admin page after the server starts",
+			"open the web bookshelf after the server starts",
 		)
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
@@ -140,7 +140,7 @@ func localAdminURL(host string, port int) string {
 	case "::", "[::]":
 		host = "::1"
 	}
-	return "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/admin"
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/"
 }
 
 func openURL(goos, url string) error {

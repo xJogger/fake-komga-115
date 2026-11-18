@@ -18,6 +18,12 @@ type komgaSearchFilters struct {
 	Search       string
 	LibraryIDs   []string
 	ReadStatuses []string
+	Statuses     []string
+	Genres       []string
+	Tags         []string
+	Publishers   []string
+	Authors      []string
+	Languages    []string
 	OneShot      *bool
 	Empty        bool
 }
@@ -27,11 +33,22 @@ type komgaSearchRequest struct {
 	FullTextSearch *string         `json:"fullTextSearch"`
 }
 
-func (s *Server) komgaMe(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) komgaMe(w http.ResponseWriter, r *http.Request) {
+	email := "local@fake-komga-115"
+	if principal, ok := s.currentPrincipal(r); ok && principal.Username != "" {
+		email = principal.Username
+	} else if admin, has, err := s.store.Admin(r.Context()); err == nil && has && admin.Username != "" {
+		email = admin.Username
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":    "local",
-		"email": "local@fake-komga-115",
-		"roles": []string{"USER", "ADMIN"},
+		"id":                 "admin",
+		"email":              email,
+		"roles":              []string{"USER", "ADMIN", "FILE_DOWNLOAD", "PAGE_STREAMING"},
+		"sharedAllLibraries": true,
+		"sharedLibrariesIds": []string{},
+		"labelsAllow":        []string{},
+		"labelsExclude":      []string{},
+		"ageRestriction":     nil,
 	})
 }
 
@@ -114,9 +131,20 @@ func (s *Server) komgaSeriesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, total, err := s.store.SeriesPage(r.Context(), database.SeriesQuery{
-		Search: filters.Search, LibraryIDs: filters.LibraryIDs,
-		ReadStatus: filters.ReadStatuses, OneShot: filters.OneShot,
-		Empty: filters.Empty, Page: page, Size: size, Sort: r.URL.Query().Get("sort"),
+		Search:     filters.Search,
+		LibraryIDs: filters.LibraryIDs,
+		ReadStatus: filters.ReadStatuses,
+		Statuses:   filters.Statuses,
+		Genres:     filters.Genres,
+		Tags:       filters.Tags,
+		Publishers: filters.Publishers,
+		Authors:    filters.Authors,
+		Languages:  filters.Languages,
+		OneShot:    filters.OneShot,
+		Empty:      filters.Empty,
+		Page:       page,
+		Size:       size,
+		Sort:       r.URL.Query().Get("sort"),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
@@ -137,9 +165,16 @@ func (s *Server) komgaBooksList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, total, err := s.store.BooksPage(r.Context(), database.BookQuery{
-		Search: filters.Search, LibraryIDs: filters.LibraryIDs,
-		ReadStatus: filters.ReadStatuses, OneShot: filters.OneShot,
-		Empty: filters.Empty, Page: page, Size: size, Sort: r.URL.Query().Get("sort"),
+		Search:     filters.Search,
+		LibraryIDs: filters.LibraryIDs,
+		ReadStatus: filters.ReadStatuses,
+		Tags:       filters.Tags,
+		Authors:    filters.Authors,
+		OneShot:    filters.OneShot,
+		Empty:      filters.Empty,
+		Page:       page,
+		Size:       size,
+		Sort:       r.URL.Query().Get("sort"),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
@@ -181,6 +216,11 @@ func legacyKomgaFilters(r *http.Request, target string) komgaSearchFilters {
 	filters := komgaSearchFilters{
 		Search:     strings.TrimSpace(r.URL.Query().Get("search")),
 		LibraryIDs: listQuery(r, "library_id"),
+		Genres:     listQuery(r, "genre"),
+		Tags:       listQuery(r, "tag"),
+		Publishers: listQuery(r, "publisher"),
+		Authors:    parseLegacyAuthorParams(r),
+		Languages:  listQuery(r, "language"),
 		OneShot:    boolQuery(r, "oneshot"),
 	}
 	statuses, ok := normalizeReadStatuses(listQuery(r, "read_status"))
@@ -197,14 +237,33 @@ func legacyKomgaFilters(r *http.Request, target string) komgaSearchFilters {
 		filters.Empty = true
 		return filters
 	}
-	if target == "series" && !seriesStatusAllowsResults(listQuery(r, "status")) {
-		filters.Empty = true
-		return filters
+	if target == "series" {
+		sList, valid := normalizeSeriesStatuses(listQuery(r, "status"))
+		if !valid {
+			filters.Empty = true
+			return filters
+		}
+		filters.Statuses = sList
 	}
-	if hasUnsupportedLegacyFilter(r, target) {
+	if len(listQuery(r, "collection_id")) > 0 {
 		filters.Empty = true
 	}
 	return filters
+}
+
+func parseLegacyAuthorParams(r *http.Request) []string {
+	var out []string
+	for _, raw := range r.URL.Query()["author"] {
+		// Komga format can be "Name,role" or plain "Name"
+		name := raw
+		if comma := strings.IndexByte(raw, ','); comma >= 0 {
+			name = raw[:comma]
+		}
+		if name = strings.TrimSpace(name); name != "" {
+			out = appendUnique(out, name)
+		}
+	}
+	return out
 }
 
 func applyKomgaCondition(raw json.RawMessage, target string, filters *komgaSearchFilters) error {
@@ -239,16 +298,23 @@ func applyKomgaAnyOf(
 	if err := json.Unmarshal(raw, &children); err != nil {
 		return err
 	}
+	if len(children) == 0 {
+		return nil
+	}
+	matchedValid := 0
 	for _, child := range children {
 		field, value, boolValue, empty, unsupported, err := parseKomgaSimpleCondition(child)
 		if err != nil {
 			return err
 		}
 		if unsupported || empty {
-			filters.Empty = true
 			continue
 		}
+		matchedValid++
 		applyKomgaField(field, value, boolValue, target, filters)
+	}
+	if matchedValid == 0 {
+		filters.Empty = true
 	}
 	return nil
 }
@@ -315,12 +381,29 @@ func parseKomgaSimpleCondition(raw json.RawMessage) (
 			case "istrue":
 				return field, "", boolPtr(true), false, false, nil
 			}
-		case "libraryid", "readstatus", "seriesstatus":
+		case "libraryid", "readstatus", "seriesstatus", "genre", "tag", "publisher", "language":
+			if operator != "is" && operator != "" {
+				return field, "", nil, false, true, nil
+			}
 			if err = json.Unmarshal(condition.Value, &value); err != nil {
 				return "", "", nil, false, false, err
 			}
 			return field, value, nil, false, false, nil
-		case "genre", "tag", "publisher", "author", "collectionid":
+		case "author":
+			if operator != "is" && operator != "" {
+				return field, "", nil, false, true, nil
+			}
+			var authorObj struct {
+				Name string `json:"name"`
+			}
+			if err = json.Unmarshal(condition.Value, &authorObj); err == nil && authorObj.Name != "" {
+				return field, authorObj.Name, nil, false, false, nil
+			}
+			if err = json.Unmarshal(condition.Value, &value); err == nil && value != "" {
+				return field, value, nil, false, false, nil
+			}
+			return field, "", nil, true, false, nil
+		case "collectionid", "readlistid":
 			return field, "", nil, false, true, nil
 		default:
 			return field, "", nil, false, true, nil
@@ -335,6 +418,7 @@ func applyKomgaField(
 	target string,
 	filters *komgaSearchFilters,
 ) {
+	value = strings.TrimSpace(value)
 	switch strings.ToLower(field) {
 	case "deleted":
 		if boolValue != nil && *boolValue {
@@ -343,7 +427,7 @@ func applyKomgaField(
 	case "oneshot":
 		filters.OneShot = boolValue
 	case "libraryid":
-		if value = strings.TrimSpace(value); value != "" {
+		if value != "" {
 			filters.LibraryIDs = appendUnique(filters.LibraryIDs, value)
 		}
 	case "readstatus":
@@ -354,8 +438,47 @@ func applyKomgaField(
 		}
 		filters.ReadStatuses = appendUnique(filters.ReadStatuses, statuses...)
 	case "seriesstatus":
-		if target != "series" || strings.ToUpper(strings.TrimSpace(value)) != "ONGOING" {
+		if target != "series" {
 			filters.Empty = true
+			return
+		}
+		sList, ok := normalizeSeriesStatuses([]string{value})
+		if !ok || len(sList) == 0 {
+			filters.Empty = true
+			return
+		}
+		filters.Statuses = appendUnique(filters.Statuses, sList...)
+	case "genre":
+		if target != "series" {
+			filters.Empty = true
+			return
+		}
+		if value != "" {
+			filters.Genres = appendUnique(filters.Genres, value)
+		}
+	case "tag":
+		if value != "" {
+			filters.Tags = appendUnique(filters.Tags, value)
+		}
+	case "publisher":
+		if target != "series" {
+			filters.Empty = true
+			return
+		}
+		if value != "" {
+			filters.Publishers = appendUnique(filters.Publishers, value)
+		}
+	case "author":
+		if value != "" {
+			filters.Authors = appendUnique(filters.Authors, value)
+		}
+	case "language":
+		if target != "series" {
+			filters.Empty = true
+			return
+		}
+		if value != "" {
+			filters.Languages = appendUnique(filters.Languages, value)
 		}
 	}
 }
@@ -388,6 +511,26 @@ func normalizeReadStatuses(values []string) ([]string, bool) {
 	return out, true
 }
 
+func normalizeSeriesStatuses(values []string) ([]string, bool) {
+	if len(values) == 0 {
+		return nil, true
+	}
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		status := strings.ToUpper(strings.TrimSpace(raw))
+		if status == "" {
+			continue
+		}
+		switch status {
+		case "ONGOING", "ENDED", "HIATUS", "ABANDONED":
+			out = appendUnique(out, status)
+		default:
+			return nil, false
+		}
+	}
+	return out, true
+}
+
 func queryBoolIsTrueOrInvalid(r *http.Request, key string) bool {
 	value := strings.TrimSpace(r.URL.Query().Get(key))
 	if value == "" {
@@ -412,31 +555,6 @@ func hasNonReadyMediaStatus(r *http.Request) bool {
 	statuses := listQuery(r, "media_status")
 	for _, status := range statuses {
 		if strings.ToUpper(status) != "READY" {
-			return true
-		}
-	}
-	return false
-}
-
-func seriesStatusAllowsResults(statuses []string) bool {
-	if len(statuses) == 0 {
-		return true
-	}
-	for _, status := range statuses {
-		if strings.ToUpper(strings.TrimSpace(status)) == "ONGOING" {
-			return true
-		}
-	}
-	return false
-}
-
-func hasUnsupportedLegacyFilter(r *http.Request, target string) bool {
-	unsupported := []string{"genre", "tag", "publisher", "author", "collection_id"}
-	if target == "books" {
-		unsupported = []string{"genre", "tag", "publisher", "author", "status", "collection_id"}
-	}
-	for _, key := range unsupported {
-		if len(listQuery(r, key)) > 0 {
 			return true
 		}
 	}

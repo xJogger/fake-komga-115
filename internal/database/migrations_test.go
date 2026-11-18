@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestOpenMigratesOneShotColumns(t *testing.T) {
+func TestOpenMigratesLegacyToV2(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -25,6 +25,8 @@ CREATE TABLE libraries (
  last_scan_status TEXT NOT NULL DEFAULT 'never',
  last_scan_error TEXT NOT NULL DEFAULT ''
 );
+INSERT INTO libraries(id,name,root_cid,enabled,created_at,updated_at)
+VALUES('l_MTIzNDU','Legacy115','12345',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
 CREATE TABLE series (
  id TEXT PRIMARY KEY,
  library_id TEXT NOT NULL,
@@ -54,7 +56,19 @@ CREATE TABLE series (
 		column string
 	}{
 		{"libraries", "one_shot"},
+		{"libraries", "provider_type"},
+		{"libraries", "webdav_account_id"},
+		{"libraries", "root_path"},
 		{"series", "one_shot"},
+		{"auth_admin", "password_hash"},
+		{"auth_sessions", "token_hash"},
+		{"auth_api_keys", "key_hash"},
+		{"webdav_accounts", "base_url"},
+		{"series_metadata", "bgm_subject_id"},
+		{"series_genres", "genre"},
+		{"series_tags", "tag"},
+		{"series_authors", "name"},
+		{"bangumi_scrape_runs", "matched_count"},
 		{"book_read_progress", "book_id"},
 		{"book_read_progress", "page"},
 		{"book_read_progress", "read_date"},
@@ -72,5 +86,13 @@ CREATE TABLE series (
 		if !exists {
 			t.Fatalf("%s.%s was not migrated", item.table, item.column)
 		}
+	}
+
+	lib, err := store.Library(t.Context(), "l_MTIzNDU")
+	if err != nil {
+		t.Fatalf("read migrated legacy library: %v", err)
+	}
+	if lib.ProviderType != Provider115 || lib.RootCID != "12345" {
+		t.Fatalf("unexpected migrated library: %+v", lib)
 	}
 }

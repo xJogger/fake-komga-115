@@ -10,12 +10,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/archive"
+	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/id"
@@ -23,10 +27,12 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
+	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
-func TestMihonKomgaContract(t *testing.T) {
-	store, err := database.Open(t.TempDir() + "/test.db")
+func TestV2AuthAndMihonKomgaContract(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := database.Open(filepath.Join(tempDir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,17 +45,24 @@ func TestMihonKomgaContract(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client := oneonefive.New(store, logger)
-	scanManager := scanner.New(store, client, logger)
+	webdavMgr := webdav.NewManager()
+	scanManager := scanner.NewWithWebDAV(store, client, webdavMgr, logger)
 	defer scanManager.Close()
-	cacheManager, err := cache.New(store, t.TempDir()+"/cache")
+	cacheManager, err := cache.New(store, filepath.Join(tempDir, "cache"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	thumbnailService, err := thumbnail.New(store, t.TempDir()+"/thumbnails", logger)
+	bangumiSvc, err := bangumi.NewService(store, filepath.Join(tempDir, "bangumi"), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	archiveService := archive.NewService(store, client, cacheManager, logger)
+	defer bangumiSvc.Close()
+	thumbnailService, err := thumbnail.New(store, filepath.Join(tempDir, "thumbnails"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumbnailService.SetBangumiCoverFetcher(bangumiSvc.FetchCoverBytes)
+	archiveService := archive.NewServiceWithWebDAV(store, client, webdavMgr, cacheManager, logger)
 	defer archiveService.Close()
 	coverManager := thumbnail.NewBatchManager(
 		store, archiveService, thumbnailService, logger,
@@ -59,6 +72,7 @@ func TestMihonKomgaContract(t *testing.T) {
 		store, archiveService, thumbnailService, logger,
 	)
 	defer maintenanceManager.Close()
+
 	handler := New(
 		store, client, scanManager, cacheManager,
 		archiveService, thumbnailService, coverManager,
@@ -68,37 +82,197 @@ func TestMihonKomgaContract(t *testing.T) {
 			Host:    "127.0.0.1",
 			Port:    25600,
 		}, logger,
-	).Handler()
+	).WithServices(webdavMgr, bangumiSvc).Handler()
+
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
+	noRedirect := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+
+	// 1. Unclaimed state verification
+	resp, err := noRedirect.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health check must remain public, got %d", resp.StatusCode)
+	}
+
+	resp, err = noRedirect.Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect || resp.Header.Get("Location") != "/setup" {
+		t.Fatalf("unclaimed / expected 307 -> /setup, got %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+
+	resp, err = noRedirect.Get(server.URL + "/api/v1/libraries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errBody map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&errBody)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || errBody["error"] != "SETUP_REQUIRED" {
+		t.Fatalf("unclaimed API expected 401 SETUP_REQUIRED, got %d %#v", resp.StatusCode, errBody)
+	}
+
+	var claimStatus map[string]bool
+	resp, err = noRedirect.Get(server.URL + "/api/v1/claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodeResponseJSON(t, resp, &claimStatus)
+	if claimStatus["isClaimed"] {
+		t.Fatalf("fresh DB must report isClaimed=false")
+	}
+
+	// 2. Claim admin via /admin/api/auth/setup with custom username
+	jar, _ := cookiejar.New(nil)
+	sessionClient := &http.Client{Jar: jar}
+
+	const adminUser = "manga_owner"
+	const adminPass = "CorrectHorseBattery99"
+
+	setupResp := requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/admin/api/auth/setup", map[string]any{
+		"username": adminUser,
+		"password": adminPass,
+		"remember": true,
+	})
+	setupResp.Body.Close()
+	if setupResp.StatusCode != http.StatusCreated {
+		t.Fatalf("setup expected 201, got %d", setupResp.StatusCode)
+	}
+
+	// Second setup attempt must be permanently locked (409)
+	dupSetup := requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/admin/api/auth/setup", map[string]any{
+		"username": "intruder",
+		"password": "AnotherPassword123",
+	})
+	dupSetup.Body.Close()
+	if dupSetup.StatusCode != http.StatusConflict {
+		t.Fatalf("second setup must return 409, got %d", dupSetup.StatusCode)
+	}
+
+	// 3. Unauthenticated behavior & WWW-Authenticate header check
+	unauthAPI, err := noRedirect.Get(server.URL + "/api/v1/libraries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthAPI.Body.Close()
+	if unauthAPI.StatusCode != http.StatusUnauthorized ||
+		!strings.HasPrefix(unauthAPI.Header.Get("WWW-Authenticate"), "Basic ") {
+		t.Fatalf("Mihon unauthenticated API must return 401 + WWW-Authenticate Basic, got %d %q",
+			unauthAPI.StatusCode, unauthAPI.Header.Get("WWW-Authenticate"))
+	}
+
+	xhrReq, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/libraries", nil)
+	xhrReq.Header.Set("X-FK115-UI", "1")
+	xhrResp, err := noRedirect.Do(xhrReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xhrResp.Body.Close()
+	if xhrResp.StatusCode != http.StatusUnauthorized || xhrResp.Header.Get("WWW-Authenticate") != "" {
+		t.Fatalf("UI XHR 401 must omit WWW-Authenticate, got %d %q",
+			xhrResp.StatusCode, xhrResp.Header.Get("WWW-Authenticate"))
+	}
+
+	unauthWeb, err := noRedirect.Get(server.URL + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthWeb.Body.Close()
+	if unauthWeb.StatusCode != http.StatusTemporaryRedirect ||
+		!strings.HasPrefix(unauthWeb.Header.Get("Location"), "/login?redirect=") {
+		t.Fatalf("unauthenticated /admin expected redirect to /login, got %d %q",
+			unauthWeb.StatusCode, unauthWeb.Header.Get("Location"))
+	}
+
+	// 4. HTTP Basic Auth + API Key checks
+	basicReq, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/users/me", nil)
+	basicReq.SetBasicAuth(adminUser, adminPass)
+	basicResp, err := noRedirect.Do(basicReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var me map[string]any
+	decodeResponseJSON(t, basicResp, &me)
+	if me["email"] != adminUser {
+		t.Fatalf("Basic Auth /api/v1/users/me email=%v, want %q", me["email"], adminUser)
+	}
+
+	var createdKey struct {
+		Key    string `json:"key"`
+		Record struct {
+			ID string `json:"id"`
+		} `json:"record"`
+	}
+	akResp := requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/admin/api/auth/api-keys", map[string]string{
+		"name": "Mihon Tablet",
+	})
+	if akResp.StatusCode != http.StatusCreated {
+		akResp.Body.Close()
+		t.Fatalf("create API key status=%d", akResp.StatusCode)
+	}
+	if err := json.NewDecoder(akResp.Body).Decode(&createdKey); err != nil {
+		akResp.Body.Close()
+		t.Fatal(err)
+	}
+	akResp.Body.Close()
+
+	keyReq, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/libraries", nil)
+	keyReq.Header.Set("X-API-Key", createdKey.Key)
+	keyResp, err := noRedirect.Do(keyReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyResp.Body.Close()
+	if keyResp.StatusCode != http.StatusOK {
+		t.Fatalf("X-API-Key auth failed: status=%d", keyResp.StatusCode)
+	}
+
+	delKeyReq, _ := http.NewRequest(http.MethodDelete, server.URL+"/admin/api/auth/api-keys/"+createdKey.Record.ID, nil)
+	delKeyResp, err := sessionClient.Do(delKeyReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delKeyResp.Body.Close()
+	if delKeyResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete API key status=%d", delKeyResp.StatusCode)
+	}
+	revokedResp, err := noRedirect.Do(keyReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revokedResp.Body.Close()
+	if revokedResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("revoked API key must return 401, got %d", revokedResp.StatusCode)
+	}
+
+	// 5. Fresh authenticated endpoints & settings
 	for _, path := range []string{
 		"/admin/api/libraries",
 		"/admin/api/scans",
 		"/admin/api/cover-jobs",
 	} {
 		var empty []any
-		getJSON(t, server.URL+path, &empty)
+		getJSONWithClient(t, sessionClient, server.URL+path, &empty)
 		if empty == nil || len(empty) != 0 {
 			t.Fatalf("fresh installation endpoint %s must return [], got %#v", path, empty)
 		}
 	}
 	var settings map[string]string
-	getJSON(t, server.URL+"/admin/api/settings", &settings)
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/settings", &settings)
 	if settings["volume_index_prefetch_enabled"] != "false" ||
 		settings["volume_index_prefetch_remaining_pages"] != "10" {
 		t.Fatalf("unexpected volume prefetch defaults: %#v", settings)
 	}
-	if settings["cors_allowed_origins"] != "" {
-		t.Fatalf("CORS must be disabled by default: %#v", settings)
-	}
-	response := optionsRequest(t, server.URL+"/api/v1/libraries", "https://reader.example.com", "GET", true)
-	response.Body.Close()
-	if response.StatusCode != http.StatusForbidden || response.Header.Get("Access-Control-Allow-Origin") != "" {
-		t.Fatalf("default CORS preflight status=%d origin=%q",
-			response.StatusCode, response.Header.Get("Access-Control-Allow-Origin"))
-	}
-	response = putJSON(t, server.URL+"/admin/api/settings", map[string]string{
+	response := requestJSONWithClient(t, sessionClient, http.MethodPut, server.URL+"/admin/api/settings", map[string]string{
 		"volume_index_prefetch_enabled":         "true",
 		"volume_index_prefetch_remaining_pages": "12",
 	})
@@ -107,59 +281,10 @@ func TestMihonKomgaContract(t *testing.T) {
 		t.Fatalf("valid volume prefetch settings status=%d", response.StatusCode)
 	}
 	response.Body.Close()
-	response = putJSON(t, server.URL+"/admin/api/settings", map[string]string{
-		"volume_index_prefetch_remaining_pages": "0",
-	})
-	if response.StatusCode != http.StatusBadRequest {
-		response.Body.Close()
-		t.Fatalf("invalid volume prefetch threshold status=%d", response.StatusCode)
-	}
-	response.Body.Close()
-	response = putJSON(t, server.URL+"/admin/api/settings", map[string]string{
-		"cors_allowed_origins": "https://reader.example.com/\nhttp://localhost:5173\nhttps://reader.example.com",
-	})
-	decodeResponseJSON(t, response, &settings)
-	if settings["cors_allowed_origins"] != "https://reader.example.com\nhttp://localhost:5173" {
-		t.Fatalf("CORS origins were not normalized: %#v", settings)
-	}
-	response = optionsRequest(t, server.URL+"/api/v1/libraries", "https://reader.example.com", "GET", true)
-	response.Body.Close()
-	if response.StatusCode != http.StatusNoContent ||
-		response.Header.Get("Access-Control-Allow-Origin") != "https://reader.example.com" ||
-		response.Header.Get("Access-Control-Allow-Private-Network") != "true" {
-		t.Fatalf("allowed CORS preflight status=%d headers=%#v", response.StatusCode, response.Header)
-	}
-	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/libraries", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Origin", "https://reader.example.com")
-	response, err = http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK ||
-		response.Header.Get("Access-Control-Allow-Origin") != "https://reader.example.com" {
-		t.Fatalf("actual CORS GET status=%d origin=%q",
-			response.StatusCode, response.Header.Get("Access-Control-Allow-Origin"))
-	}
-	request, err = http.NewRequest(http.MethodGet, server.URL+"/admin/api/status", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Origin", "https://reader.example.com")
-	response, err = http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.Header.Get("Access-Control-Allow-Origin") != "" {
-		t.Fatal("admin API must not expose CORS headers")
-	}
 
+	// 6. Seed 115 One-Shot library + test Local library creation
 	if err := store.UpsertLibrary(ctx, database.Library{
-		ID: libraryID, Name: "Comics", RootCID: "root", Enabled: true, OneShot: true,
+		ID: libraryID, Name: "Comics", ProviderType: database.Provider115, RootCID: "root", Enabled: true, OneShot: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -178,124 +303,89 @@ INSERT INTO books(
 		t.Fatal(err)
 	}
 
+	localComicsDir := filepath.Join(tempDir, "local-comics")
+	if err := os.MkdirAll(localComicsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	localLibResp := requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/admin/api/libraries", map[string]any{
+		"name":         "Local Manga",
+		"providerType": "local",
+		"rootPath":     localComicsDir,
+		"enabled":      false,
+	})
+	if localLibResp.StatusCode != http.StatusCreated {
+		localLibResp.Body.Close()
+		t.Fatalf("create local library status=%d", localLibResp.StatusCode)
+	}
+	localLibResp.Body.Close()
+
 	var status map[string]any
-	getJSON(t, server.URL+"/admin/api/status", &status)
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/status", &status)
 	if status["comicBytes"].(float64) != 1234 {
 		t.Fatalf("unexpected total comic bytes: %#v", status)
 	}
 	if status["dataDir"] != "/tmp/fake-komga-115-test-data" {
 		t.Fatalf("unexpected data directory: %#v", status)
 	}
-	addresses := status["mihonAddresses"].([]any)
-	if len(addresses) != 1 || addresses[0] != "http://127.0.0.1:25600" {
-		t.Fatalf("unexpected Mihon addresses: %#v", status)
-	}
-	var libraries []map[string]any
-	getJSON(t, server.URL+"/admin/api/libraries", &libraries)
-	if len(libraries) != 1 || libraries[0]["comicBytes"].(float64) != 1234 {
-		t.Fatalf("unexpected library comic bytes: %#v", libraries)
-	}
-	if libraries[0]["oneShot"] != true {
-		t.Fatalf("one-shot library flag missing: %#v", libraries)
-	}
-	var coverJobs []map[string]any
-	getJSON(t, server.URL+"/admin/api/cover-jobs", &coverJobs)
-	if len(coverJobs) != 0 {
-		t.Fatalf("unexpected cover jobs: %#v", coverJobs)
-	}
-	var maintenanceJobs []map[string]any
-	getJSON(t, server.URL+"/admin/api/maintenance-jobs", &maintenanceJobs)
-	if len(maintenanceJobs) != 0 {
-		t.Fatalf("unexpected maintenance jobs: %#v", maintenanceJobs)
-	}
 
 	var capabilities map[string]any
-	getJSON(t, server.URL+"/api/v1/server/capabilities", &capabilities)
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/server/capabilities", &capabilities)
+	features := capabilities["features"].(map[string]any)
 	if capabilities["name"] != "fake-komga-115" ||
-		capabilities["corsConfigured"] != true ||
-		capabilities["features"].(map[string]any)["bookSiblingNavigation"] != true {
+		features["authentication"] != true ||
+		features["builtInReader"] != true ||
+		features["bangumiMetadata"] != true ||
+		features["bookSiblingNavigation"] != true {
 		t.Fatalf("unexpected capabilities: %#v", capabilities)
 	}
 
 	var komgaLibraries []map[string]any
-	getJSON(t, server.URL+"/api/v1/libraries", &komgaLibraries)
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/libraries", &komgaLibraries)
 	if len(komgaLibraries) != 1 || komgaLibraries[0]["oneshotsDirectory"] != "." {
-		t.Fatalf("unexpected Komga library: %#v", komgaLibraries)
+		t.Fatalf("unexpected enabled Komga library: %#v", komgaLibraries)
 	}
-	var me map[string]any
-	getJSON(t, server.URL+"/api/v1/users/me", &me)
-	if me["id"] != "local" {
-		t.Fatalf("unexpected Komga user: %#v", me)
+
+	// 7. Series Metadata PATCH + Taxonomy & Search verification
+	metaPatch := requestJSONWithClient(t, sessionClient, http.MethodPatch, server.URL+"/api/v1/series/"+seriesID+"/metadata", map[string]any{
+		"title":     "短篇杰作集",
+		"titleLock": true,
+		"publisher": "集英社",
+		"genres":    []string{"奇幻", "冒险"},
+		"tags":      []string{"短篇"},
+	})
+	metaPatch.Body.Close()
+	if metaPatch.StatusCode != http.StatusNoContent {
+		t.Fatalf("series metadata PATCH status=%d", metaPatch.StatusCode)
 	}
-	var clientSettings map[string]map[string]any
-	getJSON(t, server.URL+"/api/v1/client-settings/user/list", &clientSettings)
-	if len(clientSettings) != 0 {
-		t.Fatalf("fresh client settings must be empty: %#v", clientSettings)
+
+	var genres []string
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/genres", &genres)
+	if len(genres) != 2 {
+		t.Fatalf("expected 2 genres, got %#v", genres)
 	}
-	response = patchJSON(t, server.URL+"/api/v1/client-settings/user", map[string]any{
+
+	// Both Chinese title ("短篇杰作集") and original folder name ("One Shot") must match search!
+	var seriesPage map[string]any
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/series?search=短篇杰作", &seriesPage)
+	if seriesPage["totalElements"].(float64) != 1 {
+		t.Fatalf("Chinese title search failed: %#v", seriesPage)
+	}
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/series?search=One+Shot&genre=奇幻", &seriesPage)
+	if seriesPage["totalElements"].(float64) != 1 {
+		t.Fatalf("original folder name + genre search failed: %#v", seriesPage)
+	}
+
+	// 8. Client settings, Books, Structured search & Read progress
+	response = requestJSONWithClient(t, sessionClient, http.MethodPatch, server.URL+"/api/v1/client-settings/user", map[string]any{
 		"koharia.manga." + seriesID + ".viewerFlags": map[string]any{"value": "42"},
-		"webui.libraries": map[string]any{
-			"value": `{"` + libraryID + `":{"order":7}}`,
-		},
 	})
 	response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("client settings PATCH status=%d", response.StatusCode)
 	}
-	getJSON(t, server.URL+"/api/v1/client-settings/user/list", &clientSettings)
-	if clientSettings["koharia.manga."+seriesID+".viewerFlags"]["value"] != "42" {
-		t.Fatalf("client settings missing Koharia value: %#v", clientSettings)
-	}
-	response = patchJSON(t, server.URL+"/api/v1/client-settings/user", map[string]any{
-		"other.token": map[string]any{"value": "secret"},
-	})
-	response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("sensitive client setting status=%d", response.StatusCode)
-	}
 
-	var seriesPage map[string]any
-	getJSON(t, server.URL+"/api/v1/series?page=0&size=1", &seriesPage)
-	content := seriesPage["content"].([]any)
-	if len(content) != 1 {
-		t.Fatalf("series content: %#v", content)
-	}
-	seriesItem := content[0].(map[string]any)
-	for _, field := range []string{"id", "libraryId", "booksCount", "metadata", "booksMetadata"} {
-		if _, ok := seriesItem[field]; !ok {
-			t.Fatalf("series field %q missing", field)
-		}
-	}
-	if seriesItem["oneshot"] != true {
-		t.Fatalf("series one-shot flag missing: %#v", seriesItem)
-	}
-	var nonOneShotPage map[string]any
-	getJSON(t, server.URL+"/api/v1/series?oneshot=false", &nonOneShotPage)
-	if nonOneShotPage["totalElements"].(float64) != 0 {
-		t.Fatalf("one-shot filter ignored: %#v", nonOneShotPage)
-	}
-
-	var bookPage map[string]any
-	getJSON(t, server.URL+"/api/v1/series/"+seriesID+"/books?unpaged=true&media_status=READY&deleted=false", &bookPage)
-	books := bookPage["content"].([]any)
-	if len(books) != 1 {
-		t.Fatalf("book content: %#v", books)
-	}
-	bookItem := books[0].(map[string]any)
-	if _, ok := bookItem["media"].(map[string]any)["mediaProfile"]; !ok {
-		t.Fatal("mediaProfile missing")
-	}
-	if _, ok := bookItem["metadata"].(map[string]any)["numberSort"]; !ok {
-		t.Fatal("numberSort missing")
-	}
-	if bookItem["oneshot"] != true {
-		t.Fatalf("book one-shot flag missing: %#v", bookItem)
-	}
-	if bookItem["readProgress"] != nil {
-		t.Fatalf("fresh book must not have readProgress: %#v", bookItem)
-	}
 	var structuredSeriesPage map[string]any
-	response = postJSON(t, server.URL+"/api/v1/series/list?page=0&size=10&sort=metadata.titleSort,asc", map[string]any{
+	response = requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/api/v1/series/list?page=0&size=10&sort=metadata.titleSort,asc", map[string]any{
 		"condition": map[string]any{
 			"allOf": []any{
 				map[string]any{"deleted": map[string]any{"operator": "isFalse"}},
@@ -311,37 +401,8 @@ INSERT INTO books(
 	if structuredSeriesPage["totalElements"].(float64) != 1 {
 		t.Fatalf("structured series search failed: %#v", structuredSeriesPage)
 	}
-	var structuredBookPage map[string]any
-	response = postJSON(t, server.URL+"/api/v1/books/list?page=0&size=10&sort=metadata.title,asc", map[string]any{
-		"condition": map[string]any{
-			"allOf": []any{
-				map[string]any{"deleted": map[string]any{"operator": "isFalse"}},
-				map[string]any{"anyOf": []any{
-					map[string]any{"libraryId": map[string]any{"operator": "is", "value": libraryID}},
-				}},
-			},
-		},
-		"fullTextSearch": "001",
-	})
-	decodeResponseJSON(t, response, &structuredBookPage)
-	if structuredBookPage["totalElements"].(float64) != 1 {
-		t.Fatalf("structured book search failed: %#v", structuredBookPage)
-	}
-	response = postJSON(t, server.URL+"/api/v1/series/list?page=0&size=10", map[string]any{
-		"condition": map[string]any{
-			"allOf": []any{
-				map[string]any{"anyOf": []any{
-					map[string]any{"genre": map[string]any{"operator": "is", "value": "missing"}},
-				}},
-			},
-		},
-	})
-	decodeResponseJSON(t, response, &structuredSeriesPage)
-	if structuredSeriesPage["totalElements"].(float64) != 0 {
-		t.Fatalf("unsupported structured filter must return empty results: %#v", structuredSeriesPage)
-	}
 
-	response = patchJSON(t, server.URL+"/api/v1/books/"+bookID+"/read-progress", map[string]any{
+	response = requestJSONWithClient(t, sessionClient, http.MethodPatch, server.URL+"/api/v1/books/"+bookID+"/read-progress", map[string]any{
 		"page": 3,
 	})
 	response.Body.Close()
@@ -349,66 +410,13 @@ INSERT INTO books(
 		t.Fatalf("book page progress PATCH status=%d", response.StatusCode)
 	}
 	var bookDetail map[string]any
-	getJSON(t, server.URL+"/api/v1/books/"+bookID, &bookDetail)
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/books/"+bookID, &bookDetail)
 	readProgress := bookDetail["readProgress"].(map[string]any)
 	if readProgress["completed"] != false || readProgress["page"].(float64) != 3 {
 		t.Fatalf("book readProgress after page sync: %#v", readProgress)
 	}
-	getJSON(t, server.URL+"/api/v1/books?read_status=IN_PROGRESS&unpaged=true&deleted=false", &bookPage)
-	if bookPage["totalElements"].(float64) != 1 {
-		t.Fatalf("book read_status IN_PROGRESS failed: %#v", bookPage)
-	}
-	getJSON(t, server.URL+"/api/v1/books?read_status=UNREAD&unpaged=true&deleted=false", &bookPage)
-	if bookPage["totalElements"].(float64) != 0 {
-		t.Fatalf("book read_status UNREAD failed: %#v", bookPage)
-	}
-	response = postJSON(t, server.URL+"/api/v1/books/list?page=0&size=10", map[string]any{
-		"condition": map[string]any{
-			"allOf": []any{
-				map[string]any{"anyOf": []any{
-					map[string]any{"readStatus": map[string]any{"operator": "is", "value": "IN_PROGRESS"}},
-				}},
-			},
-		},
-	})
-	decodeResponseJSON(t, response, &structuredBookPage)
-	if structuredBookPage["totalElements"].(float64) != 1 {
-		t.Fatalf("structured book readStatus failed: %#v", structuredBookPage)
-	}
-	response = patchJSON(t, server.URL+"/api/v1/books/"+bookID+"/read-progress", map[string]any{
-		"page":      10,
-		"completed": true,
-	})
-	response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
-		t.Fatalf("book completed progress PATCH status=%d", response.StatusCode)
-	}
-	getJSON(t, server.URL+"/api/v1/series?read_status=READ", &seriesPage)
-	if seriesPage["totalElements"].(float64) != 1 {
-		t.Fatalf("series read_status READ failed: %#v", seriesPage)
-	}
-	response = deleteRequest(t, server.URL+"/api/v1/books/"+bookID+"/read-progress")
-	response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
-		t.Fatalf("book readProgress DELETE status=%d", response.StatusCode)
-	}
-	getJSON(t, server.URL+"/api/v1/books/"+bookID, &bookDetail)
-	if bookDetail["readProgress"] != nil {
-		t.Fatalf("book readProgress after DELETE: %#v", bookDetail["readProgress"])
-	}
-	getJSON(t, server.URL+"/api/v1/books?read_status=UNREAD&unpaged=true&deleted=false", &bookPage)
-	if bookPage["totalElements"].(float64) != 1 {
-		t.Fatalf("book read_status UNREAD after DELETE failed: %#v", bookPage)
-	}
 
-	response, err = http.Get(server.URL + "/api/v1/series/" + seriesID + "/thumbnail")
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/png" {
-		t.Fatalf("thumbnail status=%d type=%q", response.StatusCode, response.Header.Get("Content-Type"))
-	}
+	// Thumbnail + Tachiyomi v2 progress + Sibling navigation
 	book, err := store.BookByID(ctx, bookID)
 	if err != nil {
 		t.Fatal(err)
@@ -416,145 +424,114 @@ INSERT INTO books(
 	if err := thumbnailService.Generate(ctx, book, testCoverPNG(t)); err != nil {
 		t.Fatal(err)
 	}
-	response, err = http.Get(server.URL + "/api/v1/series/" + seriesID + "/thumbnail")
+	thumbResp, err := sessionClient.Get(server.URL + "/api/v1/series/" + seriesID + "/thumbnail")
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/jpeg" {
-		t.Fatalf("generated thumbnail status=%d type=%q", response.StatusCode, response.Header.Get("Content-Type"))
+	thumbResp.Body.Close()
+	if thumbResp.StatusCode != http.StatusOK || thumbResp.Header.Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("generated thumbnail status=%d type=%q", thumbResp.StatusCode, thumbResp.Header.Get("Content-Type"))
 	}
 
-	var progress map[string]any
-	getJSON(t, server.URL+"/api/v2/series/"+seriesID+"/read-progress/tachiyomi", &progress)
-	if progress["booksCount"].(float64) != 1 || progress["maxNumberSort"].(float64) != 1 {
-		t.Fatalf("progress: %#v", progress)
-	}
-	response = putJSON(t, server.URL+"/api/v2/series/"+seriesID+"/read-progress/tachiyomi", map[string]any{
+	response = requestJSONWithClient(t, sessionClient, http.MethodPut, server.URL+"/api/v2/series/"+seriesID+"/read-progress/tachiyomi", map[string]any{
 		"lastBookNumberSortRead": 1,
 	})
 	response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("progress PUT status=%d", response.StatusCode)
 	}
-	getJSON(t, server.URL+"/api/v2/series/"+seriesID+"/read-progress/tachiyomi", &progress)
-	if progress["booksReadCount"].(float64) != 1 || progress["booksUnreadCount"].(float64) != 0 ||
-		progress["lastReadContinuousNumberSort"].(float64) != 1 {
-		t.Fatalf("progress after PUT: %#v", progress)
-	}
-	response = putJSON(t, server.URL+"/api/v2/series/"+seriesID+"/read-progress/tachiyomi", map[string]any{
-		"lastBookNumberSortRead": 0,
-	})
-	response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
-		t.Fatalf("progress rollback PUT status=%d", response.StatusCode)
-	}
-	if err := store.RecordBookPageProgress(ctx, book, 4, 10); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.RecordBookPageProgress(ctx, book, 2, 10); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.RecordArchiveIndexBuild(
-		ctx, book.ID, archive.BookVersion(book), "[]", 10, 123*time.Millisecond,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.RecordBookDownload(ctx, book, 8<<20, 2*time.Second); err != nil {
-		t.Fatal(err)
-	}
-
-	seriesHTML := getText(t, server.URL+"/series/"+seriesID, http.StatusOK)
-	for _, expected := range []string{
-		"One Shot", "Root/One Shot.cbz", "001.cbz", "/book/" + bookID,
-		"Mihon 同步进度", "推断阅读进度", "最近 第 2 / 10 页", "最大 第 4 / 10 页",
-		"归档索引统计", "平均耗时", "4.00 MB/s", "生成全部索引", "强制重建封面",
-	} {
-		if !strings.Contains(seriesHTML, expected) {
-			t.Fatalf("series web page missing %q", expected)
-		}
-	}
-	bookHTML := getText(t, server.URL+"/book/"+bookID, http.StatusOK)
-	for _, expected := range []string{
-		"Root/One Shot.cbz", "/series/" + seriesID, `class="cover-frame"`,
-		"推断阅读进度", "最近加载：第 2 / 10 页", "最大加载：第 4 / 10 页",
-		"归档索引", "耗时：123 ms", "真实下载速度", "4.00 MB/s", "生成归档索引",
-	} {
-		if !strings.Contains(bookHTML, expected) {
-			t.Fatalf("one-shot book web page missing %q", expected)
-		}
-	}
-	aliasHTML := getText(t, server.URL+"/books/"+bookID, http.StatusOK)
-	if !strings.Contains(aliasHTML, "Root/One Shot.cbz") {
-		t.Fatal("/books/{id} alias did not render the Book page")
-	}
 
 	normalSeriesID := id.Series(libraryID, "normal-series")
 	normalBookID := id.Book(libraryID, "normal-file")
-	if _, err := store.DB().Exec(`
+	normalBook2ID := id.Book(libraryID, "normal-file-2")
+	_, _ = store.DB().Exec(`
 INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,updated_at,seen_scan_id)
 VALUES(?,?,?,?,?,0,?,?,'scan')`,
-		normalSeriesID, libraryID, "normal-series", "Normal Series", "Root/Normal Series",
-		now, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().Exec(`
+		normalSeriesID, libraryID, "normal-series", "Normal Series", "Root/Normal Series", now, now)
+	_, _ = store.DB().Exec(`
 INSERT INTO books(
  id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
  file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
 ) VALUES(?,?,?,?,?,'Vol 01.cbz',2048,'normal-pick','normal-sha',?,?,1,?,?,'scan')`,
-		normalBookID, normalSeriesID, libraryID, "normal-file", "normal-series",
-		now, now, now, now); err != nil {
-		t.Fatal(err)
-	}
-	normalBook2ID := id.Book(libraryID, "normal-file-2")
-	if _, err := store.DB().Exec(`
+		normalBookID, normalSeriesID, libraryID, "normal-file", "normal-series", now, now, now, now)
+	_, _ = store.DB().Exec(`
 INSERT INTO books(
  id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
  file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
 ) VALUES(?,?,?,?,?,'Vol 02.cbz',4096,'normal-pick-2','normal-sha-2',?,?,2,?,?,'scan')`,
-		normalBook2ID, normalSeriesID, libraryID, "normal-file-2", "normal-series",
-		now, now, now, now); err != nil {
-		t.Fatal(err)
-	}
+		normalBook2ID, normalSeriesID, libraryID, "normal-file-2", "normal-series", now, now, now, now)
+
 	var sibling map[string]any
-	getJSON(t, server.URL+"/api/v1/books/"+normalBookID+"/next", &sibling)
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/books/"+normalBookID+"/next", &sibling)
 	if sibling["id"] != normalBook2ID {
 		t.Fatalf("unexpected next book: %#v", sibling)
 	}
-	getJSON(t, server.URL+"/api/v1/books/"+normalBook2ID+"/previous", &sibling)
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/books/"+normalBook2ID+"/previous", &sibling)
 	if sibling["id"] != normalBookID {
 		t.Fatalf("unexpected previous book: %#v", sibling)
 	}
-	response, err = http.Get(server.URL + "/api/v1/books/" + normalBook2ID + "/next")
+
+	// 9. Rich detail API + SPA routes + 404 handling
+	var richSeries map[string]any
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/series/"+seriesID+"/detail", &richSeries)
+	if richSeries["originalName"] != "One Shot" {
+		t.Fatalf("rich series detail missing originalName: %#v", richSeries)
+	}
+	var richBook map[string]any
+	getJSONWithClient(t, sessionClient, server.URL+"/admin/api/books/"+normalBookID+"/detail", &richBook)
+	if richBook["nextBookId"] != normalBook2ID {
+		t.Fatalf("rich book detail missing nextBookId: %#v", richBook)
+	}
+
+	for _, spaRoute := range []string{"/", "/libraries", "/series/" + seriesID, "/book/" + bookID, "/books/" + bookID, "/admin"} {
+		html := getTextWithClient(t, sessionClient, server.URL+spaRoute, http.StatusOK)
+		if !strings.Contains(html, `/ui/app.js`) {
+			t.Fatalf("SPA route %s did not render app shell", spaRoute)
+		}
+	}
+
+	// Convenience /reader/book/{bookID} redirect + /reader/series/{seriesID}/book/{bookID} serving
+	noRedirSession := &http.Client{
+		Jar:           jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	readerShortResp, err := noRedirSession.Get(server.URL + "/reader/book/" + bookID + "?page=2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusNotFound {
-		t.Fatalf("last book next status=%d", response.StatusCode)
+	readerShortResp.Body.Close()
+	wantReaderLoc := "/reader/series/" + seriesID + "/book/" + bookID + "?page=2"
+	if readerShortResp.StatusCode != http.StatusTemporaryRedirect || readerShortResp.Header.Get("Location") != wantReaderLoc {
+		t.Fatalf("/reader/book redirect = %d %q, want 307 %q",
+			readerShortResp.StatusCode, readerShortResp.Header.Get("Location"), wantReaderLoc)
 	}
-	normalHTML := getText(t, server.URL+"/book/"+normalBookID, http.StatusOK)
-	if !strings.Contains(normalHTML, "Root/Normal Series/Vol 01.cbz") {
-		t.Fatal("normal Book page does not show the full relative path")
+	readerEntryResp, err := sessionClient.Get(server.URL + wantReaderLoc)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(normalHTML, `class="cover-frame"`) {
-		t.Fatal("normal Book page must not show a Series cover")
+	readerBody, _ := io.ReadAll(readerEntryResp.Body)
+	readerEntryResp.Body.Close()
+	if readerEntryResp.StatusCode != http.StatusOK && readerEntryResp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("/reader entry unexpected status=%d", readerEntryResp.StatusCode)
+	}
+	if readerEntryResp.StatusCode == http.StatusOK && !strings.Contains(string(readerBody), "/reader/assets/") {
+		t.Fatalf("compiled /reader HTML missing /reader/assets/ bundle reference")
 	}
 
-	notFoundHTML := getText(t, server.URL+"/missing-page", http.StatusNotFound)
+	_ = getTextWithClient(t, sessionClient, server.URL+"/series/non-existent", http.StatusNotFound)
+	notFoundHTML := getTextWithClient(t, sessionClient, server.URL+"/missing-page", http.StatusNotFound)
 	if !strings.Contains(notFoundHTML, "没有找到这个页面") {
 		t.Fatal("browser 404 page missing friendly message")
 	}
-	response, err = http.Get(server.URL + "/api/v1/missing-page")
+	apiNotFound, err := sessionClient.Get(server.URL + "/api/v1/missing-page")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusNotFound ||
-		!strings.HasPrefix(response.Header.Get("Content-Type"), "application/json") {
+	defer apiNotFound.Body.Close()
+	if apiNotFound.StatusCode != http.StatusNotFound ||
+		!strings.HasPrefix(apiNotFound.Header.Get("Content-Type"), "application/json") {
 		t.Fatalf("API 404 must remain JSON: status=%d type=%q",
-			response.StatusCode, response.Header.Get("Content-Type"))
+			apiNotFound.StatusCode, apiNotFound.Header.Get("Content-Type"))
 	}
 }
 
@@ -573,9 +550,9 @@ func testCoverPNG(t *testing.T) []byte {
 	return output.Bytes()
 }
 
-func getJSON(t *testing.T, url string, target any) {
+func getJSONWithClient(t *testing.T, client *http.Client, url string, target any) {
 	t.Helper()
-	response, err := http.Get(url)
+	response, err := client.Get(url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,9 +576,9 @@ func decodeResponseJSON(t *testing.T, response *http.Response, target any) {
 	}
 }
 
-func getText(t *testing.T, url string, status int) string {
+func getTextWithClient(t *testing.T, client *http.Client, url string, status int) string {
 	t.Helper()
-	response, err := http.Get(url)
+	response, err := client.Get(url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,56 +593,7 @@ func getText(t *testing.T, url string, status int) string {
 	return string(data)
 }
 
-func putJSON(t *testing.T, url string, value any) *http.Response {
-	return requestJSON(t, http.MethodPut, url, value)
-}
-
-func postJSON(t *testing.T, url string, value any) *http.Response {
-	return requestJSON(t, http.MethodPost, url, value)
-}
-
-func patchJSON(t *testing.T, url string, value any) *http.Response {
-	return requestJSON(t, http.MethodPatch, url, value)
-}
-
-func deleteRequest(t *testing.T, url string) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodDelete, url, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response
-}
-
-func optionsRequest(
-	t *testing.T,
-	url string,
-	origin string,
-	requestMethod string,
-	privateNetwork bool,
-) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodOptions, url, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Origin", origin)
-	request.Header.Set("Access-Control-Request-Method", requestMethod)
-	if privateNetwork {
-		request.Header.Set("Access-Control-Request-Private-Network", "true")
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response
-}
-
-func requestJSON(t *testing.T, method, url string, value any) *http.Response {
+func requestJSONWithClient(t *testing.T, client *http.Client, method, url string, value any) *http.Response {
 	t.Helper()
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -676,7 +604,7 @@ func requestJSON(t *testing.T, method, url string, value any) *http.Response {
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}

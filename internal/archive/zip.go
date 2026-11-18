@@ -20,11 +20,13 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/natsort"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
+	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
 type ZIPService struct {
 	store  *database.Store
 	client *oneonefive.Client
+	webdav *webdav.Manager
 	cache  *cache.Manager
 	logger *slog.Logger
 }
@@ -35,7 +37,19 @@ func NewZIPService(
 	cacheManager *cache.Manager,
 	logger *slog.Logger,
 ) *ZIPService {
-	return &ZIPService{store: store, client: client, cache: cacheManager, logger: logger}
+	return NewZIPServiceWithWebDAV(store, client, webdav.NewManager(), cacheManager, logger)
+}
+
+func NewZIPServiceWithWebDAV(
+	store *database.Store,
+	client *oneonefive.Client,
+	webdavManager *webdav.Manager,
+	cacheManager *cache.Manager,
+	logger *slog.Logger,
+) *ZIPService {
+	return &ZIPService{
+		store: store, client: client, webdav: webdavManager, cache: cacheManager, logger: logger,
+	}
 }
 
 func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
@@ -50,7 +64,12 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	}
 
 	started := time.Now()
-	readerAt := NewRemoteReaderAt(ctx, book, z.store, z.client, z.cache, z.logger)
+	blockSize := z.store.Int64Setting(ctx, "range_block_size", 1<<20)
+	readerAt, err := openBookReaderAt(ctx, book, z.store, z.client, z.webdav, z.cache, z.logger, blockSize)
+	if err != nil {
+		return nil, err
+	}
+	defer readerAt.Close()
 	reader, err := zip.NewReader(readerAt, book.Size)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidZIP, err)
@@ -161,7 +180,12 @@ func (z *ZIPService) readEntry(
 	maxPageSize int64,
 ) ([]byte, error) {
 	compressed := make([]byte, int(entry.CompressedSize))
-	readerAt := NewRemoteReaderAt(ctx, book, z.store, z.client, z.cache, z.logger)
+	blockSize := z.store.Int64Setting(ctx, "range_block_size", 1<<20)
+	readerAt, err := openBookReaderAt(ctx, book, z.store, z.client, z.webdav, z.cache, z.logger, blockSize)
+	if err != nil {
+		return nil, err
+	}
+	defer readerAt.Close()
 	if _, err := readerAt.ReadAt(compressed, entry.DataOffset); err != nil {
 		return nil, err
 	}

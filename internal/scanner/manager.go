@@ -17,13 +17,16 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/id"
+	"github.com/xJogger/fake-komga-115/internal/localfs"
 	"github.com/xJogger/fake-komga-115/internal/natsort"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
+	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
 type Manager struct {
 	store  *database.Store
 	client *oneonefive.Client
+	webdav *webdav.Manager
 	logger *slog.Logger
 
 	ctx    context.Context
@@ -56,6 +59,18 @@ type counters struct {
 }
 
 func New(store *database.Store, client *oneonefive.Client, logger *slog.Logger) *Manager {
+	return NewWithWebDAV(store, client, webdav.NewManager(), logger)
+}
+
+func NewWithWebDAV(
+	store *database.Store,
+	client *oneonefive.Client,
+	webdavManager *webdav.Manager,
+	logger *slog.Logger,
+) *Manager {
+	if webdavManager == nil {
+		webdavManager = webdav.NewManager()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, _ = store.DB().ExecContext(ctx, `
@@ -70,6 +85,7 @@ WHERE last_scan_status='running'`, now)
 	m := &Manager{
 		store:  store,
 		client: client,
+		webdav: webdavManager,
 		logger: logger,
 		ctx:    ctx,
 		cancel: cancel,
@@ -99,7 +115,7 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) StartAll(ctx context.Context, trigger string) ([]database.ScanRun, error) {
-	libraries, err := m.store.Libraries(ctx, true)
+	libraries, err := m.store.LibrariesBasic(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +136,7 @@ func (m *Manager) StartAll(ctx context.Context, trigger string) ([]database.Scan
 var ErrAlreadyQueued = errors.New("library scan is already queued or running")
 
 func (m *Manager) StartLibrary(ctx context.Context, libraryID, trigger string) (database.ScanRun, error) {
-	library, err := m.store.Library(ctx, libraryID)
+	library, err := m.store.LibraryBasic(ctx, libraryID)
 	if err != nil {
 		return database.ScanRun{}, err
 	}
@@ -301,6 +317,17 @@ UPDATE libraries SET last_scan_status='running',last_scan_started_at=?,last_scan
 }
 
 func (m *Manager) scan(ctx context.Context, item job, stage bool) (counters, error) {
+	switch item.library.EffectiveProvider() {
+	case database.ProviderLocal:
+		return m.scanLocal(ctx, item, stage)
+	case database.ProviderWebDAV:
+		return m.scanWebDAV(ctx, item, stage)
+	default:
+		return m.scan115(ctx, item, stage)
+	}
+}
+
+func (m *Manager) scan115(ctx context.Context, item job, stage bool) (counters, error) {
 	rootInfo, err := m.client.FolderInfo(ctx, item.library.RootCID)
 	if err != nil {
 		return counters{}, fmt.Errorf("read root folder: %w", err)
@@ -343,35 +370,173 @@ func (m *Manager) scan(ctx context.Context, item job, stage bool) (counters, err
 				comics = append(comics, file)
 			}
 		}
-		if len(comics) > 0 {
-			slices.SortFunc(comics, func(a, b oneonefive.File) int {
-				if natsort.Less(a.Name, b.Name) {
-					return -1
-				}
-				if natsort.Less(b.Name, a.Name) {
-					return 1
-				}
-				return strings.Compare(a.ID, b.ID)
-			})
-			if item.library.OneShot {
-				if err := m.saveOneShots(ctx, item, current, comics, stage); err != nil {
-					return counts, err
-				}
-				counts.series += int64(len(comics))
-				counts.books += int64(len(comics))
-			} else {
-				if err := m.saveSeries(ctx, item, current, comics, stage); err != nil {
-					return counts, err
-				}
-				counts.series++
-				counts.books += int64(len(comics))
-			}
-		}
-		if err := m.updateProgress(ctx, item.runID, current.RelativePath, counts); err != nil {
+		if err := m.persistDirComics(ctx, item, current, comics, stage, &counts); err != nil {
 			return counts, err
 		}
 	}
 	return counts, nil
+}
+
+func (m *Manager) scanLocal(ctx context.Context, item job, stage bool) (counters, error) {
+	rootClean, err := localfs.CleanRoot(item.library.RootPath)
+	if err != nil {
+		return counters{}, fmt.Errorf("local library root: %w", err)
+	}
+	rootName := path.Base(strings.ReplaceAll(rootClean, "\\", "/"))
+	if rootName == "" || rootName == "/" || rootName == "." {
+		rootName = item.library.Name
+	}
+	visitedReal := map[string]bool{rootClean: true}
+	queue := []queueDir{{
+		CID:          ".",
+		Name:         rootName,
+		RelativePath: rootName,
+		ModifiedAt:   time.Now().UTC(),
+	}}
+	var counts counters
+	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return counts, err
+		}
+		current := queue[0]
+		queue = queue[1:]
+		entries, err := localfs.ListDirectory(rootClean, current.CID)
+		if err != nil {
+			return counts, fmt.Errorf("list %s: %w", current.RelativePath, err)
+		}
+		counts.directories++
+		var comics []oneonefive.File
+		for _, entry := range entries {
+			if entry.IsDir {
+				if entry.RealDirKey != "" {
+					if visitedReal[entry.RealDirKey] {
+						continue
+					}
+					visitedReal[entry.RealDirKey] = true
+				}
+				queue = append(queue, queueDir{
+					CID:          entry.RelPath,
+					Name:         entry.Name,
+					RelativePath: path.Join(current.RelativePath, entry.Name),
+					ModifiedAt:   entry.ModifiedAt,
+				})
+				continue
+			}
+			counts.files++
+			if isComic(entry.Name) {
+				comics = append(comics, oneonefive.File{
+					ID:         entry.RelPath,
+					ParentID:   current.CID,
+					Name:       entry.Name,
+					Size:       entry.Size,
+					CreatedAt:  entry.ModifiedAt,
+					ModifiedAt: entry.ModifiedAt,
+				})
+			}
+		}
+		if err := m.persistDirComics(ctx, item, current, comics, stage, &counts); err != nil {
+			return counts, err
+		}
+	}
+	return counts, nil
+}
+
+func (m *Manager) scanWebDAV(ctx context.Context, item job, stage bool) (counters, error) {
+	if m.webdav == nil {
+		m.webdav = webdav.NewManager()
+	}
+	account, err := m.store.WebDAVAccountSecret(ctx, item.library.WebDAVAccountID)
+	if err != nil {
+		return counters{}, fmt.Errorf("load WebDAV account: %w", err)
+	}
+	rootRemote := webdav.CleanRemotePath(item.library.RootPath)
+	rootName := path.Base(rootRemote)
+	if rootName == "" || rootName == "/" || rootName == "." {
+		rootName = item.library.Name
+	}
+	queue := []queueDir{{
+		CID:          ".",
+		Name:         rootName,
+		RelativePath: rootName,
+		ModifiedAt:   time.Now().UTC(),
+	}}
+	var counts counters
+	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return counts, err
+		}
+		current := queue[0]
+		queue = queue[1:]
+		targetRemote := webdav.JoinRemotePath(rootRemote, current.CID)
+		entries, err := m.webdav.ListDirectory(ctx, account, targetRemote, rootRemote)
+		if err != nil {
+			return counts, fmt.Errorf("list %s: %w", current.RelativePath, err)
+		}
+		counts.directories++
+		var comics []oneonefive.File
+		for _, entry := range entries {
+			if entry.IsDir {
+				queue = append(queue, queueDir{
+					CID:          entry.RelPath,
+					Name:         entry.Name,
+					RelativePath: path.Join(current.RelativePath, entry.Name),
+					ModifiedAt:   entry.ModifiedAt,
+				})
+				continue
+			}
+			counts.files++
+			if isComic(entry.Name) {
+				comics = append(comics, oneonefive.File{
+					ID:         entry.RelPath,
+					ParentID:   current.CID,
+					Name:       entry.Name,
+					Size:       entry.Size,
+					SHA1:       entry.ETag,
+					CreatedAt:  entry.ModifiedAt,
+					ModifiedAt: entry.ModifiedAt,
+				})
+			}
+		}
+		if err := m.persistDirComics(ctx, item, current, comics, stage, &counts); err != nil {
+			return counts, err
+		}
+	}
+	return counts, nil
+}
+
+func (m *Manager) persistDirComics(
+	ctx context.Context,
+	item job,
+	current queueDir,
+	comics []oneonefive.File,
+	stage bool,
+	counts *counters,
+) error {
+	if len(comics) > 0 {
+		slices.SortFunc(comics, func(a, b oneonefive.File) int {
+			if natsort.Less(a.Name, b.Name) {
+				return -1
+			}
+			if natsort.Less(b.Name, a.Name) {
+				return 1
+			}
+			return strings.Compare(a.ID, b.ID)
+		})
+		if item.library.OneShot {
+			if err := m.saveOneShots(ctx, item, current, comics, stage); err != nil {
+				return err
+			}
+			counts.series += int64(len(comics))
+			counts.books += int64(len(comics))
+		} else {
+			if err := m.saveSeries(ctx, item, current, comics, stage); err != nil {
+				return err
+			}
+			counts.series++
+			counts.books += int64(len(comics))
+		}
+	}
+	return m.updateProgress(ctx, item.runID, current.RelativePath, *counts)
 }
 
 func (m *Manager) saveSeries(
@@ -655,7 +820,7 @@ func (m *Manager) scheduler() {
 			if busy {
 				continue
 			}
-			libraries, err := m.store.Libraries(m.ctx, true)
+			libraries, err := m.store.LibrariesBasic(m.ctx, true)
 			if err != nil {
 				m.logger.Error("check scheduled scan", "error", err)
 				continue

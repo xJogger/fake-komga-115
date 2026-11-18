@@ -1,0 +1,1 @@
+Built reader assets are placed in this directory by scripts/build-reader.sh.

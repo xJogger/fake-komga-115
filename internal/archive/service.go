@@ -9,6 +9,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
+	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
 const (
@@ -47,9 +48,22 @@ func NewService(
 	cacheManager *cache.Manager,
 	logger *slog.Logger,
 ) *Service {
+	return NewServiceWithWebDAV(store, client, webdav.NewManager(), cacheManager, logger)
+}
+
+func NewServiceWithWebDAV(
+	store *database.Store,
+	client *oneonefive.Client,
+	webdavManager *webdav.Manager,
+	cacheManager *cache.Manager,
+	logger *slog.Logger,
+) *Service {
+	if webdavManager == nil {
+		webdavManager = webdav.NewManager()
+	}
 	service := &Service{
-		zip: NewZIPService(store, client, cacheManager, logger),
-		rar: NewRARService(store, client, cacheManager, logger),
+		zip: NewZIPServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
+		rar: NewRARServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
 	}
 	service.volumePrefetch = newVolumeIndexPrefetcher(
 		store, service.ListPages, logger,

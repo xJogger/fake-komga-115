@@ -1,8 +1,20 @@
 # syntax=docker/dockerfile:1.7
 
 ARG GO_VERSION=1.26
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
 
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS reader-build
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl python3 tar \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable
+COPY scripts/build-reader.sh ./scripts/build-reader.sh
+COPY web/reader ./web/reader
+RUN mkdir -p internal/httpserver/static/reader_dist \
+    && touch internal/httpserver/static/reader_dist/placeholder.txt \
+    && bash scripts/build-reader.sh
+
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates tzdata
 
@@ -12,6 +24,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY cmd ./cmd
 COPY internal ./internal
+COPY --from=reader-build /src/internal/httpserver/static/reader_dist ./internal/httpserver/static/reader_dist
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -32,9 +45,9 @@ FROM alpine:3.22
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="fake-komga-115" \
-      org.opencontainers.image.description="Lightweight Komga-compatible gateway for 115 Open API" \
+      org.opencontainers.image.description="Komga-compatible manga server for 115 Open API, Local directories, and WebDAV with built-in bookshelf, reader, and Bangumi metadata" \
       org.opencontainers.image.source="https://github.com/xJogger/fake-komga-115" \
-      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.licenses="MIT AND MPL-2.0" \
       org.opencontainers.image.version="${VERSION}"
 
 RUN apk add --no-cache ca-certificates tzdata \

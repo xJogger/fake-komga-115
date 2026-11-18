@@ -49,6 +49,88 @@ ORDER BY b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC`, seriesID)
 	return progress, nil
 }
 
+func (s *Store) SeriesReadProgresses(
+	ctx context.Context,
+	seriesIDs []string,
+) (map[string]SeriesReadProgress, error) {
+	out := make(map[string]SeriesReadProgress, len(seriesIDs))
+	if len(seriesIDs) == 0 {
+		return out, nil
+	}
+	unique := cleanStringSliceCaseSensitive(seriesIDs)
+	args := make([]any, 0, len(unique))
+	for _, id := range unique {
+		args = append(args, id)
+	}
+	query := `
+SELECT b.series_id, b.number_sort,
+ CASE WHEN p.book_id IS NULL THEN 0 ELSE 1 END AS has_progress,
+ coalesce(p.completed,0)
+FROM books b
+LEFT JOIN book_read_progress p ON p.book_id=b.id
+WHERE b.series_id IN ` + Placeholders(len(args)) + `
+ORDER BY b.series_id ASC,b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	continuousMap := make(map[string]bool, len(unique))
+	for _, id := range unique {
+		continuousMap[id] = true
+	}
+	for rows.Next() {
+		var seriesID string
+		var numberSort float64
+		var hasProgress, completed int
+		if err := rows.Scan(&seriesID, &numberSort, &hasProgress, &completed); err != nil {
+			return nil, err
+		}
+		progress := out[seriesID]
+		progress.BooksCount++
+		progress.MaxNumberSort = numberSort
+		switch {
+		case hasProgress != 0 && completed != 0:
+			progress.BooksReadCount++
+			if continuousMap[seriesID] {
+				progress.LastReadContinuousNumberSort = numberSort
+			}
+		case hasProgress != 0:
+			progress.BooksInProgressCount++
+			continuousMap[seriesID] = false
+		default:
+			continuousMap[seriesID] = false
+		}
+		out[seriesID] = progress
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for id, progress := range out {
+		progress.BooksUnreadCount = progress.BooksCount -
+			progress.BooksReadCount - progress.BooksInProgressCount
+		out[id] = progress
+	}
+	return out, nil
+}
+
+func (s *Store) DeleteSeriesReadProgress(ctx context.Context, seriesID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM book_read_progress WHERE series_id=?`, seriesID)
+	return err
+}
+
+func (s *Store) MarkSeriesCompleted(ctx context.Context, seriesID string) error {
+	now := nowText()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO book_read_progress(book_id,series_id,completed,read_date,completed_at,updated_at)
+SELECT id,series_id,1,?,?,? FROM books WHERE series_id=?
+ON CONFLICT(book_id) DO UPDATE SET
+ completed=1,read_date=excluded.read_date,completed_at=excluded.completed_at,updated_at=excluded.updated_at`,
+		now, now, now, seriesID)
+	return err
+}
+
 func (s *Store) UpdateSeriesReadProgress(
 	ctx context.Context,
 	seriesID string,

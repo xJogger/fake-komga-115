@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,10 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -21,20 +24,24 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/xJogger/fake-komga-115/internal/archive"
+	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
+	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
-//go:embed static/admin.html static/web_*.html static/web.css
+//go:embed static/web_*.html static/web.css static/ui static/reader_dist
 var staticFiles embed.FS
 
 type Server struct {
 	store   *database.Store
 	client  *oneonefive.Client
+	webdav  *webdav.Manager
+	bangumi *bangumi.Service
 	scanner *scanner.Manager
 	cache   *cache.Manager
 	archive *archive.Service
@@ -68,7 +75,8 @@ func New(
 	logger *slog.Logger,
 ) *Server {
 	s := &Server{
-		store: store, client: client, scanner: scanManager, cache: cacheManager,
+		store: store, client: client, webdav: webdav.NewManager(),
+		scanner: scanManager, cache: cacheManager,
 		archive: archiveService, thumbs: thumbnailService, covers: coverManager,
 		tasks:   maintenanceManager,
 		runtime: runtimeInfo, logger: logger, placeholder: makePlaceholder(),
@@ -78,46 +86,207 @@ func New(
 	return s
 }
 
+func (s *Server) WithServices(webdavManager *webdav.Manager, bangumiService *bangumi.Service) *Server {
+	if webdavManager != nil {
+		s.webdav = webdavManager
+	}
+	if bangumiService != nil {
+		s.bangumi = bangumiService
+	}
+	return s
+}
+
 func (s *Server) Handler() http.Handler { return s.router }
 
 func (s *Server) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(s.corsMiddleware)
 	r.Use(s.requestLogger)
+	r.Use(s.authMiddleware)
+
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/admin", http.StatusTemporaryRedirect)
-	})
-	r.Get("/setup", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/admin", http.StatusTemporaryRedirect)
-	})
-	r.Get("/admin", s.adminPage)
+
+	// Embedded Bookshelf + Auth + Admin SPA routes
+	r.Get("/", s.serveSPA)
+	r.Get("/setup", s.serveSPA)
+	r.Get("/login", s.serveSPA)
+	r.Get("/libraries", s.serveSPA)
+	r.Get("/libraries/{libraryID}", s.serveSPA)
+	r.Get("/series/{seriesID}", s.serveSeriesPageOrSPA)
+	r.Get("/book/{bookID}", s.serveBookPageOrSPA)
+	r.Get("/books/{bookID}", s.serveBookPageOrSPA)
+	r.Get("/admin", s.serveSPA)
 	r.Get("/admin/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin", http.StatusTemporaryRedirect)
 	})
+	r.Get("/ui/*", s.serveUIAsset)
 	r.Get("/assets/web.css", s.webStyles)
-	r.Get("/series/{seriesID}", s.webSeries)
-	r.Get("/book/{bookID}", s.webBook)
-	r.Get("/books/{bookID}", s.webBook)
+
+	// Built-in Suwayomi Reader routes (/reader/*)
+	r.Get("/reader", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+	})
+	r.Get("/reader/*", s.serveReader)
+
+	// Admin & internal UI API
 	r.Route("/admin/api", s.adminRoutes)
+
+	// Komga v1 & v2 compatibility API
 	r.Route("/api/v1", s.komgaRoutes)
+	r.Get("/api/v2/users/me", s.komgaMe)
+	r.Patch("/api/v2/users/me/password", s.komgaPatchMyPassword)
 	r.Get("/api/v2/series/{seriesID}/read-progress/tachiyomi", s.getSeriesProgress)
 	r.Put("/api/v2/series/{seriesID}/read-progress/tachiyomi", s.putSeriesProgress)
+
 	r.NotFound(s.notFound)
 	return r
 }
 
-func (s *Server) adminPage(w http.ResponseWriter, _ *http.Request) {
-	data, err := staticFiles.ReadFile("static/admin.html")
+func (s *Server) serveSPA(w http.ResponseWriter, _ *http.Request) {
+	data, err := staticFiles.ReadFile("static/ui/app.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(data)
+}
+
+func (s *Server) serveSeriesPageOrSPA(w http.ResponseWriter, r *http.Request) {
+	seriesID := chi.URLParam(r, "seriesID")
+	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.renderNotFound(w)
+			return
+		}
+		s.renderWebError(w, err)
+		return
+	}
+	s.serveSPA(w, r)
+}
+
+func (s *Server) serveBookPageOrSPA(w http.ResponseWriter, r *http.Request) {
+	bookID := chi.URLParam(r, "bookID")
+	if _, err := s.store.BookByID(r.Context(), bookID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.renderNotFound(w)
+			return
+		}
+		s.renderWebError(w, err)
+		return
+	}
+	s.serveSPA(w, r)
+}
+
+func (s *Server) serveUIAsset(w http.ResponseWriter, r *http.Request) {
+	sub, err := fs.Sub(staticFiles, "static/ui")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	rel := strings.TrimPrefix(path.Clean(r.URL.Path), "/ui/")
+	if rel == "" || rel == "." || strings.Contains(rel, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := fs.ReadFile(sub, rel)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	setStaticContentType(w, rel)
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
+}
+
+func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
+	sub, err := fs.Sub(staticFiles, "static/reader_dist")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	rel := strings.TrimPrefix(path.Clean(r.URL.Path), "/reader")
+	rel = strings.TrimPrefix(rel, "/")
+
+	// Convenience redirect: /reader/book/{bookID} -> /reader/series/{seriesID}/book/{bookID}
+	if strings.HasPrefix(rel, "book/") {
+		bookID := strings.TrimPrefix(rel, "book/")
+		if cut := strings.IndexByte(bookID, '/'); cut >= 0 {
+			bookID = bookID[:cut]
+		}
+		if book, err := s.store.BookByID(r.Context(), bookID); err == nil {
+			target := "/reader/series/" + book.SeriesID + "/book/" + book.ID
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+			return
+		}
+	}
+
+	if rel != "" && rel != "." && !strings.Contains(rel, "..") && rel != "placeholder.txt" {
+		if data, err := fs.ReadFile(sub, rel); err == nil {
+			setStaticContentType(w, rel)
+			if strings.HasPrefix(rel, "assets/") {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			} else {
+				w.Header().Set("Cache-Control", "no-cache")
+			}
+			_, _ = w.Write(data)
+			return
+		}
+		// Missing asset files under /reader/assets/ must 404 rather than fall back to index.html
+		if strings.HasPrefix(rel, "assets/") || strings.HasPrefix(rel, "locales/") {
+			http.NotFound(w, r)
+			return
+		}
+	}
+
+	indexBytes, err := fs.ReadFile(sub, "index.html")
+	if err != nil {
+		http.Error(w, "Built-in reader bundle is not compiled yet. Run scripts/build-reader.sh.", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(indexBytes)
+}
+
+func setStaticContentType(w http.ResponseWriter, rel string) {
+	switch strings.ToLower(path.Ext(rel)) {
+	case ".html":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	case ".css":
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	case ".js", ".mjs":
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	case ".json":
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	case ".svg":
+		w.Header().Set("Content-Type", "image/svg+xml")
+	case ".png":
+		w.Header().Set("Content-Type", "image/png")
+	case ".jpg", ".jpeg":
+		w.Header().Set("Content-Type", "image/jpeg")
+	case ".webp":
+		w.Header().Set("Content-Type", "image/webp")
+	case ".woff2":
+		w.Header().Set("Content-Type", "font/woff2")
+	case ".woff":
+		w.Header().Set("Content-Type", "font/woff")
+	case ".ttf":
+		w.Header().Set("Content-Type", "font/ttf")
+	case ".txt":
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	case ".ico":
+		w.Header().Set("Content-Type", "image/x-icon")
+	case ".webmanifest":
+		w.Header().Set("Content-Type", "application/manifest+json")
+	}
 }
 
 func (s *Server) requestLogger(next http.Handler) http.Handler {
@@ -204,7 +373,7 @@ func (s *Server) archiveError(w http.ResponseWriter, err error) {
 		writeError(w, 499, "REQUEST_CANCELED", err.Error())
 	default:
 		s.logger.Error("archive request", "error", err)
-		writeError(w, http.StatusBadGateway, "REMOTE_READ_FAILED", "Failed to read the remote comic archive.")
+		writeError(w, http.StatusBadGateway, "REMOTE_READ_FAILED", "Failed to read the comic archive.")
 	}
 }
 

@@ -1,366 +1,68 @@
 # Architecture
 
-## 1. 请求与数据流
+## 1. 总体数据与请求流（v2）
 
 ```text
-Koharia / Mihon / browser
-       │ Komga-compatible HTTP API
+浏览器（内置书架 / 内置 Suwayomi 阅读器 / /admin） / Mihon / Koharia
+       │  Session Cookie / HTTP Basic Auth / X-API-Key
        ▼
-internal/httpserver
-       ├── SQLite metadata ────────────── internal/database
-       ├── recursive scan ─────────────── internal/scanner
-       ├── 115 Open API ───────────────── internal/oneonefive
-       ├── remote ZIP/RAR reader ──────── internal/archive
-       ├── range/page cache ───────────── internal/cache
-       ├── cover service and jobs ─────── internal/thumbnail
-       └── detail maintenance jobs ────── internal/maintenance
+internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/v1 + /api/v2)
+       ├── SQLite 主库 (鉴权、书库、进度、元数据) ── internal/database
+       ├── Bangumi 双引擎刮削 + 离线索引库 ───────── internal/bangumi
+       ├── 多源递归扫描器 ────────────────────────── internal/scanner
+       ├── 统一归档读取器 (ZIP / RAR) ────────────── internal/archive
+       │     ├── 115 Open API (downurl + Range) ──── internal/oneonefive + internal/cache
+       │     ├── WebDAV (HTTP Range + 分块缓存) ───── internal/webdav + internal/cache
+       │     └── Local FS (*os.File 原生直读) ────── internal/localfs (跳过 Range 缓存)
+       ├── 系列封面与 Bangumi 懒加载封面缓存 ─────── internal/thumbnail
+       └── 单部/系列归档维护任务 ─────────────────── internal/maintenance
 ```
 
-服务启动时只打开 SQLite、初始化组件并启动扫描调度器。漫画内容不会在启动或扫描
-时下载。页面请求的读取路径为：
-
-```text
-Book metadata
-  → cached or refreshed 115 downurl
-  → HTTP Range
-  → range block cache
-  → ZIP/RAR entry parsing
-  → optional page decompression cache
-  → image response
-```
-
-## 2. 进程入口和组件组装
-
-`cmd/server/main.go` 解析：
-
-- `--host` / `FK115_HOST`
-- `--port` / `FK115_PORT`
-- `--data-dir` / `FK115_DATA_DIR`
-- `--open-browser` / `FK115_OPEN_BROWSER`
-- `--version`
-
-`internal/app.New` 依次创建 Store、Cache Manager、115 Client、Scanner、Archive
-Service、Thumbnail Service、Thumbnail Batch Manager、Maintenance Manager 和 HTTP
-Server。关闭时先停止详情页维护任务、封面任务和扫描上下文，再关闭数据库。
-
-Windows 未指定数据目录时使用 `%LOCALAPPDATA%\fake-komga-115\data`，并默认在
-TCP 监听成功后打开本机管理页。Linux 和 macOS 仍默认使用 `./data` 且不主动打开
-浏览器。Docker 镜像通过环境变量把数据目录设为 `/data`，并显式关闭自动打开浏览器；
-容器内进程以非 root 用户运行。监听 socket 在 `App.Start` 中同步绑定，避免端口占用
-时仍误开浏览器。
-
-管理状态 API 会返回规范化后的绝对数据目录、版本和检测到的私有 IPv4 局域网
-地址，供管理页显示 Mihon 配置值；常见容器虚拟网卡会被忽略。
-
-## 3. SQLite 数据模型
-
-主要表：
-
-- `settings`：扫描、限速、Range block、缓存和预读设置。
-- `client_settings`：Koharia/WebUI 等兼容客户端写入的非敏感用户设置。
-- `settings.cors_allowed_origins`：外部纯前端网页阅读器允许跨域访问的精确 Origin 列表，
-  每行一个；空值表示关闭。
-- `provider_accounts`：单个 115 账号的 Access/Refresh Token。
-- `libraries`：115 根目录和普通/One-Shots 模式。
-- `scan_runs`：扫描队列、进度、结果和取消标记。
-- `series`：Komga Series 元数据及 `seen_scan_id`。
-- `books`：115 漫画归档文件元数据及 `seen_scan_id`。
-- `scan_series_staging` / `scan_books_staging`：模式转换的临时完整快照。
-- `zip_indexes`：ZIP 和 RAR 共用的页面索引 JSON、页数和最近一次成功建索引耗时。
-- `series_thumbnails`：生成封面的文件信息、源 Book 版本和最近一次生成耗时。
-- `thumbnail_runs`：手动封面任务的队列、进度、结果、错误摘要和取消标记。
-- `book_read_progress`：Mihon/Komga Tracker 和 Koharia 同步得到的真实阅读状态，
-  包含 Book 级完成状态、可选页码和最近同步时间。
-- `book_page_progress`：页面图片成功返回后推断出的最近加载页、最大加载页和页数。
-- `book_download_stats`：实际从 115 downurl 成功读取 Range 的累计字节、耗时和次数。
-- `maintenance_runs`：Series / Book 信息页手动封面和索引任务的持久化进度。
-- `downurl_cache`：短期 downurl 和 User-Agent。
-- `cache_entries`：Range/Page 磁盘缓存的大小与访问时间。
-
-数据库启用 WAL、foreign keys 和 busy timeout。新字段必须同时更新 fresh schema 和
-升级迁移。当前迁移通过 `PRAGMA table_info` 判断缺失列。
-
-Komga Book DTO 的 `created` 和 `metadata.created` 优先使用 `books.file_created_at`
-（115 文件创建时间），仅在旧数据缺失该字段时回退到本地数据库记录创建时间。
-
-Series 的 `createdDate` 排序取其所有 Book 中最大的 `file_created_at`，而
-`lastModifiedDate` 排序取最大的 `file_modified_at`。这样普通多卷 Series 和
-One-Shots 使用相同语义，并且不会按扫描写入数据库的时间排序。
-
-## 4. 稳定 ID
-
-`internal/id` 使用 URL-safe Base64 编码：
-
-- Library：根目录 CID
-- 普通 Series：Library ID + 目录 CID
-- One-Shot Series：Library ID + `file:<fileID>`
-- Book：Library ID + 115 File ID
-
-因此同名目录或文件仍由 115 ID 区分。不要改成仅根据显示名称生成 ID。
-
-## 5. 扫描模型
-
-扫描器只有一个 worker，同时最多执行一个扫描任务，但队列可以包含多个 Library。
-115 API 调用由共享 rate limiter 限速。
-
-### 5.1 普通模式
-
-使用广度优先队列递归列出目录：
-
-1. 每次 `ListDirectory` 得到子目录和文件元数据。
-2. 子目录进入队列。
-3. 当前目录有支持的漫画归档时，目录成为一个 Series。
-4. 文件按自然顺序成为 Book。
-5. 只有子目录而没有直接漫画文件的目录不生成 Series。
-
-### 5.2 One-Shots
-
-仍然递归遍历全部目录，但每个支持的归档文件创建一个独立 Series 和一个 Book：
-
-- Series 名称：文件名去扩展名
-- Book 名称：原始文件名
-- Series ID：基于 File ID
-- 同名文件允许存在
-
-### 5.3 成功提交和模式转换
-
-同模式重扫直接 upsert，并用当前 `seen_scan_id` 标记记录。只有扫描成功后才删除
-未出现的旧 Book/Series。
-
-模式转换不能直接覆盖旧结构。扫描先把目标结构写入 staging 表；全部目录成功后，
-在单个 SQLite 事务中删除旧结构、导入 staging 数据并清空 staging。失败、取消或
-服务重启只清理 staging，上一次完整结构仍可读取。
-
-## 6. 115 客户端
-
-`internal/oneonefive` 包装 `github.com/OpenListTeam/115-sdk-go`：
-
-- 从 SQLite 加载 Token。
-- SDK 刷新 Token 后回写 SQLite。
-- 用 `golang.org/x/time/rate` 限制 API 请求速率。
-- `GetFiles` 每页最多请求 1150 项并按文件名升序。
-- 列表结果转换为内部 `File`，保留 ID、Parent ID、Size、Pick Code、SHA1 和时间。
-- downurl 与请求使用的 User-Agent 必须配套。
-
-任何调用方都不能记录 Token 或完整 downurl。
-
-## 7. 远程 Range Reader
-
-`archive.RemoteReaderAt` 为 Go ZIP reader 和 RAR 文件系统提供 `ReadAt`：
-
-1. 按配置的 block size 对齐读取。
-2. 缓存键包含 File ID、Size、SHA1、block size 和 block index。
-3. 读取 downurl cache；快过期时重新请求。
-4. 发出带 `Range` 和 `Accept-Encoding: identity` 的 GET。
-5. 必须得到 `206 Partial Content` 和准确字节数。
-6. 401/403/404/416 会使 downurl 失效并重试一次。
-7. 返回 200 表示远端不支持 Range，映射为 `ErrRangeNotSupported`。
-
-完整 downurl 只存在 SQLite 和内存中，不应出现在日志或 API 返回。
-成功从远端读取的 Range block 会按 Book 累加到 `book_download_stats`。缓存命中、
-等待同一个 inflight 下载结果和失败请求不计入真实下载速度。
-
-## 8. ZIP 页面
-
-ZIP 使用标准库 `archive/zip.NewReader` 读取 central directory：
-
-- 忽略目录、`__MACOSX`、`.DS_Store` 和 `Thumbs.db`。
-- 只把 JPEG、PNG、WebP、GIF、AVIF 作为页面。
-- 页面按自然文件名排序。
-- 只支持 Store 和 Deflate；加密或其他压缩方法返回不支持。
-- Store 页面直接读取；Deflate 页面按需解压并进入 Page cache。
-- 校验解压大小和 CRC32。
-
-## 9. RAR 页面
-
-RAR 使用 `rardecode/v2` 和一个只暴露单个远程 `archive.rar` 的 `fs.FS`：
-
-- 建索引时使用较小的 RAR index block。
-- 读取页面压缩数据时切换到普通 Range block。
-- 页面索引保存 archive entry 的位置、名称和大小。
-- 每次读页重新列出文件头并验证 entry 没有变化。
-- 拒绝固实、加密、分卷、未知大小和超出字典上限的归档。
-- 解压结果进入 Page cache。
-
-## 10. 缓存
-
-### Range cache
-
-保存远程文件字节块。对 ZIP Store 页面也会复用。默认上限 10 GiB。
-
-### Page cache
-
-保存已解压的 ZIP Deflate 或 RAR 图片。默认上限 5 GiB。
-
-### Archive index
-
-保存在 SQLite，按 `BookVersion` 失效。`BookVersion` 包含 File ID、格式、Size、
-SHA1 和修改时间。首次建立或强制重建成功时记录本次索引耗时；直接命中已有索引
-不会更新耗时。
-
-### Thumbnail
-
-用户请求 Series 第一本 Book 的第一页后异步生成。输入像素数有限制，输出 JPEG
-质量 75，最长边 300px。数据库记录源 Book 和版本，源变化后自动失效。
-成功生成时记录最近一次封面生成耗时。阅读触发的自动封面只统计压缩写入阶段；
-手动详情页任务和管理页批量任务会把读取第一页到写入封面的总耗时写回该字段。
-
-管理页也可以按 Library 启动后台封面任务：
-
-- `latest` 模式按 Series 中最大 `books.file_modified_at` 降序选择最新 N 个，默认
-  N 为 50。
-- `all` 模式选择 Library 中全部含 Book 的 Series。
-- 每个 Series 只取自然排序第一本 Book 的第一页；有效封面直接跳过。
-- 全局单 worker 串行执行。单个 Series 失败只记录有限且脱敏的错误摘要，后续继续。
-- 任务进度持久化在 `thumbnail_runs`，支持取消；服务重启会把未完成任务标记失败。
-
-Range/Page 缓存使用 SQLite 中的 `last_access_at` 按最久未使用顺序淘汰。并发读取
-同一缓存键时由 inflight flight 合并。
-
-### 下一卷索引预读
-
-`volume_index_prefetch_enabled` 默认关闭；
-`volume_index_prefetch_remaining_pages` 默认 10，管理 API 限制为 1–100。
-
-具体页面成功返回后，HTTP 层把当前 Book、页码和总页数提交给
-`VolumeIndexPrefetcher`。达到阈值时，它按
-`number_sort, name COLLATE NOCASE, id` 查找同一 Series 的下一本 Book，并仅调用
-`ListPages` 建立 ZIP central directory 或 RAR 文件头索引，不调用 `ReadPage`。
-
-预读器只有一个 worker，因此全局串行；queued 和 active 使用 Book ID 加文件版本
-去重。One-Shots、单 Book Series、Series 最后一本以及未达到阈值的请求直接跳过。
-失败只记录不含 URL、Token 和用户路径的分类日志，不影响当前页面响应。
-
-### 阅读进度
-
-Mihon 的 Komga Tracker 使用 `/api/v2/series/{seriesId}/read-progress/tachiyomi`：
-
-- `PUT` 请求体只包含 `lastBookNumberSortRead`，表示自然顺序中
-  `number_sort <= lastBookNumberSortRead` 的现有 Book 已读。服务端严格以该值覆盖
-  当前 Series 的 Book 级已读状态，允许前进和回退。
-- `GET` 返回 `booksCount`、`booksReadCount`、`booksUnreadCount`、
-  `booksInProgressCount`、`lastReadContinuousNumberSort` 和 `maxNumberSort`。
-  `booksInProgressCount` 不受图片加载推断页码影响，只来自真实同步的 Book 进度。
-
-Koharia 和外部 Web 前端使用 Komga Book 进度接口同步页码：
-
-- `GET /api/v1/books/{bookId}/read-progress` 返回单本真实同步进度；无记录时返回 `null`。
-- `PATCH /api/v1/books/{bookId}/read-progress` 接收 `page` 和可选 `completed`。
-  没有 `completed=true` 时保存为 `IN_PROGRESS`；`completed=true` 时保存为 `READ`。
-- `DELETE /api/v1/books/{bookId}/read-progress` 删除单本真实同步进度，用于标记未读。
-- `GET /api/v1/books/{bookId}`、`GET /api/v1/books` 和
-  `GET /api/v1/series/{seriesId}/books` 会在 Book DTO 中返回 `readProgress`。
-- `read_status` 筛选严格使用 `book_read_progress`：无记录为 `UNREAD`，有记录且
-  `completed=0` 为 `IN_PROGRESS`，`completed=1` 为 `READ`。Series 的
-  `IN_PROGRESS` 包含已有部分真实进度但尚未全 Series 完成的情况。
-
-页面图片成功写入响应后，HTTP 层调用 `RecordBookPageProgress` 记录该 Book 的
-`last_loaded_page`、`max_loaded_page`、`page_count` 和更新时间。这个数据来自图片加载
-请求，可能被客户端预读推进，因此不能用于自动标记 Book 已读，也不能反向恢复 Mihon
-或 Koharia 本地的页码位置。
-
-### 详情页维护任务和性能统计
-
-`internal/maintenance` 提供一个全局串行 worker，处理 Series / Book 信息页发起的
-维护任务：
-
-- `book_index`：为当前 Book 建立归档索引。
-- `series_index`：为当前 Series 的全部 Book 建立归档索引。
-- `series_thumbnail`：用当前 Series 第一本 Book 的第一页生成系列封面。
-
-默认模式会跳过当前文件版本已有的索引或有效封面；强制模式会重新读取并覆盖。
-强制按钮在前端使用警示样式和二次确认。任务进度写入 `maintenance_runs`，包括
-总数、已处理、生成、跳过、失败、当前条目、有限错误摘要和取消标记。取消不会主动
-中断当前正在处理的条目，而是在条目结束后尽快停止后续条目；服务重启会把未完成
-任务标记为失败。
-
-Series 信息页显示当前版本已建索引数量、平均索引耗时、最近索引完成时间、系列封面
-生成耗时和该 Series 下真实 Range 下载平均速度。Book 信息页显示当前 Book 的索引
-状态、索引耗时和真实 Range 下载平均速度。管理页状态区域只显示全局平均索引耗时、
-平均封面耗时和真实 Range 下载平均速度。
-
-## 11. HTTP 层
-
-路由分为：
-
-- `/admin`：内嵌管理页面。
-- `/series/{id}`、`/book/{id}`、`/books/{id}`：Mihon WebView 使用的本地信息页。
-- `/admin/api/*`：账号、Library、设置、扫描、封面任务、维护任务和缓存管理。
-- `/admin/api/maintenance-jobs`：详情页手动封面/索引维护任务的创建、查询和取消。
-- `/api/v1/*`：Komga 兼容的 Library、Series、Book、Pages、图片，Koharia 所需
-  client-settings / structured search，以及纯前端网页阅读器所需的 capabilities、
-  Book previous/next、单本 read-progress 删除端点。
-- `/api/v2/series/{id}/read-progress/tachiyomi`：Mihon 所需的简化阅读进度端点。
-- `/health`：健康检查。
-
-跨域中间件只作用于 `/api/v1/*` 和 `/api/v2/*`。管理 API 不暴露 CORS header，避免
-外部网页阅读器获得跨域管理能力。允许列表来自 `cors_allowed_origins` 设置，采用精确
-Origin 匹配，不支持通配；OPTIONS 预检会返回标准 CORS header，并在浏览器请求包含
-`Access-Control-Request-Private-Network: true` 时返回
-`Access-Control-Allow-Private-Network: true`。
-
-Komga API 是有意裁剪的兼容层。集合、元数据和分页字段以 Mihon / Koharia 实际
-需要为准。未实现的缩略图返回占位图；collection/readlist 等返回空集合。
-`POST /api/v1/series/list` 和 `POST /api/v1/books/list` 只解析 Library、One-Shot、
-read status、全文搜索和排序等本项目有真实数据支撑的条件。genre、tag、author、
-publisher、collection 等缺少元数据的结构化筛选会返回空结果，而不是忽略条件后
-返回全部。
-
-`/api/v1/client-settings/user/list` 和 `PATCH /api/v1/client-settings/user` 只保存
-`koharia.*` 与 `webui.*` 前缀的非敏感 key，并限制 key/value 长度；Token、Cookie、
-Authorization 和 password 类 key 会被拒绝。该表用于兼容 Koharia 的 viewerFlags
-和 Komga WebUI library 排序，不属于服务端账号配置。
-
-WebView 信息页初始渲染只查询 SQLite，并通过现有 Series thumbnail 端点显示已缓存
-封面。普通 Book 页面不显示封面，One-Shots Book 页面可以显示已有封面；打开信息页
-本身不触发 downurl、归档索引或页面读取。只有用户点击手动维护按钮后，后台任务才会
-按需读取归档索引或系列第一本第一页。Series / Book 信息页会显示 Mihon 同步的卷级
-已读状态、Koharia 同步的页级状态，以及从页面图片请求推断出的最近加载页和最大
-加载页。该推断页码可能包含客户端预读页面，只用于展示，不影响真实同步状态。
-浏览器路由的 404 返回自适应 HTML，API 路由的 404 仍保持 JSON。
-
-## 12. 错误映射
-
-归档错误在 HTTP 层转换为稳定状态码：
-
-- Range 不支持：501
-- 页面超过限制：413
-- 损坏或不支持的 ZIP/RAR：422
-- 不支持的归档类型：415
-- 请求取消：499
-- 其他远程读取错误：502
-
-不要把包含敏感 URL 或 Token 的底层错误直接返回给客户端。
-
-## 13. 测试策略
-
-- `internal/archive/*_integration_test.go` 使用本地 HTTP Range mock。
-- `internal/httpserver/server_integration_test.go` 验证 Mihon/Komga 合同。
-- `internal/scanner/manager_test.go` 验证 One-Shots 和事务式模式转换。
-- `internal/thumbnail/batch_test.go` 验证最新 N 选择、跳过、失败继续和取消。
-- `internal/maintenance/manager_test.go` 验证详情页维护任务的生成、跳过和取消。
-- `internal/database/migrations_test.go` 从旧 schema 验证升级。
-- `internal/cache`、`internal/id`、`internal/natsort` 和 `internal/thumbnail` 有单元测试。
-
-测试不需要真实 115 账号，也不应连接真实私人服务。
-
-## 14. 发布
-
-推送 `v*` Tag 会触发两个发布工作流。
-
-`.github/workflows/release.yml` 先执行测试和 vet，然后以 `CGO_ENABLED=0`
-交叉编译 Windows amd64、Linux amd64/arm64、macOS amd64/arm64。每个平台产物和
-README、LICENSE 一起打包，最后生成 `SHA256SUMS` 并创建 GitHub Release。
-
-`.github/workflows/docker.yml` 使用 Docker Buildx 构建 `linux/amd64` 和
-`linux/arm64` 多架构镜像，并推送到 `blacktal/fake-komga-115`。镜像标签包括
-`latest`、原始 Git Tag（如 `v1.3.0`）、不带 `v` 的完整语义版本（如 `1.3.0`）
-以及 minor 标签（如 `1.3`）。Docker Hub 凭据只来自 GitHub Actions secrets，
-不要写入仓库。
-
-GitHub Release 的正文不再只依赖自动生成说明。发布 `vX.Y.Z` 前必须提交
-`docs/release-notes/vX.Y.Z.md`；Release 工作流会检查该文件并用它作为发布说明，缺失
-时直接失败。
-
-二进制 Release 和 Docker 构建都通过 `-ldflags -X` 把 Tag 写入
-`internal/buildinfo.Version`；普通源码构建显示开发版本。
+核心原则保持不变：**启动和扫描阶段绝不下载或打开漫画压缩包内容**；只有用户打开某一卷的页表或翻到具体某页时，才按需读取对应字节区间。
+
+## 2. 鉴权与会话安全
+
+1. **状态判定**：服务端通过 `auth_admin` 表是否存在管理员记录判定是否已完成初始化（`HasAdmin`）。
+2. **首次安装与升级平滑拦截**：
+   - 未初始化时，`GET /health` 保持公开；浏览器页面统一 `307` 跳转至 `/setup`，API 请求统一返回 `401 SETUP_REQUIRED`。
+   - 用户在 `/setup`（或 Komga 标准 `POST /api/v1/claim`）自定义用户名与密码后，密码经 `argon2id`（`time=3, memory=64MiB, threads=4`）哈希落库，此后 `/setup` 与 `/api/v1/claim` 永久关闭。
+3. **三种认证凭证**：
+   - **Session Cookie**：`fk115_session` 与兼容 Cookie `KOMGA-SESSION`（`HttpOnly`, `SameSite=Lax`），支持 90 天记住登录；数据库仅存 `SHA-256(token)`。
+   - **API Key**：`X-API-Key` 请求头，支持在后台创建多个命名密钥、查看前缀与最近使用时间并随时吊销；数据库仅存 `SHA-256(key)`。
+   - **HTTP Basic Auth**：完整兼容 Mihon Komga 扩展与 Koharia。内存维护短时（5 分钟 TTL）凭据校验摘要缓存，避免高并发图片流重复触发 `argon2id` CPU 开销。当非浏览器 XHR 请求未认证时返回标准 `WWW-Authenticate: Basic` 头以触发 Mihon OkHttp Authenticator；内置前端请求附带 `X-FK115-UI: 1` 头以抑制浏览器原生弹窗。
+
+## 3. 多存储源（115 / 本地目录 / WebDAV）与兼容升级
+
+- `libraries` 表通过 `provider_type`（`115` | `local` | `webdav`）、`webdav_account_id`、`root_path` 区分来源：
+  - **115 网盘（`115`）**：完全保留 v1 的 `id.Library(rootCID)`、`id.Series(libraryID, dirCID)`、`id.Book(libraryID, fileID)` 公式，现有几万系列与阅读进度、归档索引升级后 100% 原地保留。
+  - **本地目录（`local`）**：`root_cid` 设为 `"local:" + cleanRootPath` 以满足唯一约束；扫描使用 `os.ReadDir`；读取归档时直接使用 `*os.File` 实现 `io.ReaderAt`，**完全绕过 Range 分块磁盘缓存**，避免本机磁盘双份占用。
+  - **WebDAV（`webdav`）**：支持在 `webdav_accounts` 表配置多个 WebDAV 源（支持自定义限速与局域网自签名证书 `insecureTls`）；扫描通过 `PROPFIND Depth: 1` 递归列出目录；读取归档时通过 HTTP `Range: bytes=start-end` 复用 `RemoteReaderAt` 与 Range 分块缓存。
+
+## 4. Bangumi (`bgm.tv`) 双引擎元数据刮削与封面懒缓存
+
+针对数万部命名不规范漫画目录的自动刮削与性能需求，`internal/bangumi` 采用双引擎架构，且全程强制 `nsfw=false`：
+
+1. **多规则漫画目录名清洗器（`parser.go` + `cjk.go`）**：
+   - 内置繁简与日文新字体归一映射表；
+   - 自动解析 `[书名][作者][出版社][卷数]`、`[作者] 书名`、末尾卷话后缀（`Vol.01-12`、`全18卷`、`完结`）、版本后缀（`完全版`、`爱藏版`、`新装版`、`电子版`、`扫图`）及常见出版社标记，生成候选搜索词与作者提示。
+2. **引擎一：官方 `bangumi/Archive` 本地离线 SQLite 索引（批量主力）**：
+   - 后台一键从 `bangumi/Archive` 拉取最新公开快照并校验 SHA256，流式解析 `subject.jsonlines` 与 `subject-relations.jsonlines`：仅保留 `type=1`（书籍）且 `nsfw=false` 的条目，识别并剔除从属于系列主条目的单行本分卷（`relation_type=1003`），解析 MediaWiki Infobox 提取作者/作画/原作/出版社/连载状态/别名，写入独立 `data/bangumi/bangumi-archive.db`。
+   - 几万部漫画批量刮削全程在本地完成，无外部 API 频率限制。
+3. **引擎二：实时 `api.bgm.tv/v0` 客户端（单部搜索与兜底）**：
+   - 在作品详情页支持按关键词或直接输入 Bangumi Subject ID / URL 实时检索候选并一键绑定。
+4. **显示、锁定与按需封面缓存**：
+   - 刮削命中后存入 `series_metadata`：展示优先使用中文译名（`title`），同时保留原始目录名 `series.name` 可搜索、详情页可见；支持 Komga 标准 `*Lock` 字段锁。
+   - 封面支持 `auto`（默认优先 Bangumi 官方封面，回退首卷首页）、`bangumi`、`book` 三档切换。Bangumi 封面在首次请求 `/api/v1/series/{id}/thumbnail` 时通过 `singleflight` 按需拉取并落盘缓存至 `data/thumbnails/bangumi/{subjectId}.jpg`，批量刮削数万条目时零图片网络风暴。
+
+## 5. 内置书架、管理后台与网页阅读器
+
+- **内置书架与后台 SPA（`internal/httpserver/static/ui/`）**：
+  - 零外部运行时依赖，覆盖 `/setup`、`/login`、`/`（继续阅读、最近更新、最新入库）、`/libraries`（多维筛选与排序）、`/series/{id}`（阅读入口、Bangumi 匹配弹窗、元数据编辑弹窗、Mihon 维护统计抽屉、卷列表）、`/book/{id}` 及 `/admin`（概览、115/WebDAV/本地存储源、书库目录选择器、Bangumi 刮削中心、后台任务、缓存与安全设置）。
+  - 任务状态采用自适应轮询：仅当存在 `queued`/`running` 任务且页面可见（`!document.hidden`）时轮询，空闲状态下零后台请求刷屏。
+- **内置网页阅读器（`/reader/*`，`web/reader/` + `scripts/build-reader.sh`）**：
+  - 基于上游 `Suwayomi/Suwayomi-WebUI`（`MPL-2.0`）的独立阅读器构建，通过 `KomgaHostBridge` 将 Apollo 操作内存桥接至同源 `/api/v1/*` Komga REST 接口，无 GraphQL / WebSocket 依赖。
+  - 支持右翻双页拼合（宽图跨页自动独占）、单页、条漫长图滚动、键盘快捷键、触控热区、阅读进度双向防抖同步（`PATCH /api/v1/books/{id}/read-progress` + `pagehide` keepalive 刷新）以及跨卷无缝切换。
+
+## 6. 纯 Go 构建与移动端就绪
+
+服务端保持 `100% CGO_ENABLED=0`（`modernc.org/sqlite`、`rardecode/v2`、`golang.org/x/crypto/argon2`）。`internal/app.App` 提供独立于 CLI 的 `Start()`、`ListenAddr()`、`Shutdown()` 与 `Close()` 生命周期接口，后续可直接由 `gomobile bind` 封装为 Android 本地服务配合 WebView 壳打包原生 APK。

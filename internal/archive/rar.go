@@ -21,6 +21,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/natsort"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
+	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
 const remoteRARName = "archive.rar"
@@ -28,6 +29,7 @@ const remoteRARName = "archive.rar"
 type RARService struct {
 	store  *database.Store
 	client *oneonefive.Client
+	webdav *webdav.Manager
 	cache  *cache.Manager
 	logger *slog.Logger
 }
@@ -38,7 +40,19 @@ func NewRARService(
 	cacheManager *cache.Manager,
 	logger *slog.Logger,
 ) *RARService {
-	return &RARService{store: store, client: client, cache: cacheManager, logger: logger}
+	return NewRARServiceWithWebDAV(store, client, webdav.NewManager(), cacheManager, logger)
+}
+
+func NewRARServiceWithWebDAV(
+	store *database.Store,
+	client *oneonefive.Client,
+	webdavManager *webdav.Manager,
+	cacheManager *cache.Manager,
+	logger *slog.Logger,
+) *RARService {
+	return &RARService{
+		store: store, client: client, webdav: webdavManager, cache: cacheManager, logger: logger,
+	}
 }
 
 func (r *RARService) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
@@ -160,7 +174,7 @@ func (r *RARService) listFiles(
 	indexBlockSize := r.store.Int64Setting(ctx, "rar_index_block_size", 64<<10)
 	dataBlockSize := r.store.Int64Setting(ctx, "range_block_size", 1<<20)
 	remoteFS := newRemoteArchiveFS(
-		ctx, book, r.store, r.client, r.cache, r.logger, indexBlockSize, dataBlockSize,
+		ctx, book, r.store, r.client, r.webdav, r.cache, r.logger, indexBlockSize, dataBlockSize,
 	)
 	maxDictionarySize := r.store.Int64Setting(ctx, "rar_max_dictionary_size", 100<<20)
 	if maxDictionarySize < 256<<10 {
@@ -173,6 +187,9 @@ func (r *RARService) listFiles(
 		rardecode.MaxDictionarySize(maxDictionarySize),
 	)
 	if err != nil {
+		if remoteFS.lastOpenErr != nil {
+			return nil, remoteFS, remoteFS.lastOpenErr
+		}
 		return nil, remoteFS, mapRARError(err)
 	}
 	return files, remoteFS, nil
@@ -276,15 +293,17 @@ func mapRARError(err error) error {
 }
 
 type remoteArchiveFS struct {
-	ctx       context.Context
-	book      database.Book
-	store     *database.Store
-	client    *oneonefive.Client
-	cache     *cache.Manager
-	logger    *slog.Logger
-	indexSize int64
-	dataSize  int64
-	dataMode  atomic.Bool
+	ctx         context.Context
+	book        database.Book
+	store       *database.Store
+	client      *oneonefive.Client
+	webdav      *webdav.Manager
+	cache       *cache.Manager
+	logger      *slog.Logger
+	indexSize   int64
+	dataSize    int64
+	dataMode    atomic.Bool
+	lastOpenErr error
 }
 
 func newRemoteArchiveFS(
@@ -292,6 +311,7 @@ func newRemoteArchiveFS(
 	book database.Book,
 	store *database.Store,
 	client *oneonefive.Client,
+	webdavManager *webdav.Manager,
 	cacheManager *cache.Manager,
 	logger *slog.Logger,
 	indexSize, dataSize int64,
@@ -303,8 +323,8 @@ func newRemoteArchiveFS(
 		dataSize = 1 << 20
 	}
 	return &remoteArchiveFS{
-		ctx: ctx, book: book, store: store, client: client, cache: cacheManager,
-		logger: logger, indexSize: indexSize, dataSize: dataSize,
+		ctx: ctx, book: book, store: store, client: client, webdav: webdavManager,
+		cache: cacheManager, logger: logger, indexSize: indexSize, dataSize: dataSize,
 	}
 }
 
@@ -321,14 +341,18 @@ func (r *remoteArchiveFS) Open(name string) (fs.File, error) {
 	if r.dataMode.Load() {
 		blockSize = r.dataSize
 	}
-	reader := NewRemoteReaderAtWithBlockSize(
-		r.ctx, r.book, r.store, r.client, r.cache, r.logger, blockSize,
+	reader, err := openBookReaderAt(
+		r.ctx, r.book, r.store, r.client, r.webdav, r.cache, r.logger, blockSize,
 	)
+	if err != nil {
+		r.lastOpenErr = err
+		return nil, err
+	}
 	return &remoteArchiveFile{reader: reader, size: r.book.Size, name: remoteRARName}, nil
 }
 
 type remoteArchiveFile struct {
-	reader *RemoteReaderAt
+	reader ReaderAtCloser
 	size   int64
 	offset int64
 	name   string
@@ -364,6 +388,9 @@ func (r *remoteArchiveFile) Stat() (fs.FileInfo, error) {
 }
 
 func (r *remoteArchiveFile) Close() error {
+	if r.reader != nil {
+		return r.reader.Close()
+	}
 	return nil
 }
 

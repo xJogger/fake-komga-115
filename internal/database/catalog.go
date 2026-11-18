@@ -9,14 +9,21 @@ import (
 )
 
 type SeriesQuery struct {
-	Search     string
-	LibraryIDs []string
-	ReadStatus []string
-	OneShot    *bool
-	Empty      bool
-	Page       int
-	Size       int
-	Sort       string
+	Search       string
+	LibraryIDs   []string
+	ReadStatus   []string
+	Statuses     []string
+	Genres       []string
+	Tags         []string
+	Publishers   []string
+	Authors      []string
+	Languages    []string
+	ScrapeStatus string
+	OneShot      *bool
+	Empty        bool
+	Page         int
+	Size         int
+	Sort         string
 }
 
 type BookQuery struct {
@@ -24,6 +31,8 @@ type BookQuery struct {
 	LibraryIDs []string
 	SeriesID   string
 	ReadStatus []string
+	Tags       []string
+	Authors    []string
 	OneShot    *bool
 	Empty      bool
 	Page       int
@@ -42,14 +51,14 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 	if q.Empty {
 		return nil, 0, nil
 	}
-	where, args := buildFilters(q.Search, q.LibraryIDs, "", q.OneShot)
-	where, args = addReadStatusFilter(where, args, q.ReadStatus, "series")
+	where, args := buildSeriesFilters(q)
 	var total int64
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM series s`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	order := "s.name COLLATE NOCASE ASC,s.id ASC"
+	dir := sortDirection(strings.ToLower(strings.TrimSpace(q.Sort)))
 	sortValue := strings.ToLower(strings.TrimSpace(q.Sort))
+	order := `COALESCE(NULLIF((SELECT sm.title_sort FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) COLLATE NOCASE ASC,s.id ASC`
 	switch {
 	case strings.Contains(sortValue, "random"):
 		order = "RANDOM()"
@@ -57,14 +66,16 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 		order = `COALESCE(
  (SELECT MAX(b.file_modified_at) FROM books b WHERE b.series_id=s.id),
  s.file_modified_at,s.updated_at
-) ` + sortDirection(sortValue) + `,s.name COLLATE NOCASE ASC,s.id ASC`
+) ` + dir + `,s.name COLLATE NOCASE ASC,s.id ASC`
 	case strings.HasPrefix(sortValue, "createddate"):
 		order = `COALESCE(
  (SELECT MAX(b.file_created_at) FROM books b WHERE b.series_id=s.id),
  s.created_at
-) ` + sortDirection(sortValue) + `,s.name COLLATE NOCASE ASC,s.id ASC`
+) ` + dir + `,s.name COLLATE NOCASE ASC,s.id ASC`
+	case strings.HasPrefix(sortValue, "bgmscore"):
+		order = `COALESCE((SELECT sm.bgm_score FROM series_metadata sm WHERE sm.series_id=s.id), -1) ` + dir + `,s.name COLLATE NOCASE ASC,s.id ASC`
 	case strings.Contains(sortValue, ",desc"):
-		order = "s.name COLLATE NOCASE DESC,s.id DESC"
+		order = `COALESCE(NULLIF((SELECT sm.title_sort FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) COLLATE NOCASE DESC,s.id DESC`
 	}
 	query := `
 SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified_at,s.created_at,s.updated_at,
@@ -123,10 +134,13 @@ func (s *Store) BooksPage(ctx context.Context, q BookQuery) ([]Book, int64, erro
 		return nil, 0, err
 	}
 	order := "b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC"
-	sortValue := strings.ToLower(q.Sort)
+	sortValue := strings.ToLower(strings.TrimSpace(q.Sort))
 	switch {
 	case strings.Contains(sortValue, "random"):
 		order = "RANDOM()"
+	case strings.HasPrefix(sortValue, "readprogress.readdate"), strings.HasPrefix(sortValue, "readdate"):
+		order = `COALESCE((SELECT p.updated_at FROM book_read_progress p WHERE p.book_id=b.id), '') ` +
+			sortDirection(sortValue) + `,b.number_sort ASC,b.id ASC`
 	case strings.HasPrefix(sortValue, "lastmodifieddate"):
 		order = "COALESCE(b.file_modified_at,b.updated_at) " +
 			sortDirection(sortValue) + ",b.name COLLATE NOCASE ASC,b.id ASC"
@@ -183,6 +197,35 @@ FROM books b LEFT JOIN zip_indexes z ON z.book_id=b.id WHERE b.id=?`, id).Scan(
 	item.CreatedAt = parseTime(created)
 	item.UpdatedAt = parseTime(updated)
 	return item, nil
+}
+
+func (s *Store) SeriesByIDs(ctx context.Context, ids []string) (map[string]Series, error) {
+	out := make(map[string]Series, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	unique := cleanStringSliceCaseSensitive(ids)
+	args := make([]any, 0, len(unique))
+	for _, id := range unique {
+		args = append(args, id)
+	}
+	query := `
+SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified_at,s.created_at,s.updated_at,
+ (SELECT count(*) FROM books b WHERE b.series_id=s.id)
+FROM series s WHERE s.id IN ` + Placeholders(len(args))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items, err := scanSeriesRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		out[item.ID] = item
+	}
+	return out, nil
 }
 
 func (s *Store) FirstBookInSeries(ctx context.Context, seriesID string) (Book, error) {
@@ -253,52 +296,107 @@ SELECT
 	return
 }
 
-func buildFilters(search string, libraries []string, alias string, oneShot *bool) (string, []any) {
-	prefix := alias
-	if prefix == "" {
-		prefix = "s"
-	}
+func buildSeriesFilters(q SeriesQuery) (string, []any) {
 	clauses := []string{
-		"EXISTS (SELECT 1 FROM libraries enabled_library WHERE enabled_library.id=" +
-			prefix + ".library_id AND enabled_library.enabled=1)",
+		"EXISTS (SELECT 1 FROM libraries enabled_library WHERE enabled_library.id=s.library_id AND enabled_library.enabled=1)",
 	}
 	var args []any
-	if search = strings.TrimSpace(search); search != "" {
-		clauses = append(clauses, prefix+`.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
-		args = append(args, "%"+escapeLike(search)+"%")
+	if search := strings.TrimSpace(q.Search); search != "" {
+		like := "%" + escapeLike(search) + "%"
+		clauses = append(clauses, `(
+ s.name LIKE ? ESCAPE '\' COLLATE NOCASE
+ OR EXISTS (
+  SELECT 1 FROM series_metadata sm_search
+  WHERE sm_search.series_id=s.id
+  AND (
+   sm_search.title LIKE ? ESCAPE '\' COLLATE NOCASE
+   OR sm_search.alternate_titles_json LIKE ? ESCAPE '\' COLLATE NOCASE
+  )
+ )
+)`)
+		args = append(args, like, like, like)
 	}
-	if len(libraries) > 0 {
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(libraries)), ",")
-		clauses = append(clauses, prefix+".library_id IN ("+placeholders+")")
-		for _, value := range libraries {
+	if len(q.LibraryIDs) > 0 {
+		clauses = append(clauses, "s.library_id IN "+Placeholders(len(q.LibraryIDs)))
+		for _, value := range q.LibraryIDs {
 			args = append(args, value)
 		}
 	}
-	if oneShot != nil {
-		clauses = append(clauses, prefix+".one_shot=?")
-		args = append(args, *oneShot)
+	if q.OneShot != nil {
+		clauses = append(clauses, "s.one_shot=?")
+		args = append(args, *q.OneShot)
 	}
-	if len(clauses) == 0 {
-		return "", args
+	if len(q.Statuses) > 0 {
+		var statusClauses []string
+		for _, st := range cleanStringSlice(q.Statuses) {
+			upper := strings.ToUpper(st)
+			if upper == "ONGOING" {
+				statusClauses = append(statusClauses,
+					`COALESCE((SELECT sm.status FROM series_metadata sm WHERE sm.series_id=s.id),'ONGOING')='ONGOING'`)
+			} else {
+				statusClauses = append(statusClauses,
+					`EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.status=?)`)
+				args = append(args, upper)
+			}
+		}
+		if len(statusClauses) > 0 {
+			clauses = append(clauses, "("+strings.Join(statusClauses, " OR ")+")")
+		}
+	}
+	if len(q.Genres) > 0 {
+		genres := cleanStringSlice(q.Genres)
+		clauses = append(clauses,
+			`EXISTS (SELECT 1 FROM series_genres sg WHERE sg.series_id=s.id AND sg.genre COLLATE NOCASE IN `+Placeholders(len(genres))+`)`)
+		for _, g := range genres {
+			args = append(args, g)
+		}
+	}
+	if len(q.Tags) > 0 {
+		tags := cleanStringSlice(q.Tags)
+		clauses = append(clauses,
+			`EXISTS (SELECT 1 FROM series_tags st WHERE st.series_id=s.id AND st.tag COLLATE NOCASE IN `+Placeholders(len(tags))+`)`)
+		for _, t := range tags {
+			args = append(args, t)
+		}
+	}
+	if len(q.Publishers) > 0 {
+		pubs := cleanStringSlice(q.Publishers)
+		clauses = append(clauses,
+			`EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.publisher COLLATE NOCASE IN `+Placeholders(len(pubs))+`)`)
+		for _, p := range pubs {
+			args = append(args, p)
+		}
+	}
+	if len(q.Authors) > 0 {
+		authors := cleanStringSlice(q.Authors)
+		clauses = append(clauses,
+			`EXISTS (SELECT 1 FROM series_authors sa WHERE sa.series_id=s.id AND sa.name COLLATE NOCASE IN `+Placeholders(len(authors))+`)`)
+		for _, a := range authors {
+			args = append(args, a)
+		}
+	}
+	if len(q.Languages) > 0 {
+		langs := cleanStringSlice(q.Languages)
+		clauses = append(clauses,
+			`EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.language COLLATE NOCASE IN `+Placeholders(len(langs))+`)`)
+		for _, l := range langs {
+			args = append(args, l)
+		}
+	}
+	if scrapeStatus := strings.ToLower(strings.TrimSpace(q.ScrapeStatus)); scrapeStatus != "" {
+		if scrapeStatus == ScrapeStatusNone {
+			clauses = append(clauses,
+				`COALESCE((SELECT sm.scrape_status FROM series_metadata sm WHERE sm.series_id=s.id),'none')='none'`)
+		} else {
+			clauses = append(clauses,
+				`EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.scrape_status=?)`)
+			args = append(args, scrapeStatus)
+		}
+	}
+	if conditions := readStatusConditions(q.ReadStatus, "series"); len(conditions) > 0 {
+		clauses = append(clauses, "("+strings.Join(conditions, " OR ")+")")
 	}
 	return " WHERE " + strings.Join(clauses, " AND "), args
-}
-
-func addReadStatusFilter(
-	where string,
-	args []any,
-	statuses []string,
-	target string,
-) (string, []any) {
-	conditions := readStatusConditions(statuses, target)
-	if len(conditions) == 0 {
-		return where, args
-	}
-	joiner := " WHERE "
-	if strings.TrimSpace(where) != "" {
-		joiner = " AND "
-	}
-	return where + joiner + "(" + strings.Join(conditions, " OR ") + ")", args
 }
 
 func readStatusConditions(statuses []string, target string) []string {
@@ -379,16 +477,24 @@ func buildBookFilters(q BookQuery) (string, []any) {
 	}
 	var args []any
 	if search := strings.TrimSpace(q.Search); search != "" {
-		clauses = append(clauses, `b.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
-		args = append(args, "%"+escapeLike(search)+"%")
+		like := "%" + escapeLike(search) + "%"
+		clauses = append(clauses, `(
+ b.name LIKE ? ESCAPE '\' COLLATE NOCASE
+ OR EXISTS (
+  SELECT 1 FROM series s_search
+  LEFT JOIN series_metadata sm_search ON sm_search.series_id=s_search.id
+  WHERE s_search.id=b.series_id
+  AND (s_search.name LIKE ? ESCAPE '\' COLLATE NOCASE OR sm_search.title LIKE ? ESCAPE '\' COLLATE NOCASE)
+ )
+)`)
+		args = append(args, like, like, like)
 	}
 	if q.SeriesID != "" {
 		clauses = append(clauses, "b.series_id=?")
 		args = append(args, q.SeriesID)
 	}
 	if len(q.LibraryIDs) > 0 {
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(q.LibraryIDs)), ",")
-		clauses = append(clauses, "b.library_id IN ("+placeholders+")")
+		clauses = append(clauses, "b.library_id IN "+Placeholders(len(q.LibraryIDs)))
 		for _, value := range q.LibraryIDs {
 			args = append(args, value)
 		}
@@ -397,6 +503,22 @@ func buildBookFilters(q BookQuery) (string, []any) {
 		clauses = append(clauses,
 			"EXISTS (SELECT 1 FROM series oneshot_series WHERE oneshot_series.id=b.series_id AND oneshot_series.one_shot=?)")
 		args = append(args, *q.OneShot)
+	}
+	if len(q.Tags) > 0 {
+		tags := cleanStringSlice(q.Tags)
+		clauses = append(clauses,
+			`EXISTS (SELECT 1 FROM series_tags st WHERE st.series_id=b.series_id AND st.tag COLLATE NOCASE IN `+Placeholders(len(tags))+`)`)
+		for _, t := range tags {
+			args = append(args, t)
+		}
+	}
+	if len(q.Authors) > 0 {
+		authors := cleanStringSlice(q.Authors)
+		clauses = append(clauses,
+			`EXISTS (SELECT 1 FROM series_authors sa WHERE sa.series_id=b.series_id AND sa.name COLLATE NOCASE IN `+Placeholders(len(authors))+`)`)
+		for _, a := range authors {
+			args = append(args, a)
+		}
 	}
 	if conditions := readStatusConditions(q.ReadStatus, "book"); len(conditions) > 0 {
 		clauses = append(clauses, "("+strings.Join(conditions, " OR ")+")")
@@ -447,6 +569,20 @@ func scanBookRows(rows *sql.Rows) ([]Book, error) {
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func cleanStringSliceCaseSensitive(items []string) []string {
+	out := make([]string, 0, len(items))
+	seen := make(map[string]bool, len(items))
+	for _, raw := range items {
+		v := strings.TrimSpace(raw)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func escapeLike(value string) string {

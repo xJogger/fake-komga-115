@@ -29,10 +29,10 @@ func TestDefaultDataDir(t *testing.T) {
 }
 
 func TestLocalAdminURL(t *testing.T) {
-	if got := localAdminURL("0.0.0.0", 25600); got != "http://127.0.0.1:25600/admin" {
+	if got := localAdminURL("0.0.0.0", 25600); got != "http://127.0.0.1:25600/" {
 		t.Fatalf("wildcard URL = %q", got)
 	}
-	if got := localAdminURL("::", 25600); got != "http://[::1]:25600/admin" {
+	if got := localAdminURL("::", 25600); got != "http://[::1]:25600/" {
 		t.Fatalf("IPv6 URL = %q", got)
 	}
 }

@@ -12,15 +12,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
+      - name: Enable corepack
+        run: corepack enable
+      - name: Check UI JS syntax
+        run: node --check internal/httpserver/static/ui/app.js
+      - name: Build built-in reader bundle
+        run: bash scripts/build-reader.sh
       - name: Format check
         run: test -z "$(gofmt -l cmd internal)"
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
       - name: Vet
         run: go vet ./...
-      - name: Build
-        run: go build -o /tmp/fake-komga-115 ./cmd/server
+      - name: Build pure-Go binary
+        run: CGO_ENABLED=0 go build -o /tmp/fake-komga-115 ./cmd/server
