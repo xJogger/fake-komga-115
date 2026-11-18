@@ -232,7 +232,6 @@ CREATE INDEX IF NOT EXISTS idx_series_metadata_title ON series_metadata(title CO
 CREATE INDEX IF NOT EXISTS idx_series_metadata_publisher ON series_metadata(publisher COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_series_metadata_scrape_status ON series_metadata(scrape_status);
 CREATE INDEX IF NOT EXISTS idx_series_metadata_bgm_id ON series_metadata(bgm_subject_id);
-CREATE INDEX IF NOT EXISTS idx_series_metadata_nsfw ON series_metadata(is_nsfw);
 
 CREATE TABLE IF NOT EXISTS series_genres (
   series_id TEXT NOT NULL,
