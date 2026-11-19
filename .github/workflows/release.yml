@@ -130,6 +130,10 @@ jobs:
   android:
     needs: prepare
     uses: ./.github/workflows/android-package.yml
+    # Pass only these two names; the protected signing job resolves their values.
+    secrets:
+      ANDROID_SIGNING_KEYSTORE_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_B64 }}
+      ANDROID_SIGNING_STOREPASS: ${{ secrets.ANDROID_SIGNING_STOREPASS }}
     with:
       version-name: ${{ needs.prepare.outputs.android-version-name }}
       version-code: ${{ fromJSON(needs.prepare.outputs.android-version-code) }}

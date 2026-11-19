@@ -2,6 +2,11 @@ name: Build and sign Android APK
 
 on:
   workflow_call:
+    secrets:
+      ANDROID_SIGNING_KEYSTORE_B64:
+        required: true
+      ANDROID_SIGNING_STOREPASS:
+        required: true
     inputs:
       version-name:
         required: true

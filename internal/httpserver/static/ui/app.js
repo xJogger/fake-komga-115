@@ -2249,7 +2249,10 @@
     drawer.innerHTML = `<div class="folder-browser">正在通过 PROPFIND 读取远程目录…</div>`;
     try {
       const res = await api(`/admin/api/webdav-accounts/${encodeURIComponent(accountID)}/folders?path=${encodeURIComponent(remotePath)}`);
-      const folders = res.folders || [];
+      // The WebDAV API returns paths relative to the DAV base, under relPath.
+      // Never turn a missing child path into a selection of the root.
+      const folders = (res.folders || []).filter((folder) =>
+        typeof folder?.relPath === 'string' && folder.relPath.startsWith('/') && folder.relPath !== '/');
       drawer.innerHTML = `
         <div class="folder-browser">
           <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border-bottom:1px solid var(--border);gap:8px">
@@ -2261,8 +2264,8 @@
           </div>
           ${folders.map((f) => `
             <div class="folder-item">
-              <span data-bwd-open="${esc(f.path)}" style="flex:1">📁 ${esc(f.name)}</span>
-              <button type="button" class="btn btn-sm" data-bwd-pick="${esc(f.path)}" data-bwd-name="${esc(f.name)}">选用</button>
+              <span data-bwd-open="${esc(f.relPath)}" style="flex:1">📁 ${esc(f.name)}</span>
+              <button type="button" class="btn btn-sm" data-bwd-pick="${esc(f.relPath)}" data-bwd-name="${esc(f.name)}">选用</button>
             </div>`).join('') || `<div style="padding:12px;color:var(--text-muted)">无子目录</div>`}
         </div>`;
       const up = document.getElementById('bwd-up');

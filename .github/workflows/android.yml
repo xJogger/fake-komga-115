@@ -12,6 +12,10 @@ jobs:
   android:
     if: github.ref == 'refs/heads/feat/v2.1'
     uses: ./.github/workflows/android-package.yml
+    # Pass only these two names; the protected signing job resolves their values.
+    secrets:
+      ANDROID_SIGNING_KEYSTORE_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_B64 }}
+      ANDROID_SIGNING_STOREPASS: ${{ secrets.ANDROID_SIGNING_STOREPASS }}
     with:
       version-name: "2.1.0-preview"
       version-code: 2010000
