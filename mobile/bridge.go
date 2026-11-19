@@ -29,7 +29,7 @@ type Instance struct {
 
 var embedded sync.Mutex
 
-func Start(dataDir string, backend DocumentBackend, preferredPort int32) (*Instance, error) {
+func Start(dataDir, cacheDir string, backend DocumentBackend, preferredPort int32) (*Instance, error) {
 	if backend == nil || !embedded.TryLock() {
 		return nil, errors.New("embedded server cannot be started")
 	}
@@ -41,6 +41,9 @@ func Start(dataDir string, backend DocumentBackend, preferredPort int32) (*Insta
 			embedded.Unlock()
 		}
 	}()
+	if err := prepareSQLiteTemp(cacheDir); err != nil {
+		return nil, err
+	}
 	var nonce [32]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, err

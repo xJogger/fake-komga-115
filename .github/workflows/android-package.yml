@@ -100,8 +100,8 @@ jobs:
     needs: build-arm64
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Build and dependencies never need signing secrets. Only this isolated,
-    # manually approved job gets access through the protected environment.
+    # Build and dependencies never need signing secrets. Only this isolated
+    # job gets access through the environment restricted to trusted refs.
     environment: android-signing
     steps:
       - uses: actions/setup-java@v5

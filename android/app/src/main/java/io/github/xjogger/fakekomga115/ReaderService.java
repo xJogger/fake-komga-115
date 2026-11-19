@@ -57,12 +57,13 @@ public final class ReaderService extends Service {
             try {
                 int port = getSharedPreferences("embedded", MODE_PRIVATE).getInt("port", 0);
                 String dataDir = new File(getFilesDir(), "library").getAbsolutePath();
+                String cacheDir = getCacheDir().getAbsolutePath();
                 Documents documents = new Documents(getContentResolver());
                 try {
-                    server = Mobile.start(dataDir, documents, port);
+                    server = Mobile.start(dataDir, cacheDir, documents, port);
                 } catch (Exception e) {
                     if (port == 0 || stopping) throw e;
-                    server = Mobile.start(dataDir, documents, 0);
+                    server = Mobile.start(dataDir, cacheDir, documents, 0);
                 }
                 getSharedPreferences("embedded", MODE_PRIVATE).edit()
                     .putInt("port", Uri.parse(server.origin()).getPort()).apply();

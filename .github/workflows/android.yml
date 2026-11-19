@@ -17,5 +17,5 @@ jobs:
       ANDROID_SIGNING_KEYSTORE_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_B64 }}
       ANDROID_SIGNING_STOREPASS: ${{ secrets.ANDROID_SIGNING_STOREPASS }}
     with:
-      version-name: "2.1.0-preview"
-      version-code: 2010000
+      version-name: "2.1.0-preview.2"
+      version-code: 2010001
