@@ -32,6 +32,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: ""
+          log-accepted-android-sdk-licenses: "false"
       - name: Prepare SDK and NDK
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
       - name: Build bundled reader
