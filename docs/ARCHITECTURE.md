@@ -61,6 +61,9 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1
 - **内置简体中文阅读器（`/reader/*`，`web/reader/` + `scripts/build-reader.sh`）**：基于上游 `Suwayomi/Suwayomi-WebUI`（`MPL-2.0`）构建，默认加载 `zh-Hans` 简体中文语言包并在首屏渲染前完成激活，通过 `KomgaHostBridge` 内存桥接至 `/api/v1/*` Komga REST 接口。
 - **Agent 专用接口（`/api/agent/v1/*`，`internal/httpserver/agent.go`）**：提供 `/manifest`、`/overview`、书库 CRUD、紧凑分页 `/series`（支持 `nsfw=all|only|exclude`）与单次最多 200 条异构 `/series/batch`，详见 `docs/AGENT_API.md`。
 
-## 6. 纯 Go 构建与移动端就绪
+- **书架查询缓存**：`internal/database/shelf_cache.go` 缓存常用首屏与分类查询（内存、固定容量，不缓存任意搜索组合）。SQLite 触发器在同一写入事务里递增目录、阅读进度版本；读缓存前核对版本，扫描、刮削、隐藏/NSFW 开关和阅读进度提交后不复用旧结果。启动与变更后预热只查询数据库，不读取漫画归档。
+- **Bangumi 排名与版本**：快照可按已有 Subject ID 回填正整数排名，不重新绑定。网页版的 `/admin/api/bookshelf/*` 先筛选可见版本、按正数 Subject ID 分组，再排序分页；One-Shot 独立。合并不修改真实 ID、书籍或阅读进度，Komga v1/v2 API 不自动合并。
 
-服务端保持 `100% CGO_ENABLED=0`（`modernc.org/sqlite`、`rardecode/v2`、`golang.org/x/crypto/argon2`）。`internal/app.App` 提供独立于 CLI 的 `Start()`、`ListenAddr()`、`Shutdown()` 与 `Close()` 生命周期接口，后续可直接由 `gomobile bind` 封装为 Android 本地服务配合 WebView 壳打包原生 APK。
+## 6. 纯 Go 构建与 Android 预览
+
+服务端保持 `100% CGO_ENABLED=0`。独立 Android 试用版通过 `gomobile bind` 封装 `internal/app.App`，仅 APK 构建需要 NDK 与 cgo。手机目录经 Android SAF 获取只读随机访问句柄；手机数据库独立，服务仅对应用内 WebView 开放。详见 [Android 预览版](ANDROID.md)。

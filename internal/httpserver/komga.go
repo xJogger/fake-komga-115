@@ -127,6 +127,14 @@ func (s *Server) komgaLibraries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) komgaSeries(w http.ResponseWriter, r *http.Request) {
+	s.serveSeriesList(w, r, false)
+}
+
+func (s *Server) bookshelfSeries(w http.ResponseWriter, r *http.Request) {
+	s.serveSeriesList(w, r, r.URL.Query().Get("merge_bangumi") == "1")
+}
+
+func (s *Server) serveSeriesList(w http.ResponseWriter, r *http.Request, group bool) {
 	page, size := intQuery(r, "page", 0), intQuery(r, "size", 20)
 	filters := legacyKomgaFilters(r, "series")
 	items, total, err := s.store.SeriesPage(r.Context(), database.SeriesQuery{
@@ -140,6 +148,7 @@ func (s *Server) komgaSeries(w http.ResponseWriter, r *http.Request) {
 		Authors:      filters.Authors,
 		Languages:    filters.Languages,
 		ScrapeStatus: strings.TrimSpace(r.URL.Query().Get("scrape_status")),
+		GroupBangumi: group,
 		OneShot:      filters.OneShot,
 		Empty:        filters.Empty,
 		Page:         page,
@@ -783,6 +792,7 @@ func seriesDTOFull(
 		"booksInProgressCount": progress.BooksInProgressCount,
 		"bgmSubjectId":         meta.BgmSubjectID,
 		"bgmScore":             meta.BgmScore,
+		"bgmRank":              meta.BgmRank,
 		"scrapeStatus":         meta.ScrapeStatus,
 		"coverSource":          meta.CoverSource,
 		"isNsfw":               meta.IsNSFW,

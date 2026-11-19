@@ -55,10 +55,11 @@ type ArchiveIndex struct {
 	httpClient *http.Client
 	proxyRaw   string
 
-	mu     sync.RWMutex
-	db     *sql.DB
-	status ArchiveStatus
-	cancel context.CancelFunc
+	mu       sync.RWMutex
+	db       *sql.DB
+	status   ArchiveStatus
+	cancel   context.CancelFunc
+	onImport func()
 }
 
 func NewArchiveIndex(dir string, logger *slog.Logger) (*ArchiveIndex, error) {
@@ -626,6 +627,9 @@ PRAGMA journal_mode = DELETE;
 		return err
 	}
 	a.openExistingIfPresent()
+	if a.onImport != nil {
+		a.onImport()
+	}
 	return nil
 }
 

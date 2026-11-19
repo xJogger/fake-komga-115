@@ -16,7 +16,8 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db    *sql.DB
+	shelf shelfCache
 
 	basicAuthMu    sync.RWMutex
 	basicAuthCache map[string]time.Time

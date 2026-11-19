@@ -37,6 +37,13 @@ func CleanRoot(raw string) (string, error) {
 	if raw == "" {
 		return "", errors.New("local root path is required")
 	}
+	if IsDocumentRoot(raw) {
+		_, err := listDocuments(raw, ".")
+		return raw, err
+	}
+	if documentBackend() != nil {
+		return "", errors.New("choose an Android folder using the system picker")
+	}
 	abs, err := filepath.Abs(raw)
 	if err != nil {
 		return "", err
@@ -72,6 +79,9 @@ func ResolveSafePath(rootPath, relSlash string) (string, error) {
 }
 
 func ListDirectory(rootPath, relDir string) ([]Entry, error) {
+	if IsDocumentRoot(rootPath) {
+		return listDocuments(rootPath, relDir)
+	}
 	targetDir, err := ResolveSafePath(rootPath, relDir)
 	if err != nil {
 		return nil, err
@@ -129,6 +139,9 @@ func ListDirectory(rootPath, relDir string) ([]Entry, error) {
 }
 
 func BrowseDirectories(rawDir string) (current string, parent string, folders []BrowserFolder, err error) {
+	if documentBackend() != nil {
+		return "", "", nil, errors.New("use the Android system folder picker")
+	}
 	rawDir = strings.TrimSpace(rawDir)
 	if rawDir == "" {
 		if runtime.GOOS == "windows" {

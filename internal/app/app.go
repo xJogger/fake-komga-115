@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -25,10 +27,11 @@ import (
 )
 
 type Options struct {
-	Host    string
-	Port    int
-	DataDir string
-	Logger  *slog.Logger
+	Host          string
+	Port          int
+	DataDir       string
+	Logger        *slog.Logger
+	LoopbackToken string
 }
 
 type App struct {
@@ -41,9 +44,14 @@ type App struct {
 	bangumi    *bangumi.Service
 	logger     *slog.Logger
 	listenAddr atomic.Value
+	warmCancel context.CancelFunc
+	warmDone   chan struct{}
 }
 
 func New(_ context.Context, options Options) (*App, error) {
+	if options.LoopbackToken != "" && options.Host != "127.0.0.1" {
+		return nil, errors.New("loopback guard requires IPv4 loopback")
+	}
 	if options.Logger == nil {
 		options.Logger = slog.Default()
 	}
@@ -104,9 +112,13 @@ func New(_ context.Context, options Options) (*App, error) {
 		}, options.Logger,
 	).WithServices(webdavManager, bangumiService)
 
+	var routes http.Handler = handler.Handler()
+	if options.LoopbackToken != "" {
+		routes = loopbackGuard(options.LoopbackToken, routes)
+	}
 	server := &http.Server{
 		Addr:              net.JoinHostPort(options.Host, strconv.Itoa(options.Port)),
-		Handler:           handler.Handler(),
+		Handler:           routes,
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
@@ -143,6 +155,12 @@ func (a *App) Start() (<-chan error, error) {
 	addr := listener.Addr().String()
 	a.listenAddr.Store(addr)
 	a.logger.Info("server listening", "address", addr)
+	ctx, cancel := context.WithCancel(context.Background())
+	a.warmCancel, a.warmDone = cancel, make(chan struct{})
+	go func() {
+		defer close(a.warmDone)
+		a.store.WarmShelf(ctx)
+	}()
 	errCh := make(chan error, 1)
 	go func() {
 		err := a.server.Serve(listener)
@@ -158,6 +176,10 @@ func (a *App) Start() (<-chan error, error) {
 func (a *App) Shutdown(ctx context.Context) error { return a.server.Shutdown(ctx) }
 
 func (a *App) Close() error {
+	if a.warmCancel != nil {
+		a.warmCancel()
+		<-a.warmDone
+	}
 	a.tasks.Close()
 	a.covers.Close()
 	a.scanner.Close()
@@ -166,4 +188,18 @@ func (a *App) Close() error {
 		_ = a.bangumi.Close()
 	}
 	return a.store.Close()
+}
+
+// The Android WebView uses a per-process cookie in addition to normal app
+// authentication. The loopback port alone is not a security boundary.
+func loopbackGuard(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, _ := net.SplitHostPort(r.Host)
+		cookie, err := r.Cookie("fk115_mobile_guard")
+		if host != "127.0.0.1" || err != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(token)) != 1 {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

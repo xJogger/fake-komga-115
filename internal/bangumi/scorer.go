@@ -397,6 +397,7 @@ func ToScrapedMetadataWithQuery(seriesName string, parsed ParsedQuery, cand Subj
 		Confidence:      cand.Confidence,
 		CoverURL:        coverURL,
 		Score:           cand.Score,
+		Rank:            cand.Rank,
 		Status:          status,
 		Title:           displayTitle,
 		TitleSort:       displayTitle,

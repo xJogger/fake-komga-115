@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS series_metadata (
   bgm_cover_url TEXT NOT NULL DEFAULT '',
   bgm_cover_path TEXT NOT NULL DEFAULT '',
   bgm_score REAL,
+  bgm_rank INTEGER,
   status TEXT NOT NULL DEFAULT 'ONGOING',
   status_lock INTEGER NOT NULL DEFAULT 0,
   title TEXT NOT NULL DEFAULT '',

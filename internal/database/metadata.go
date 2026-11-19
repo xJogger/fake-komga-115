@@ -13,6 +13,7 @@ type ScrapedMetadata struct {
 	Confidence      float64
 	CoverURL        string
 	Score           *float64
+	Rank            int
 	Status          string
 	Title           string
 	TitleSort       string
@@ -90,7 +91,7 @@ func defaultSeriesMetadata(series Series) SeriesMetadata {
 
 const seriesMetadataColumns = `
 series_id,bgm_subject_id,scrape_status,scrape_confidence,scrape_synced_at,
-cover_source,bgm_cover_url,bgm_cover_path,bgm_score,
+cover_source,bgm_cover_url,bgm_cover_path,bgm_score,bgm_rank,
 status,status_lock,title,title_lock,title_sort,title_sort_lock,
 summary,summary_lock,reading_direction,reading_direction_lock,
 publisher,publisher_lock,age_rating,age_rating_lock,
@@ -106,6 +107,7 @@ func scanSeriesMetadataRow(scanner interface{ Scan(...any) error }) (SeriesMetad
 		bgmID              sql.NullInt64
 		syncedAt           sql.NullString
 		bgmScore           sql.NullFloat64
+		bgmRank            sql.NullInt64
 		ageRating          sql.NullInt64
 		totalBooks         sql.NullInt64
 		statusLock         int
@@ -136,7 +138,7 @@ func scanSeriesMetadataRow(scanner interface{ Scan(...any) error }) (SeriesMetad
 	)
 	err := scanner.Scan(
 		&m.SeriesID, &bgmID, &m.ScrapeStatus, &m.ScrapeConfidence, &syncedAt,
-		&m.CoverSource, &m.BgmCoverURL, &m.BgmCoverPath, &bgmScore,
+		&m.CoverSource, &m.BgmCoverURL, &m.BgmCoverPath, &bgmScore, &bgmRank,
 		&m.Status, &statusLock, &m.Title, &titleLock, &m.TitleSort, &titleSortLock,
 		&m.Summary, &summaryLock, &m.ReadingDirection, &readingDirLock,
 		&m.Publisher, &publisherLock, &ageRating, &ageRatingLock,
@@ -156,6 +158,10 @@ func scanSeriesMetadataRow(scanner interface{ Scan(...any) error }) (SeriesMetad
 	if syncedAt.Valid && syncedAt.String != "" {
 		val := syncedAt.String
 		m.ScrapeSyncedAt = &val
+	}
+	if bgmRank.Valid && bgmRank.Int64 > 0 {
+		rank := int(bgmRank.Int64)
+		m.BgmRank = &rank
 	}
 	if bgmScore.Valid {
 		val := bgmScore.Float64
@@ -309,6 +315,11 @@ func (s *Store) ApplyScrapedMetadata(
 		current.BgmCoverURL = incoming.CoverURL
 	}
 	current.BgmScore = incoming.Score
+	current.BgmRank = nil
+	if incoming.Rank > 0 {
+		rank := incoming.Rank
+		current.BgmRank = &rank
+	}
 
 	if !current.StatusLock && incoming.Status != "" {
 		current.Status = normalizeSeriesStatus(incoming.Status)
@@ -403,6 +414,7 @@ func (s *Store) ClearSeriesBangumiBinding(ctx context.Context, series Series) (S
 	current.BgmCoverURL = ""
 	current.BgmCoverPath = ""
 	current.BgmScore = nil
+	current.BgmRank = nil
 	if !current.NSFWLock {
 		current.IsNSFW = false
 	}
@@ -593,7 +605,7 @@ INSERT INTO series_metadata(
  `+seriesMetadataColumns+`
 ) VALUES(
  ?,?,?,?,?,
- ?,?,?,?,
+ ?,?,?,?,?,
  ?,?,?,?,?,?,
  ?,?,?,?,
  ?,?,?,?,
@@ -612,6 +624,7 @@ ON CONFLICT(series_id) DO UPDATE SET
  bgm_cover_url=excluded.bgm_cover_url,
  bgm_cover_path=excluded.bgm_cover_path,
  bgm_score=excluded.bgm_score,
+ bgm_rank=excluded.bgm_rank,
  status=excluded.status,status_lock=excluded.status_lock,
  title=excluded.title,title_lock=excluded.title_lock,
  title_sort=excluded.title_sort,title_sort_lock=excluded.title_sort_lock,
@@ -631,7 +644,7 @@ ON CONFLICT(series_id) DO UPDATE SET
  is_nsfw=excluded.is_nsfw,nsfw_lock=excluded.nsfw_lock,
  updated_at=excluded.updated_at`,
 		m.SeriesID, nullableInt64Ptr(m.BgmSubjectID), m.ScrapeStatus, m.ScrapeConfidence, nullableStringPtr(m.ScrapeSyncedAt),
-		m.CoverSource, m.BgmCoverURL, m.BgmCoverPath, nullableFloat64Ptr(m.BgmScore),
+		m.CoverSource, m.BgmCoverURL, m.BgmCoverPath, nullableFloat64Ptr(m.BgmScore), nullableIntPtr(m.BgmRank),
 		m.Status, boolInt(m.StatusLock), m.Title, boolInt(m.TitleLock), m.TitleSort, boolInt(m.TitleSortLock),
 		m.Summary, boolInt(m.SummaryLock), m.ReadingDirection, boolInt(m.ReadingDirLock),
 		m.Publisher, boolInt(m.PublisherLock), nullableIntPtr(m.AgeRating), boolInt(m.AgeRatingLock),
@@ -681,14 +694,33 @@ ON CONFLICT(series_id) DO UPDATE SET
 }
 
 func (s *Store) Genres(ctx context.Context, libraryIDs []string) ([]string, error) {
+	if len(libraryIDs) == 0 {
+		return shelfCached(ctx, s, "taxonomy:genre", false, func(ctx context.Context) ([]string, error) {
+			return s.distinctSeriesValues(ctx, "series_genres", "genre", nil)
+		})
+	}
 	return s.distinctSeriesValues(ctx, "series_genres", "genre", libraryIDs)
 }
 
 func (s *Store) Tags(ctx context.Context, libraryIDs []string) ([]string, error) {
+	if len(libraryIDs) == 0 {
+		return shelfCached(ctx, s, "taxonomy:tag", false, func(ctx context.Context) ([]string, error) {
+			return s.distinctSeriesValues(ctx, "series_tags", "tag", nil)
+		})
+	}
 	return s.distinctSeriesValues(ctx, "series_tags", "tag", libraryIDs)
 }
 
 func (s *Store) Publishers(ctx context.Context, libraryIDs []string) ([]string, error) {
+	if len(libraryIDs) == 0 {
+		return shelfCached(ctx, s, "taxonomy:publisher", false, func(ctx context.Context) ([]string, error) {
+			return s.queryPublishers(ctx, nil)
+		})
+	}
+	return s.queryPublishers(ctx, libraryIDs)
+}
+
+func (s *Store) queryPublishers(ctx context.Context, libraryIDs []string) ([]string, error) {
 	query := `
 SELECT DISTINCT sm.publisher
 FROM series_metadata sm

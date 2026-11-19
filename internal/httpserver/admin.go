@@ -65,6 +65,8 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/scans", s.listScans)
 	r.Post("/scans", s.startScan)
 	r.Post("/scans/{runID}/cancel", s.cancelScan)
+	r.Get("/bookshelf/series", s.bookshelfSeries)
+	r.Get("/bookshelf/versions/{seriesID}", s.bookshelfVersions)
 	r.Get("/cover-jobs", s.listCoverJobs)
 	r.Post("/cover-jobs", s.startCoverJob)
 	r.Post("/cover-jobs/{runID}/cancel", s.cancelCoverJob)
@@ -820,9 +822,10 @@ func (s *Server) listCoverJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) startCoverJob(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		LibraryID string `json:"libraryId"`
-		All       bool   `json:"all"`
-		Limit     int    `json:"limit"`
+		LibraryID      string `json:"libraryId"`
+		All            bool   `json:"all"`
+		Limit          int    `json:"limit"`
+		MissingUnbound bool   `json:"missingUnbound"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -832,7 +835,11 @@ func (s *Server) startCoverJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "INVALID_LIBRARY", "libraryId is required")
 		return
 	}
-	run, err := s.covers.Start(r.Context(), request.LibraryID, request.All, request.Limit)
+	start := s.covers.Start
+	if request.MissingUnbound {
+		start = s.covers.StartMissingUnbound
+	}
+	run, err := start(r.Context(), request.LibraryID, request.All, request.Limit)
 	if err != nil {
 		status := http.StatusConflict
 		code := "COVER_JOB_START_FAILED"

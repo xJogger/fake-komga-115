@@ -169,3 +169,34 @@ func waitBatchRun(t *testing.T, manager *BatchManager, runID string) BatchRun {
 func batchTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
+
+func TestMissingUnboundBatchLimitsEligibleSeries(t *testing.T) {
+	store, lib := batchTestStore(t)
+	insertBatchSeries(t, store, lib, "bound", "Manually bound", "2025-04-01T00:00:00Z")
+	insertBatchSeries(t, store, lib, "valid", "Has cover", "2025-03-01T00:00:00Z")
+	insertBatchSeries(t, store, lib, "newer", "Missing cover", "2025-02-01T00:00:00Z")
+	insertBatchSeries(t, store, lib, "older", "Missing cover", "2025-01-01T00:00:00Z")
+	if _, err := store.DB().Exec(`INSERT INTO series_metadata(series_id,bgm_subject_id,scrape_status,updated_at) VALUES ('bound',10,'manual','')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+INSERT INTO series_thumbnails(series_id,source_book_id,source_version,path,media_type,width,height,size,created_at,updated_at)
+VALUES('valid','book-valid','1','fixture','image/jpeg',1,1,1,'','')`); err != nil {
+		t.Fatal(err)
+	}
+	called := make(chan string, 8)
+	manager := newBatchManager(store, func(_ context.Context, id string) (bool, error) {
+		called <- id
+		return true, nil
+	}, batchTestLogger())
+	defer manager.Close()
+	manager.hasValid = func(_ context.Context, id string) (bool, error) { return id == "valid", nil }
+	run, err := manager.StartMissingUnbound(context.Background(), lib, false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := waitBatchRun(t, manager, run.ID)
+	if finished.TotalSeries != 1 || finished.GeneratedCount != 1 || len(called) != 1 || <-called != "newer" {
+		t.Fatalf("wrong eligible selection: %+v", finished)
+	}
+}

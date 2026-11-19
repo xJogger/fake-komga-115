@@ -51,10 +51,11 @@ type BatchRun struct {
 }
 
 type batchJob struct {
-	runID     string
-	libraryID string
-	all       bool
-	limit     int
+	runID          string
+	libraryID      string
+	all            bool
+	limit          int
+	missingUnbound bool
 }
 
 type batchSeries struct {
@@ -65,9 +66,10 @@ type batchSeries struct {
 type ensureCoverFunc func(context.Context, string) (bool, error)
 
 type BatchManager struct {
-	store  *database.Store
-	ensure ensureCoverFunc
-	logger *slog.Logger
+	store    *database.Store
+	ensure   ensureCoverFunc
+	hasValid func(context.Context, string) (bool, error)
+	logger   *slog.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -85,7 +87,7 @@ func NewBatchManager(
 	service *Service,
 	logger *slog.Logger,
 ) *BatchManager {
-	return newBatchManager(store, func(ctx context.Context, seriesID string) (bool, error) {
+	mgr := newBatchManager(store, func(ctx context.Context, seriesID string) (bool, error) {
 		valid, err := service.HasValid(ctx, seriesID)
 		if err != nil || valid {
 			return false, err
@@ -107,6 +109,8 @@ func NewBatchManager(
 		}
 		return true, nil
 	}, logger)
+	mgr.hasValid = service.HasValid
+	return mgr
 }
 
 func newBatchManager(
@@ -144,6 +148,14 @@ func (m *BatchManager) Start(
 	all bool,
 	limit int,
 ) (BatchRun, error) {
+	return m.start(ctx, libraryID, all, limit, false)
+}
+
+func (m *BatchManager) StartMissingUnbound(ctx context.Context, libraryID string, all bool, limit int) (BatchRun, error) {
+	return m.start(ctx, libraryID, all, limit, true)
+}
+
+func (m *BatchManager) start(ctx context.Context, libraryID string, all bool, limit int, missingUnbound bool) (BatchRun, error) {
 	lib, err := m.store.LibraryBasic(ctx, libraryID)
 	if err != nil {
 		return BatchRun{}, err
@@ -156,6 +168,14 @@ func (m *BatchManager) Start(
 	} else {
 		if limit <= 0 {
 			limit = defaultBatchLimit
+			if missingUnbound {
+				if lib.EffectiveProvider() == database.ProviderLocal {
+					all = true
+					limit = 0
+				} else {
+					limit = 5
+				}
+			}
 		}
 		if limit > maxBatchLimit {
 			return BatchRun{}, fmt.Errorf("thumbnail limit cannot exceed %d", maxBatchLimit)
@@ -171,7 +191,10 @@ func (m *BatchManager) Start(
 	m.queued[libraryID] = runID
 	m.mu.Unlock()
 
-	total, err := m.selectedCount(ctx, libraryID, all, limit)
+	total := 0
+	if !missingUnbound {
+		total, err = m.selectedCount(ctx, libraryID, all, limit)
+	}
 	if err != nil {
 		m.releaseQueued(libraryID)
 		return BatchRun{}, err
@@ -179,6 +202,9 @@ func (m *BatchManager) Start(
 	mode := "latest"
 	if all {
 		mode = "all"
+	}
+	if missingUnbound {
+		mode = "unbound_" + mode
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = m.store.DB().ExecContext(ctx, `
@@ -196,7 +222,7 @@ INSERT INTO thumbnail_runs(
 		return BatchRun{}, err
 	}
 	select {
-	case m.jobs <- batchJob{runID: runID, libraryID: libraryID, all: all, limit: limit}:
+	case m.jobs <- batchJob{runID: runID, libraryID: libraryID, all: all, limit: limit, missingUnbound: missingUnbound}:
 		return run, nil
 	case <-m.ctx.Done():
 		return BatchRun{}, context.Canceled
@@ -337,7 +363,12 @@ func (m *BatchManager) execute(item batchJob) {
 		`UPDATE thumbnail_runs SET status='running',started_at=? WHERE id=?`,
 		now, item.runID)
 
-	series, err := m.selectSeries(ctx, item.libraryID, item.all, item.limit)
+	var series []batchSeries
+	if item.missingUnbound {
+		series, err = m.selectMissingUnbound(ctx, item.libraryID, item.all, item.limit)
+	} else {
+		series, err = m.selectSeries(ctx, item.libraryID, item.all, item.limit)
+	}
 	if err != nil {
 		run.Errors = append(run.Errors, safeBatchError(err))
 		m.finish(item, run, "failed")
@@ -352,7 +383,7 @@ func (m *BatchManager) execute(item batchJob) {
 			m.finish(item, run, "canceled")
 			return
 		}
-		generated, err := m.ensure(ctx, current.ID)
+		generated, err := m.runSeries(ctx, current.ID, item.missingUnbound)
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			m.finish(item, run, "canceled")
 			return
@@ -492,4 +523,65 @@ func randomBatchID() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(value[:])
+}
+
+func (m *BatchManager) selectMissingUnbound(ctx context.Context, libraryID string, all bool, limit int) ([]batchSeries, error) {
+	query := `
+SELECT s.id,s.name,c.series_id IS NOT NULL
+FROM series s LEFT JOIN series_metadata sm ON sm.series_id=s.id
+LEFT JOIN series_thumbnails c ON c.series_id=s.id
+WHERE s.library_id=? AND coalesce(sm.bgm_subject_id,0)<=0
+AND EXISTS (SELECT 1 FROM books existing_book WHERE existing_book.series_id=s.id)
+ORDER BY COALESCE((SELECT MAX(b.file_modified_at) FROM books b WHERE b.series_id=s.id),
+ s.file_modified_at,s.updated_at) DESC,s.name COLLATE NOCASE ASC,s.id ASC`
+	rows, err := m.store.DB().QueryContext(ctx, query, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct {
+		batchSeries
+		hasMetadata bool
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.ID, &c.Name, &c.hasMetadata); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []batchSeries
+	for _, c := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if c.hasMetadata && m.hasValid != nil {
+			valid, err := m.hasValid(ctx, c.ID)
+			if err == nil && valid {
+				continue
+			}
+		}
+		out = append(out, c.batchSeries)
+		if !all && len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *BatchManager) runSeries(ctx context.Context, seriesID string, missingUnbound bool) (bool, error) {
+	if missingUnbound {
+		var bound bool
+		err := m.store.DB().QueryRowContext(ctx,
+			"SELECT EXISTS(SELECT 1 FROM series_metadata WHERE series_id=? AND bgm_subject_id>0)", seriesID).Scan(&bound)
+		if err != nil || bound {
+			return false, err
+		}
+	}
+	return m.ensure(ctx, seriesID)
 }

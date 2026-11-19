@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/cache"
@@ -43,15 +42,7 @@ func openBookReaderAt(
 	}
 	switch library.EffectiveProvider() {
 	case database.ProviderLocal:
-		fullPath, err := localfs.ResolveSafePath(library.RootPath, book.FileID)
-		if err != nil {
-			return nil, err
-		}
-		file, err := os.Open(fullPath)
-		if err != nil {
-			return nil, err
-		}
-		return file, nil
+		return localfs.OpenBook(library.RootPath, book.FileID)
 
 	case database.ProviderWebDAV:
 		if webdavMgr == nil {

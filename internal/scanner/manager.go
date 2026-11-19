@@ -415,7 +415,7 @@ func (m *Manager) scanLocal(ctx context.Context, item job, stage bool) (counters
 		rootResolved = resolved
 	}
 	rootName := path.Base(strings.ReplaceAll(rootClean, "\\", "/"))
-	if rootName == "" || rootName == "/" || rootName == "." {
+	if localfs.IsDocumentRoot(rootClean) || rootName == "" || rootName == "/" || rootName == "." {
 		rootName = item.library.Name
 	}
 	visitedReal := map[string]bool{
@@ -444,7 +444,7 @@ func (m *Manager) scanLocal(ctx context.Context, item job, stage bool) (counters
 			var existingBooks int64
 			_ = m.store.DB().QueryRowContext(ctx, `SELECT count(*) FROM books WHERE library_id=?`, item.library.ID).Scan(&existingBooks)
 			if existingBooks > 0 {
-				return counts, fmt.Errorf("local library root %q appears empty (0 entries) while %d books exist in database; refusing to wipe catalog (check if SMB/NAS share is unmounted)", rootClean, existingBooks)
+				return counts, fmt.Errorf("local library root appears empty (0 entries) while %d books exist in database; refusing to wipe catalog (check source availability or directory permission)", existingBooks)
 			}
 		}
 		counts.directories++

@@ -51,9 +51,10 @@ type Service struct {
 	live    *LiveClient
 	logger  *slog.Logger
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	jobs   chan scrapeJob
+	ctx      context.Context
+	cancel   context.CancelFunc
+	jobs     chan scrapeJob
+	rankDone chan struct{}
 
 	mu          sync.Mutex
 	queued      map[string]string
@@ -88,15 +89,25 @@ WHERE status IN ('queued','running')`, now)
 	}
 
 	svc := &Service{
-		store:   store,
-		archive: archiveIdx,
-		live:    liveClient,
-		logger:  logger,
-		ctx:     ctx,
-		cancel:  cancel,
-		jobs:    make(chan scrapeJob, 32),
-		queued:  make(map[string]string),
+		store:    store,
+		archive:  archiveIdx,
+		live:     liveClient,
+		logger:   logger,
+		ctx:      ctx,
+		cancel:   cancel,
+		jobs:     make(chan scrapeJob, 32),
+		queued:   make(map[string]string),
+		rankDone: make(chan struct{}),
 	}
+	ranksPending := make(chan struct{}, 1)
+	archiveIdx.onImport = func() {
+		select {
+		case ranksPending <- struct{}{}:
+		default:
+		}
+	}
+	go svc.rankWorker(ranksPending)
+	archiveIdx.onImport()
 	go svc.worker()
 	return svc, nil
 }
@@ -108,6 +119,9 @@ func (s *Service) Close() error {
 		s.activeStop()
 	}
 	s.mu.Unlock()
+	if s.rankDone != nil {
+		<-s.rankDone
+	}
 	return s.archive.Close()
 }
 

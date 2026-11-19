@@ -133,6 +133,7 @@ type SeriesMetadata struct {
 	CoverSource         string           `json:"coverSource"`
 	BgmCoverURL         string           `json:"bgmCoverUrl,omitempty"`
 	BgmCoverPath        string           `json:"-"`
+	BgmRank             *int             `json:"bgmRank,omitempty"`
 	BgmScore            *float64         `json:"bgmScore,omitempty"`
 	Status              string           `json:"status"`
 	StatusLock          bool             `json:"statusLock"`

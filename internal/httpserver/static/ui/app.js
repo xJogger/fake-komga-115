@@ -354,6 +354,7 @@
           <div class="topbar-actions">
             <button type="button" class="btn btn-sm" id="theme-toggle-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
             ${state.auth.username ? `<span class="user-pill" title="当前登录账号">${esc(state.auth.username)}</span>` : ''}
+            ${activeNav === 'admin' && navigator.userAgent.includes('FK115Android/') ? '<a class="btn btn-sm" href="/__android/stop">停止服务</a>' : ''}
             <button type="button" class="btn btn-sm" id="logout-btn">退出</button>
           </div>
         </div>
@@ -375,7 +376,14 @@
     };
   }
 
-  function seriesCardHTML(s) {
+  const mergedWorks = () => localStorage.getItem('fk115_merge_bangumi') === '1';
+
+  function seriesVersionURL(seriesID, libraryID = '') {
+    const scope = libraryID ? '&library_id=' + encodeURIComponent(libraryID) : '';
+    return `/series/${encodeURIComponent(seriesID)}?versions=1${scope}`;
+  }
+
+  function seriesCardHTML(s, libraryID = '') {
     const meta = s.metadata || {};
     const title = meta.title || s.name || '未命名';
     const origDiff = s.name && s.name !== title ? s.name : '';
@@ -385,7 +393,7 @@
     const pct = total > 0 ? Math.min(100, Math.round((read / total) * 100)) : 0;
     const score = typeof s.bgmScore === 'number' && s.bgmScore > 0 ? s.bgmScore.toFixed(1) : '';
     return `
-      <a href="/series/${encodeURIComponent(s.id)}" data-nav class="poster-card">
+      <a href="${mergedWorks() && s.bgmSubjectId && !s.oneshot ? seriesVersionURL(s.id, libraryID) : `/series/${encodeURIComponent(s.id)}`}" data-nav class="poster-card">
         <div class="poster-thumb">
           <img loading="lazy" src="/api/v1/series/${encodeURIComponent(s.id)}/thumbnail?v=${state.coverVer}" alt="${esc(title)}">
           ${score ? `<span class="poster-badge-top-left">★ ${esc(score)}</span>` : ''}
@@ -507,21 +515,29 @@
 
   // --- Home View (/) ---
 
-  async function renderHome() {
+  function renderHome() {
     document.title = '书架 · fake-komga-115';
-    renderShell('home', `<div class="boot-splash" style="min-height:45vh"><div class="spinner"></div><p>正在读取书架…</p></div>`);
-    try {
-      const [libs, inProgress, recentUpdated, recentAdded] = await Promise.all([
-        api('/api/v1/libraries'),
-        api('/api/v1/books?read_status=IN_PROGRESS&sort=readProgress.readDate,desc&size=8'),
-        api('/api/v1/series?sort=lastModifiedDate,desc&size=18'),
-        api('/api/v1/series?sort=createdDate,desc&size=12'),
-      ]);
+    const seq = routeSeq;
+    renderShell('home', `<section id="home-libs">正在读取书库…</section>
+      <section id="home-continue" aria-live="polite"></section>
+      <section id="home-updated" aria-live="polite">正在加载最近更新…</section>
+      <section id="home-added" aria-live="polite"></section>`);
+    function load(slot, path, render) {
+      api(path).then((data) => {
+        if (seq !== routeSeq) return;
+        const target = document.getElementById(slot);
+        if (target) target.innerHTML = render(data);
+      }).catch((err) => {
+        if (seq !== routeSeq) return;
+        const target = document.getElementById(slot);
+        if (!target) return;
+        target.innerHTML = `<div class="empty-box">${esc(err.message)} <button class="btn btn-sm">重试</button></div>`;
+        target.querySelector('button').onclick = () => load(slot, path, render);
+      });
+    }
+    const seriesURL = mergedWorks() ? '/admin/api/bookshelf/series?merge_bangumi=1&' : '/api/v1/series?';
+    load('home-libs', '/api/v1/libraries', (libs) => {
       state.libraries = libs || [];
-      const contBooks = (inProgress && inProgress.content) || [];
-      const updatedList = (recentUpdated && recentUpdated.content) || [];
-      const addedList = (recentAdded && recentAdded.content) || [];
-
       let html = '';
       if (state.libraries.length === 0) {
         html += `
@@ -552,6 +568,11 @@
           </section>`;
       }
 
+      return html;
+    });
+    load('home-continue', '/api/v1/books?read_status=IN_PROGRESS&sort=readProgress.readDate,desc&size=8', (res) => {
+      const contBooks = res?.content || [];
+      let html = '';
       if (contBooks.length > 0) {
         html += `
           <section class="section-block">
@@ -580,6 +601,11 @@
           </section>`;
       }
 
+      return html;
+    });
+    load('home-updated', seriesURL + 'sort=lastModifiedDate,desc&size=18', (res) => {
+      const updatedList = res?.content || [];
+      let html = '';
       if (updatedList.length > 0) {
         html += `
           <section class="section-block">
@@ -587,10 +613,15 @@
               <h2>最近更新</h2>
               <a href="/libraries?sort=lastModifiedDate,desc" data-nav class="more-link">更多 →</a>
             </div>
-            <div class="poster-grid">${updatedList.map(seriesCardHTML).join('')}</div>
+            <div class="poster-grid">${updatedList.map((x) => seriesCardHTML(x)).join('')}</div>
           </section>`;
       }
 
+      return html;
+    });
+    load('home-added', seriesURL + 'sort=createdDate,desc&size=12', (res) => {
+      const addedList = res?.content || [];
+      let html = '';
       if (addedList.length > 0) {
         html += `
           <section class="section-block">
@@ -598,37 +629,18 @@
               <h2>最新入库</h2>
               <a href="/libraries?sort=createdDate,desc" data-nav class="more-link">更多 →</a>
             </div>
-            <div class="poster-grid">${addedList.map(seriesCardHTML).join('')}</div>
+            <div class="poster-grid">${addedList.map((x) => seriesCardHTML(x)).join('')}</div>
           </section>`;
       }
 
-      const container = document.getElementById('page-content');
-      if (container) container.innerHTML = html || `<div class="empty-box">暂无漫画条目，请先在后台扫描书库。</div>`;
-    } catch (err) {
-      toast(err.message, 'error');
-    }
+      return html;
+    });
   }
 
-  // --- Libraries Browse View (/libraries & /libraries/:id) ---
-
-  async function ensureTaxonomies() {
-    if (state.taxonomies.loaded) return;
-    try {
-      const [genres, tags, publishers] = await Promise.all([
-        api('/api/v1/genres'),
-        api('/api/v1/tags'),
-        api('/api/v1/publishers'),
-      ]);
-      state.taxonomies = {
-        loaded: true,
-        genres: genres || [],
-        tags: tags || [],
-        publishers: publishers || [],
-      };
-    } catch (_) {}
-  }
+  // --- Libraries Browse View ---
 
   async function renderLibraries(libraryID) {
+    const seq = routeSeq;
     const sp = new URLSearchParams(location.search);
     const q = sp.get('q') || '';
     const readStatus = sp.get('read_status') || '';
@@ -644,12 +656,13 @@
     const size = 36;
 
     document.title = '浏览书库 · fake-komga-115';
-    renderShell('libraries', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在加载漫画列表…</p></div>`, q);
+    const oldList = document.getElementById('library-cards');
+    const currentCards = oldList?.innerHTML || document.getElementById('library-updating')?.innerHTML || '';
+    renderShell('libraries', currentCards
+      ? `<p id="library-list-status" role="status">正在更新列表…</p><div id="library-updating" class="poster-grid" style="opacity:.5" inert>${currentCards}</div>`
+      : '<p id="library-list-status" role="status">正在加载漫画列表…</p>', q);
 
     try {
-      const [libs] = await Promise.all([api('/api/v1/libraries'), ensureTaxonomies()]);
-      state.libraries = libs || [];
-
       const apiParams = new URLSearchParams();
       apiParams.set('page', String(page));
       apiParams.set('size', String(size));
@@ -665,7 +678,23 @@
       if (publisher) apiParams.set('publisher', publisher);
       if (author) apiParams.set('author', author);
 
-      const res = await api(`/api/v1/series?${apiParams.toString()}`);
+      const seriesPath = mergedWorks() ? '/admin/api/bookshelf/series' : '/api/v1/series';
+      if (mergedWorks()) apiParams.set('merge_bangumi', '1');
+      const filters = [
+        ['f-genre', '/api/v1/genres', '类型', genre],
+        ['f-tag', '/api/v1/tags', '标签', tag],
+        ['f-pub', '/api/v1/publishers', '出版社', publisher],
+      ].map(async ([id, path, label, selected]) => {
+        try {
+          const values = await api(path);
+          return [id, label, selected, values || [], false];
+        } catch (_) {
+          return [id, label, selected, [], true];
+        }
+      });
+      const [libs, res] = await Promise.all([api('/api/v1/libraries'), api(`${seriesPath}?${apiParams.toString()}`)]);
+      if (seq !== routeSeq) return;
+      state.libraries = libs || [];
       const items = (res && res.content) || [];
       const totalElements = Number((res && res.totalElements) || 0);
       const totalPages = Number((res && res.totalPages) || 0);
@@ -706,6 +735,7 @@
               <option value="lastModifiedDate,desc" ${sort === 'lastModifiedDate,desc' ? 'selected' : ''}>按最近更新</option>
               <option value="createdDate,desc" ${sort === 'createdDate,desc' ? 'selected' : ''}>按最新入库</option>
               <option value="metadata.titleSort,asc" ${sort === 'metadata.titleSort,asc' ? 'selected' : ''}>按标题 A-Z</option>
+              <option value="bgmRank,asc" ${sort === 'bgmRank,asc' ? 'selected' : ''}>按 Bangumi 排名</option>
               <option value="bgmScore,desc" ${sort === 'bgmScore,desc' ? 'selected' : ''}>按 Bangumi 评分</option>
               <option value="random" ${sort === 'random' ? 'selected' : ''}>随机漫游</option>
             </select>
@@ -736,27 +766,30 @@
               <option value="HIATUS" ${seriesStatus === 'HIATUS' ? 'selected' : ''}>休刊</option>
               <option value="ABANDONED" ${seriesStatus === 'ABANDONED' ? 'selected' : ''}>中止</option>
             </select>
-            <select id="f-genre">
-              <option value="">类型：全部</option>
-              ${state.taxonomies.genres.map((g) => `<option value="${esc(g)}" ${genre === g ? 'selected' : ''}>${esc(g)}</option>`).join('')}
+            <select id="f-genre" disabled>
+              <option value="">类型加载中…</option>
+              ${genre ? `<option value="${esc(genre)}" selected>${esc(genre)}</option>` : ''}
             </select>
-            <select id="f-tag">
-              <option value="">标签：全部</option>
-              ${state.taxonomies.tags.slice(0, 150).map((t) => `<option value="${esc(t)}" ${tag === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+            <select id="f-tag" disabled>
+              <option value="">标签加载中…</option>
+              ${tag ? `<option value="${esc(tag)}" selected>${esc(tag)}</option>` : ''}
             </select>
-            <select id="f-pub">
-              <option value="">出版社：全部</option>
-              ${state.taxonomies.publishers.slice(0, 150).map((p) => `<option value="${esc(p)}" ${publisher === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+            <select id="f-pub" disabled>
+              <option value="">出版社加载中…</option>
+              ${publisher ? `<option value="${esc(publisher)}" selected>${esc(publisher)}</option>` : ''}
             </select>
             <input type="text" id="f-author" class="filter-author-input" placeholder="作者筛选" value="${esc(author)}">
             <button type="button" class="btn btn-primary btn-sm" id="f-apply">筛选</button>
             <button type="button" class="btn btn-sm" id="f-reset">重置</button>
+            <label class="check-row" title="只在内置网页版合并展示，不改卷列表与阅读进度">
+              <input type="checkbox" id="f-merge-bgm" ${mergedWorks() ? 'checked' : ''}>合并相同 Bangumi ID
+            </label>
             <span class="filter-count" style="margin-left:auto;color:var(--text-muted);font-size:12.5px">共 ${totalElements.toLocaleString()} 部作品</span>
           </div>
         </div>
 
         ${items.length > 0
-          ? `<div class="poster-grid">${items.map(seriesCardHTML).join('')}</div>`
+          ? `<div class="poster-grid" id="library-cards">${items.map((item) => seriesCardHTML(item, libraryID)).join('')}</div>`
           : `<div class="empty-box">没有找到符合筛选条件的漫画作品。</div>`}
 
         ${totalPages > 1 ? `
@@ -787,6 +820,21 @@
       ['f-sort', 'f-read', 'f-scrape', 'f-oneshot', 'f-status', 'f-genre', 'f-tag', 'f-pub'].forEach((id) => {
         document.getElementById(id).onchange = applyFilters;
       });
+      document.getElementById('f-merge-bgm').onchange = (e) => {
+        localStorage.setItem('fk115_merge_bangumi', e.target.checked ? '1' : '0');
+        navigate(buildURL({}), true);
+      };
+      filters.forEach(async (loaded) => {
+        const [id, label, selected, values, failed] = await loaded;
+        if (seq !== routeSeq) return;
+        const select = document.getElementById(id);
+        if (!select) return;
+        const choices = values.slice(0, id === 'f-genre' ? undefined : 150);
+        if (selected && !choices.includes(selected)) choices.unshift(selected);
+        select.innerHTML = `<option value="">${label}：${failed ? '加载失败' : '全部'}</option>` +
+          choices.map((v) => `<option value="${esc(v)}" ${v === selected ? 'selected' : ''}>${esc(v)}</option>`).join('');
+        select.disabled = failed && !selected;
+      });
       document.getElementById('f-reset').onclick = () => {
         navigate(libraryID ? `/libraries/${encodeURIComponent(libraryID)}` : '/libraries');
       };
@@ -795,7 +843,12 @@
         document.getElementById('pg-next').onclick = () => navigate(buildURL({ page: page + 1 }));
       }
     } catch (err) {
-      toast(err.message, 'error');
+      if (seq !== routeSeq) return;
+      const status = document.getElementById('library-list-status');
+      if (status) {
+        status.innerHTML = `列表加载失败：${esc(err.message)} <button type="button" class="btn btn-sm">重试</button>`;
+        status.querySelector('button').onclick = () => renderLibraries(libraryID);
+      }
     }
   }
 
@@ -851,12 +904,14 @@
   }
 
   async function renderSeriesDetail(seriesID) {
+    const seq = routeSeq;
     renderShell('libraries', `<div class="boot-splash" style="min-height:45vh"><div class="spinner"></div><p>正在读取作品详情…</p></div>`);
     try {
       const [detail, maintJobs] = await Promise.all([
         api(`/admin/api/series/${encodeURIComponent(seriesID)}/detail`),
         api(`/admin/api/maintenance-jobs?targetType=series&targetId=${encodeURIComponent(seriesID)}&limit=6`),
       ]);
+      if (seq !== routeSeq) return;
       paintSeriesDetail(seriesID, detail, maintJobs || []);
     } catch (err) {
       toast(err.message, 'error');
@@ -923,8 +978,11 @@
             ${bgmID > 0 ? `<div style="margin-top:2px">提示：部分带受限标签的条目在未登录 <code>bgm.tv</code> 时网页会提示“没有查询您所指定的条目”，登录 Bangumi 账号后即可正常打开。</div>` : ''}
           </div>
 
+          <div id="series-versions"></div>
           <div class="detail-cta">
             ${startTarget ? `<a href="/reader/series/${encodeURIComponent(seriesID)}/book/${encodeURIComponent(startTarget.book.id)}?page=${startTarget.page}" class="btn btn-primary btn-lg btn-cta-read" title="${esc(startTarget.fullLabel)}"><span class="btn-part-fixed">▶\u00a0${esc(startTarget.prefix)}</span>${startTarget.middle ? `<span class="btn-part-ellipsis">${esc(startTarget.middle)}</span>` : ''}${startTarget.suffix ? `<span class="btn-part-fixed">${esc(startTarget.suffix)}</span>` : ''}</a>` : ''}
+            <button type="button" class="btn" id="series-generate-cover" data-maint="series_thumbnail" data-force="false"
+              ${!books.length || maintJobs.some((j) => j.operation === 'series_thumbnail' && ['queued','running'].includes(j.status)) ? 'disabled' : ''}>生成首卷封面</button>
             <button type="button" class="btn btn-bgm" id="btn-open-bgm">Bangumi 刮削 / 匹配</button>
             <button type="button" class="btn" id="btn-edit-meta">编辑元数据</button>
             <button type="button" class="btn btn-sm" id="btn-mark-series-read">全部标为已读</button>
@@ -1033,6 +1091,7 @@
     });
 
     document.getElementById('btn-open-bgm').onclick = () => openBangumiMatchModal(seriesID, detail);
+    loadSeriesVersions(seriesID);
     document.getElementById('btn-edit-meta').onclick = () => openMetadataEditModal(seriesID, detail);
 
     document.getElementById('btn-mark-series-read').onclick = async () => {
@@ -1074,14 +1133,21 @@
       btn.onclick = async () => {
         const operation = btn.getAttribute('data-maint');
         const force = btn.getAttribute('data-force') === 'true';
+        btn.disabled = true;
         try {
           await api('/admin/api/maintenance-jobs', {
             method: 'POST',
             body: { operation, seriesId: seriesID, force },
           });
-          toast('维护任务已加入队列');
+          if (!btn.isConnected) return;
+          const panel = document.getElementById('series-maint-panel');
+          if (panel) panel.open = true;
+          toast(operation === 'series_thumbnail' ? '首卷封面任务已加入队列' : '维护任务已加入队列');
           pollSeriesMaint(seriesID);
-        } catch (err) { toast(err.message, 'error'); }
+        } catch (err) {
+          if (btn.isConnected) btn.disabled = false;
+          toast(err.message, 'error');
+        }
       };
     });
 
@@ -1091,10 +1157,39 @@
     }
   }
 
+  function loadSeriesVersions(seriesID) {
+    const qs = new URLSearchParams(location.search);
+    if (!mergedWorks() || qs.get('versions') !== '1') return;
+    const scope = qs.get('library_id') || '';
+    const seq = routeSeq;
+    const box = document.getElementById('series-versions');
+    api(`/admin/api/bookshelf/versions/${encodeURIComponent(seriesID)}?library_id=${encodeURIComponent(scope)}`)
+      .then(({ versions, lastRead }) => {
+        if (seq !== routeSeq || !box?.isConnected || (versions || []).length < 2) return;
+        let resume = '';
+        if (lastRead && !lastRead.completed) {
+          resume = `<a class="btn btn-primary btn-sm" href="/reader/series/${encodeURIComponent(lastRead.seriesId)}/book/${encodeURIComponent(lastRead.bookId)}?page=${Number(lastRead.page) || 1}">继续最近阅读</a>`;
+        } else if (lastRead && lastRead.seriesId !== seriesID) {
+          resume = `<a class="btn btn-sm" href="${seriesVersionURL(lastRead.seriesId, scope)}" data-nav>回到最近读的版本</a>`;
+        }
+        box.innerHTML = `<div class="chip-group"><label for="series-source-picker">版本 / 来源</label>
+          <select id="series-source-picker">
+            ${versions.map((v) => `<option value="${esc(v.id)}" ${v.id === seriesID ? 'selected' : ''}>
+              ${esc(v.library)} · ${esc(providerLabel(v.provider))} · ${esc(v.name)} (${Number(v.booksCount)} 册)
+            </option>`).join('')}
+          </select>${resume}</div>`;
+        box.querySelector('select').onchange = (e) => navigate(seriesVersionURL(e.target.value, scope));
+      }).catch(() => {});
+  }
+
   async function pollSeriesMaint(seriesID) {
     if (location.pathname !== `/series/${encodeURIComponent(seriesID)}` && location.pathname !== `/series/${seriesID}`) return;
+    const seq = routeSeq;
     try {
       const jobs = await api(`/admin/api/maintenance-jobs?targetType=series&targetId=${encodeURIComponent(seriesID)}&limit=6`);
+      if (seq !== routeSeq) return;
+      const coverButton = document.getElementById('series-generate-cover');
+      if (coverButton) coverButton.disabled = (jobs || []).some((j) => j.operation === 'series_thumbnail' && ['queued', 'running'].includes(j.status));
       const box = document.getElementById('series-maint-jobs');
       if (box) {
         box.innerHTML = renderMaintJobRows(jobs || []);
@@ -1105,10 +1200,13 @@
       } else {
         stopPolling();
         state.coverVer = Date.now();
+        const panelOpen = document.getElementById('series-maint-panel')?.open;
         const detail = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/detail`);
+        if (seq !== routeSeq) return;
         paintSeriesDetail(seriesID, detail, jobs || []);
+        if (panelOpen) document.getElementById('series-maint-panel').open = true;
       }
-    } catch (_) { stopPolling(); }
+    } catch (_) { if (seq === routeSeq) stopPolling(); }
   }
 
   function renderMaintJobRows(jobs) {
@@ -1870,7 +1968,7 @@
                       ${l.enabled ? `
                         <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">扫描</button>
                         <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
-                        <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}">补齐首卷封面</button>
+                        <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="${esc(l.providerType)}">补齐首卷封面…</button>
                         <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
                       ` : `
                         <button type="button" class="btn btn-primary btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="true">取消隐藏</button>
@@ -1894,7 +1992,20 @@
     };
 
     document.getElementById('nl-browse-115').onclick = () => browse115Drawer('0', ['0']);
-    document.getElementById('nl-browse-local').onclick = () => browseLocalDrawer(document.getElementById('nl-local-path').value.trim() || '/');
+    const localPath = document.getElementById('nl-local-path');
+    const browseLocal = document.getElementById('nl-browse-local');
+    if (navigator.userAgent.includes('FK115Android/')) {
+      localPath.readOnly = true;
+      localPath.placeholder = '使用 Android 系统选择器授予目录读取权限';
+      const picker = document.createElement('a');
+      picker.className = browseLocal.className;
+      picker.style.cssText = browseLocal.style.cssText;
+      picker.href = '/__android/pick-folder';
+      picker.textContent = '选择手机目录';
+      browseLocal.replaceWith(picker);
+    } else {
+      browseLocal.onclick = () => browseLocalDrawer(localPath.value.trim() || '/');
+    }
     document.getElementById('nl-browse-wd').onclick = () => {
       const acc = document.getElementById('nl-wd-account').value;
       if (!acc) { toast('请先选择 WebDAV 账号', 'error'); return; }
@@ -1969,12 +2080,43 @@
       };
     });
     body.querySelectorAll('button[data-lib-cover]').forEach((btn) => {
-      btn.onclick = async () => {
-        try {
-          await api('/admin/api/cover-jobs', { method: 'POST', body: { libraryId: btn.getAttribute('data-lib-cover'), all: false } });
-          toast('封面补齐任务已启动');
-          navigate('/admin?tab=jobs');
-        } catch (err) { toast(err.message, 'error'); }
+      btn.onclick = () => {
+        const local = btn.dataset.provider === 'local';
+        openModal({
+          title: '批量补齐首卷封面',
+          maxWidth: '520px',
+          bodyHTML: `<p>只读首卷第一页生成缩略图，不改变 Bangumi 绑定或封面显示偏好。</p>
+            <label class="check-row"><input id="cover-unbound" type="checkbox" checked>仅补未绑定 Bangumi 且缺有效封面的系列</label>
+            <label class="check-row"><input id="cover-all" type="checkbox" ${local ? 'checked' : ''}>全库处理</label>
+            <div class="field"><label for="cover-limit">最多处理最近更新的系列数</label>
+              <input id="cover-limit" type="number" min="1" max="10000" value="${local ? 50 : 5}" ${local ? 'disabled' : ''}></div>`,
+          footHTML: '<button type="button" class="btn btn-primary" id="cover-start">开始补齐</button>',
+          onMount: () => {
+            const all = document.getElementById('cover-all');
+            const limit = document.getElementById('cover-limit');
+            const start = document.getElementById('cover-start');
+            all.onchange = () => { limit.disabled = all.checked; start.classList.toggle('btn-danger', all.checked); };
+            all.onchange();
+            start.onclick = async () => {
+              if (!all.checked && (!limit.value || !limit.checkValidity())) {
+                limit.reportValidity();
+                return;
+              }
+              if (all.checked && !confirm('确认处理全库？远程库可能产生网络流量，任务可在后台取消。')) return;
+              start.disabled = true;
+              try {
+                await api('/admin/api/cover-jobs', { method: 'POST', body: {
+                  libraryId: btn.dataset.libCover,
+                  missingUnbound: document.getElementById('cover-unbound').checked,
+                  all: all.checked,
+                  limit: all.checked ? 0 : Number(limit.value),
+                } });
+                toast('封面补齐任务已启动');
+                navigate('/admin?tab=jobs');
+              } catch (err) { start.disabled = false; toast(err.message, 'error'); }
+            };
+          },
+        });
       };
     });
     body.querySelectorAll('button[data-lib-edit]').forEach((btn) => {
@@ -2735,12 +2877,16 @@
 
   // --- Router ---
 
+  let routeSeq = 0;
   async function route() {
+    const seq = ++routeSeq;
     try {
       const st = await api('/admin/api/auth/status', { allow401: true });
+      if (seq !== routeSeq) return;
       state.auth = st || { claimed: false, authenticated: false, username: '' };
     } catch (_) {}
 
+    if (seq !== routeSeq) return;
     const p = location.pathname;
     if (!state.auth.claimed) {
       if (p !== '/setup') {
@@ -2810,3 +2956,8 @@
 
   route();
 })();
+
+window.addEventListener('fk115-folder', (event) => {
+  const input = document.getElementById('nl-local-path');
+  if (input && typeof event.detail === 'string') input.value = event.detail;
+});

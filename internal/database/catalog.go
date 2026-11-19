@@ -20,6 +20,7 @@ type SeriesQuery struct {
 	Languages     []string
 	ScrapeStatus  string
 	IncludeHidden bool
+	GroupBangumi  bool
 	NSFWMode      string // "" = follow ShowNSFW(ctx), "all" = both, "only" = nsfw only, "exclude" = non-nsfw only
 	OneShot       *bool
 	Empty         bool
@@ -43,7 +44,7 @@ type BookQuery struct {
 	Sort       string
 }
 
-func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64, error) {
+func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64, error) {
 	if q.Page < 0 {
 		q.Page = 0
 	}
@@ -61,35 +62,55 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 		}
 	}
 	where, args := buildSeriesFilters(q)
-	var total int64
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM series s`+where, args...).Scan(&total); err != nil {
-		return nil, 0, err
-	}
+	source := " FROM series s"
 	dir := sortDirection(strings.ToLower(strings.TrimSpace(q.Sort)))
 	sortValue := strings.ToLower(strings.TrimSpace(q.Sort))
-	order := `COALESCE(NULLIF((SELECT sm.title_sort FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) COLLATE NOCASE ASC,s.id ASC`
+	primary := `COALESCE(NULLIF((SELECT sm.title_sort FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) COLLATE NOCASE`
+	ties := " " + dir + ",s.id " + dir
+	groupOrder := ""
 	switch {
 	case strings.Contains(sortValue, "random"):
-		order = "RANDOM()"
+		primary, ties = "RANDOM()", ""
 	case strings.HasPrefix(sortValue, "lastmodifieddate"):
-		order = `COALESCE(
- (SELECT MAX(b.file_modified_at) FROM books b WHERE b.series_id=s.id),
- s.file_modified_at,s.updated_at
-) ` + dir + `,s.name COLLATE NOCASE ASC,s.id ASC`
+		primary = `COALESCE((SELECT MAX(b.file_modified_at) FROM books b WHERE b.series_id=s.id),s.file_modified_at,s.updated_at)`
+		ties = " " + dir + ",s.name COLLATE NOCASE ASC,s.id ASC"
+		groupOrder = "MAX(" + primary + ")"
 	case strings.HasPrefix(sortValue, "createddate"):
-		order = `COALESCE(
- (SELECT MAX(b.file_created_at) FROM books b WHERE b.series_id=s.id),
- s.created_at
-) ` + dir + `,s.name COLLATE NOCASE ASC,s.id ASC`
+		primary = `COALESCE((SELECT MAX(b.file_created_at) FROM books b WHERE b.series_id=s.id),s.created_at)`
+		ties = " " + dir + ",s.name COLLATE NOCASE ASC,s.id ASC"
+		groupOrder = "MAX(" + primary + ")"
+	case strings.HasPrefix(sortValue, "bgmrank"):
+		primary = `(SELECT sm.bgm_rank FROM series_metadata sm WHERE sm.series_id=s.id AND sm.bgm_rank>0)`
+		ties = " " + dir + " NULLS LAST,s.name COLLATE NOCASE ASC,s.id ASC"
+		groupOrder = "MIN(CASE WHEN gm.bgm_rank>0 THEN gm.bgm_rank END)"
 	case strings.HasPrefix(sortValue, "bgmscore"):
-		order = `COALESCE((SELECT sm.bgm_score FROM series_metadata sm WHERE sm.series_id=s.id), -1) ` + dir + `,s.name COLLATE NOCASE ASC,s.id ASC`
-	case strings.Contains(sortValue, ",desc"):
-		order = `COALESCE(NULLIF((SELECT sm.title_sort FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) COLLATE NOCASE DESC,s.id DESC`
+		primary = `COALESCE((SELECT sm.bgm_score FROM series_metadata sm WHERE sm.series_id=s.id), -1)`
+		ties = " " + dir + ",s.name COLLATE NOCASE ASC,s.id ASC"
+		groupOrder = "COALESCE(MAX(gm.bgm_score),-1)"
+	}
+	var total int64
+	if q.GroupBangumi {
+		// Apply visibility and other filters before grouping/pagination. Keep
+		// a stable real ID as anchor, with date/rank/score from eligible versions.
+		from := " FROM series s LEFT JOIN series_metadata gm ON gm.series_id=s.id" + where +
+			" GROUP BY CASE WHEN s.one_shot=0 AND gm.bgm_subject_id>0 THEN 'bgm:'||gm.bgm_subject_id ELSE 'series:'||s.id END"
+		groupCount := "SELECT count(*) FROM (SELECT 1" + from + ")"
+		if err := s.db.QueryRowContext(ctx, groupCount, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		columns := "SELECT MIN(s.id) AS id"
+		if groupOrder != "" {
+			columns += "," + groupOrder + " AS sort_value"
+			primary = "grouped.sort_value"
+		}
+		source += " JOIN (" + columns + from + ") grouped ON grouped.id=s.id"
+		where = ""
+	} else if err := s.db.QueryRowContext(ctx, "SELECT count(*)"+source+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 	query := `
 SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified_at,s.created_at,s.updated_at,
- (SELECT count(*) FROM books b WHERE b.series_id=s.id)
-FROM series s` + where + ` ORDER BY ` + order + ` LIMIT ? OFFSET ?`
+ (SELECT count(*) FROM books b WHERE b.series_id=s.id)` + source + where + ` ORDER BY ` + primary + ties + ` LIMIT ? OFFSET ?`
 	args = append(args, q.Size, q.Page*q.Size)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -143,7 +164,12 @@ FROM series s`
 	return item, nil
 }
 
-func (s *Store) BooksPage(ctx context.Context, q BookQuery) ([]Book, int64, error) {
+func isRecentProgressQuery(q BookQuery) bool {
+	return len(q.ReadStatus) == 1 && strings.EqualFold(strings.TrimSpace(q.ReadStatus[0]), "IN_PROGRESS") &&
+		strings.EqualFold(strings.TrimSpace(q.Sort), "readProgress.readDate,desc")
+}
+
+func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64, error) {
 	if q.Page < 0 {
 		q.Page = 0
 	}
@@ -153,9 +179,18 @@ func (s *Store) BooksPage(ctx context.Context, q BookQuery) ([]Book, int64, erro
 	if q.Empty {
 		return nil, 0, nil
 	}
+	readByDate := isRecentProgressQuery(q)
+	if readByDate {
+		q.ReadStatus = nil
+	}
 	where, args := buildBookFilters(q, !s.ShowNSFW(ctx))
+	source := " FROM books b"
+	if readByDate {
+		source = " FROM book_read_progress p CROSS JOIN books b ON b.id=p.book_id"
+		where += " AND p.completed=0"
+	}
 	var total int64
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM books b`+where, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*)"+source+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	order := "b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC"
@@ -182,11 +217,13 @@ func (s *Store) BooksPage(ctx context.Context, q BookQuery) ([]Book, int64, erro
 	case strings.Contains(sortValue, ",desc"):
 		order = "b.number_sort DESC,b.name COLLATE NOCASE DESC,b.id DESC"
 	}
+	if readByDate {
+		order = "p.updated_at DESC,b.number_sort ASC,b.id ASC"
+	}
 	query := `
 SELECT b.id,b.series_id,b.library_id,b.file_id,b.parent_cid,b.name,b.size,b.pick_code,b.sha1,
  b.file_created_at,b.file_modified_at,b.number_sort,b.created_at,b.updated_at,
- coalesce(z.page_count,0)
-FROM books b LEFT JOIN zip_indexes z ON z.book_id=b.id` + where + ` ORDER BY ` + order
+ coalesce(z.page_count,0)` + source + ` LEFT JOIN zip_indexes z ON z.book_id=b.id` + where + ` ORDER BY ` + order
 	queryArgs := append([]any(nil), args...)
 	if !q.Unpaged {
 		query += ` LIMIT ? OFFSET ?`

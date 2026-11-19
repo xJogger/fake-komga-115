@@ -38,6 +38,7 @@ func applyMigrations(db *sql.DB) error {
 		{"libraries", "root_path", "TEXT NOT NULL DEFAULT ''"},
 		{"series", "one_shot", "INTEGER NOT NULL DEFAULT 0"},
 		{"series_metadata", "is_nsfw", "INTEGER NOT NULL DEFAULT 0"},
+		{"series_metadata", "bgm_rank", "INTEGER"},
 		{"series_metadata", "nsfw_lock", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, migration := range migrations {
@@ -48,7 +49,7 @@ func applyMigrations(db *sql.DB) error {
 	if err := ensurePerformanceIndexes(db); err != nil {
 		return err
 	}
-	return nil
+	return createShelfRevisions(db)
 }
 
 func ensureAuthTables(db *sql.DB) error {
