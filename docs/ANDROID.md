@@ -4,8 +4,8 @@
 
 ## 下载与安装
 
-1. 正式版从 [GitHub Releases](https://github.com/xJogger/MangaAlpha/releases) 下载 `mangaalpha-arm64.apk`。签名预览版则从 **Android APK preview** 的 `mangaalpha-android-signed` 工件解压取得；不要下载或尝试安装 unsigned 工件。
-2. 安装目标为 Android 8.0+ 的 ARM64 手机。MangaAlpha 使用 `io.github.xjogger.mangaalpha`，与旧的 Fake Komga 115 调试版是两个独立应用，不共用数据。今后同包名的正式签名包可以覆盖更新（无需卸载）；卸载会删除该应用的数据库、缓存和设置。
+1. 从 [GitHub Releases](https://github.com/xJogger/MangaAlpha/releases) 下载随服务端版本发布的 Android 预览包 `mangaalpha-arm64.apk`。分支上的签名预览则从 **Android APK preview** 的 `mangaalpha-android-signed` 工件解压取得；不要下载或尝试安装 unsigned 工件。
+2. 安装目标为 Android 8.0+ 的 ARM64 手机。MangaAlpha 使用 `io.github.xjogger.mangaalpha`，与旧的 Fake Komga 115 调试版是两个独立应用，不共用数据。后续同包名、同证书的签名包可以覆盖更新（无需卸载）；卸载会删除该应用的数据库、缓存和设置。
 3. 第一次打开先设管理员。可以添加 115、WebDAV，或在「管理后台 → 书库 → 本地」点「选择手机目录」并允许读取。应用只保存系统授权的 URI，无需全盘权限或 Shizuku。权限撤销后，用系统选择器重新选择同一个目录即可重新授权；不必删除书库。
 
 ## 运行约束和验证清单
@@ -14,6 +14,13 @@
 - 数据库、封面、Range 和页面缓存各自保存在应用私有目录，与服务器部署完全独立。SQLite 临时文件也写入应用私有缓存目录，不移动主数据库。请按手机余量调整缓存上限。锁屏、离开界面时可借助前台服务继续任务；从通知或管理后台可手动停止，也可在系统应用设置中停止。系统或设备厂商仍可能结束进程；不随开机启动。
 - APK 内的 Go 服务只监听设备回环地址，另有应用内部凭据防止其他本机应用直接访问，不用它向局域网或外部漫画客户端提供服务。
 - 安装试用时至少检查：首次设密、选目录并扫描、重启后目录授权仍有效、撤销权限后不会清空旧书库、从本地/115/WebDAV 各打开一卷、切到后台和通知停止、系统 16 KB 内存页设备能启动。CI 会校验签名、APK ZIP 对齐与 ARM64 Go 库 ELF 对齐，但不代替这些真机验证。
+
+## 2.1 预览版已知问题
+
+- 手机连接同机的 CloudDrive2 WebDAV 时，曾出现扫库中途停止、已有条目能刮削但阅读器加载不出页面。
+- 手机本地目录（SAF）曾出现授权、扫库和刮削正常，但部分归档打不开。
+
+这两种情况仍待分别排查，尚未确定是否有关联。当前 APK 不提供应用内诊断日志导出。
 
 ## 开发与签名
 

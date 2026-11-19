@@ -85,7 +85,7 @@
 
 ### 方式一：Windows 下载即用
 
-1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载文件名以 `_windows_amd64.zip` 结尾的压缩包（例如 `fake-komga-115_v2.0.0_windows_amd64.zip`）并解压。
+1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载文件名以 `_windows_amd64.zip` 结尾的压缩包（例如 `fake-komga-115_v2.1.0_windows_amd64.zip`）并解压。
 2. 双击运行 `fake-komga-115.exe`，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置。
 3. 数据默认存储在 `%LOCALAPPDATA%\fake-komga-115\data`。
 
@@ -110,7 +110,7 @@ docker run -d \
   -v fake-komga-115-data:/data \
   -v /share/manga:/manga:ro \
   -e TZ=Asia/Shanghai \
-  blacktal/fake-komga-115:v2.0.0
+  blacktal/fake-komga-115:v2.1.0
 ```
 
 项目改名不改变镜像名、服务端可执行文件或已有数据路径。已有容器升级时，请保留挂载在 `/data` 的原数据卷。建议固定使用版本标签，避免自动更新工具在未备份时跨大版本升级。首次启动后同样需要在网页设置管理员。
@@ -126,9 +126,11 @@ make build
 ./fake-komga-115
 ```
 
-### Android 独立版
+### Android 独立预览版
 
 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载 `mangaalpha-arm64.apk`（ARM64；或前往 Actions 下载签名预览包）。它在手机本机运行，支持手机目录、115 和 WebDAV，不与家里的服务器同步。构建、安装和限制见 [Android 预览版](docs/ANDROID.md)。
+
+**已知问题（2.1 预览）**：在手机上连接同机 CloudDrive2 时，扫库可能中途停止，已入库的漫画也可能加载不出页面。通过系统目录选择器（SAF）添加的本地书库，部分漫画即使已成功扫库、刮削，也可能无法读取。两种情况仍待排查。
 
 ### 命令行参数与环境变量
 
@@ -205,6 +207,10 @@ systemctl --user start fake-komga-115
 - **[CloudDrive2](https://www.clouddrive2.com/)**：提供了高性能的云盘挂载与标准 WebDAV 服务支持，让多种网盘通过 WebDAV 流式接入漫画书库更加便捷。
 - **[Mihon](https://mihon.app/) 与 [Koharia](https://github.com/Mister-album/Koharia)**：优秀的移动端与跨平台漫画阅读客户端，推动了 Komga 生态的普及与打磨。
 - **Go 核心开源库**：感谢 [`modernc.org/sqlite`](https://gitlab.com/cznic/sqlite)（纯 Go 无 CGO SQLite 引擎）、[`nwaples/rardecode`](https://github.com/nwaples/rardecode)（纯 Go RAR4/RAR5 解码器）、[`go-chi/chi`](https://github.com/go-chi/chi) 与 Go 标准库及 `golang.org/x` 团队。
+
+<p align="center">
+  <img src="docs/images/mangaalpha-stamp.png" alt="MangaAlpha 的 Café Alpha 风格线稿小鱼印章" width="96">
+</p>
 
 ---
 

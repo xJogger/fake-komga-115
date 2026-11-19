@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && corepack enable
 COPY scripts/build-reader.sh ./scripts/build-reader.sh
 COPY web/reader ./web/reader
+COPY internal/httpserver/static/ui/mangaalpha-icon.png ./internal/httpserver/static/ui/mangaalpha-icon.png
 RUN mkdir -p internal/httpserver/static/reader_dist \
     && touch internal/httpserver/static/reader_dist/placeholder.txt \
     && bash scripts/build-reader.sh

@@ -90,6 +90,16 @@ export default defineConfig(() => ({
     html_text = idx_html.read_text(encoding="utf-8")
     html_text = html_text.replace('<html lang="en">', '<html lang="zh-CN">')
     html_text = html_text.replace("<title>Suwayomi</title>", "<title>阅读器 · MangaAlpha</title>")
+    ui_icon = host_dir.parent.parent / "internal" / "httpserver" / "static" / "ui" / "mangaalpha-icon.png"
+    shutil.copyfile(ui_icon, root / "public" / "mangaalpha-icon.png")
+    upstream_tab_icons = (
+        '<link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />\n'
+        '        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />\n'
+        '        <link rel="shortcut icon" href="/favicon.ico" />'
+    )
+    if upstream_tab_icons not in html_text:
+        raise RuntimeError(f"Expected tab icons not found in {idx_html}")
+    html_text = html_text.replace(upstream_tab_icons, '<link rel="icon" type="image/png" href="/mangaalpha-icon.png" />', 1)
     if "<style>" not in html_text:
         html_text = html_text.replace(
             "</head>",
