@@ -23,6 +23,8 @@ jobs:
         run: corepack enable
       - name: Check UI JS syntax
         run: node --check internal/httpserver/static/ui/app.js
+      - name: Check WebDAV form requests
+        run: node --test scripts/webdav-form.test.cjs
       - name: Build built-in reader bundle
         run: bash scripts/build-reader.sh
       - name: Format check

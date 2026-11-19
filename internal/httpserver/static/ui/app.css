@@ -62,7 +62,15 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
 .app-root {
+  flex: 1 0 auto;
   width: 100%;
   max-width: 100%;
   overflow-x: clip;
@@ -142,16 +150,23 @@ button, input, select, textarea {
 }
 
 .brand-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--accent), #7c5cff);
-  color: #fff;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 800;
-  font-size: 13px;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+}
+
+.site-footer {
+  padding: 14px 16px max(14px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.site-footer a:hover,
+.site-footer a:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 .topnav {
@@ -241,7 +256,8 @@ button, input, select, textarea {
 
 /* Auth Card (/setup & /login) */
 .auth-screen {
-  min-height: 100vh;
+  min-height: calc(100vh - 54px);
+  min-height: calc(100dvh - 54px);
   display: flex;
   align-items: center;
   justify-content: center;

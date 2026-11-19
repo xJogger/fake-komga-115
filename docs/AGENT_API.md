@@ -1,6 +1,6 @@
 # Agent API 参考手册 (`/api/agent/v1`)
 
-`fake-komga-115` 内置了专为 AI Agent（Claude Code、Codex、Cursor、Antigravity、MCP Server、自动化运维脚本等）设计的管理接口：`/api/agent/v1/*`。
+**MangaAlpha** 内置了专为 AI Agent（Claude Code、Codex、Cursor、Antigravity、MCP Server、自动化运维脚本等）设计的管理接口：`/api/agent/v1/*`。
 
 相比面向前端与阅读客户端的完整 Komga 分页结构，`/api/agent/v1` 具有以下特点：
 

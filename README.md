@@ -1,19 +1,26 @@
-# fake-komga-115
+# MangaAlpha
 
-[![CI](https://github.com/xJogger/fake-komga-115/actions/workflows/test.yml/badge.svg)](https://github.com/xJogger/fake-komga-115/actions/workflows/test.yml)
-[![Release](https://img.shields.io/github/v/release/xJogger/fake-komga-115?display_name=tag)](https://github.com/xJogger/fake-komga-115/releases/latest)
+[![CI](https://github.com/xJogger/MangaAlpha/actions/workflows/test.yml/badge.svg)](https://github.com/xJogger/MangaAlpha/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/xJogger/MangaAlpha?display_name=tag)](https://github.com/xJogger/MangaAlpha/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/mangaalpha-banner.png">
+    <img src="docs/images/mangaalpha-banner.svg" alt="MangaAlpha" width="680">
+  </picture>
+</p>
 
 <p align="center">
   <img src="docs/images/readme-hero.jpg" alt="本地/NAS、115 和 WebDAV 汇入漫画书架，漫画页面按需传到手机" width="920">
 </p>
 
-`fake-komga-115` 是一个 **100% 纯 Go（`CGO_ENABLED=0`）自包含**的轻量级 Komga 兼容漫画书库与阅读服务端。它原生支持 **115 Open API**、**服务器本地 / SMB 挂载目录** 与 **WebDAV（CloudDrive2 / OpenList / NAS）** 三类存储源共存，内置 **响应式网页书架**、**简体中文双页网页阅读器**、**Bangumi (`bgm.tv`) 离线+在线双引擎元数据刮削中心** 与 **AI Agent 专用书库治理接口**，同时完整兼容 **Mihon（Komga 扩展）** 与 **Koharia** 客户端。
+**MangaAlpha**（原名 `fake-komga-115`）是一个 **100% 纯 Go（`CGO_ENABLED=0`）自包含**的轻量级 Komga 兼容漫画书库与阅读服务端。它原生支持 **115 Open API**、**服务器本地 / SMB 挂载目录** 与 **WebDAV（CloudDrive2 / OpenList / NAS）** 三类存储源共存，内置 **响应式网页书架**、**简体中文双页网页阅读器**、**Bangumi (`bgm.tv`) 离线+在线双引擎元数据刮削中心** 与 **AI Agent 专用书库治理接口**，同时完整兼容 **Mihon（Komga 扩展）** 与 **Koharia** 客户端。
 
 ```text
 内置网页书架 (/) · 内置简体中文阅读器 (/reader/*) · Mihon / Koharia · AI Agent (/api/agent/v1)
                 ↓ (Session Cookie / HTTP Basic Auth / Bearer & X-API-Key)
-                              fake-komga-115
+                              MangaAlpha
         ├── 115 Open API ─────────→ downurl + HTTP Range 分块按需流式解压
         ├── WebDAV (CD2/OpenList) ─→ PROPFIND + 令牌桶限速 + HTTP Range 按需解压
         └── 本地 / SMB 挂载目录 ───→ 原生 io.ReaderAt 随机直读（免分块缓存 + 空挂载点保护）
@@ -78,7 +85,7 @@
 
 ### 方式一：Windows 下载即用
 
-1. 从 [Releases](https://github.com/xJogger/fake-komga-115/releases/latest) 下载文件名以 `_windows_amd64.zip` 结尾的压缩包（例如 `fake-komga-115_v2.0.0_windows_amd64.zip`）并解压。
+1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载文件名以 `_windows_amd64.zip` 结尾的压缩包（例如 `fake-komga-115_v2.0.0_windows_amd64.zip`）并解压。
 2. 双击运行 `fake-komga-115.exe`，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置。
 3. 数据默认存储在 `%LOCALAPPDATA%\fake-komga-115\data`。
 
@@ -106,22 +113,22 @@ docker run -d \
   blacktal/fake-komga-115:v2.0.0
 ```
 
-已有容器升级时，请保留挂载在 `/data` 的原数据卷。建议固定使用版本标签，避免自动更新工具在未备份时跨大版本升级。首次启动后同样需要在网页设置管理员。
+项目改名不改变镜像名、服务端可执行文件或已有数据路径。已有容器升级时，请保留挂载在 `/data` 的原数据卷。建议固定使用版本标签，避免自动更新工具在未备份时跨大版本升级。首次启动后同样需要在网页设置管理员。
 
 ### 方式四：从源码构建
 
 完整构建（含内置 Suwayomi 阅读器静态包）需要 Go 1.26+、Node.js 24+、Python 3 与 `pnpm`（或 `corepack`）：
 
 ```bash
-git clone https://github.com/xJogger/fake-komga-115.git
-cd fake-komga-115
+git clone https://github.com/xJogger/MangaAlpha.git
+cd MangaAlpha
 make build
 ./fake-komga-115
 ```
 
-### Android 独立预览
+### Android 独立版
 
-可通过 GitHub Actions 手动构建 ARM64 试用 APK。它在手机本机运行，支持手机目录、115 和 WebDAV，不与家里的服务器同步。构建、安装和限制见 [Android 预览版](docs/ANDROID.md)。
+从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载 `mangaalpha-arm64.apk`（ARM64；或前往 Actions 下载签名预览包）。它在手机本机运行，支持手机目录、115 和 WebDAV，不与家里的服务器同步。构建、安装和限制见 [Android 预览版](docs/ANDROID.md)。
 
 ### 命令行参数与环境变量
 
@@ -189,7 +196,7 @@ systemctl --user start fake-komga-115
 
 ## 致谢上游与开源生态
 
-`fake-komga-115` 站在众多优秀开源项目与开放社区的肩膀上，在此向所有上游作者与维护者致以诚挚的感谢：
+**MangaAlpha** 站在众多优秀开源项目与开放社区的肩膀上，在此向所有上游作者与维护者致以诚挚的感谢：
 
 - **[Suwayomi / Suwayomi-WebUI](https://github.com/Suwayomi/Suwayomi-WebUI)**（MPL-2.0）：提供了体验极其出色的现代化漫画 Web 阅读器前端实现，本项目的内置阅读器（`/reader/*`）基于其源码适配构建。
 - **[Komga](https://komga.org/)（[@gotson](https://github.com/gotson)）**：定义了清晰、成熟的漫画数字书库领域模型与 REST API 规范，让跨客户端生态互联成为可能。

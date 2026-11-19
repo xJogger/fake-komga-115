@@ -386,7 +386,7 @@ class KomgaBridgeImpl {
                 __typename: 'SourceType',
                 id: 'komga-local',
                 name: 'fake-komga-115',
-                displayName: 'fake-komga-115',
+                displayName: 'MangaAlpha',
                 lang: 'zh',
                 iconUrl: '',
             },

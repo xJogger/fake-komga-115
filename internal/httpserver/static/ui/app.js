@@ -339,8 +339,8 @@
       <header class="topbar">
         <div class="topbar-inner">
           <a href="/" data-nav class="brand">
-            <span class="brand-mark">FK</span>
-            <span>fake-komga-115</span>
+            <img class="brand-mark" src="/ui/mangaalpha-icon.png" alt="">
+            <span>MangaAlpha</span>
           </a>
           <nav class="topnav">
             <a href="/" data-nav class="${activeNav === 'home' ? 'active' : ''}">书架</a>
@@ -411,13 +411,13 @@
   // --- Setup & Login Views ---
 
   function renderSetup() {
-    document.title = '初始化管理员 · fake-komga-115';
+    document.title = '初始化管理员 · MangaAlpha';
     const app = document.getElementById('app');
     app.innerHTML = `
       <div class="auth-screen">
         <form class="auth-card" id="setup-form">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-            <div class="brand"><span class="brand-mark">FK</span><span>fake-komga-115</span></div>
+            <div class="brand"><img class="brand-mark" src="/ui/mangaalpha-icon.png" alt=""><span>MangaAlpha</span></div>
             <button type="button" class="btn btn-sm" id="setup-theme-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
           </div>
           <h1>初始化管理员账号</h1>
@@ -466,7 +466,7 @@
   }
 
   function renderLogin() {
-    document.title = '登录 · fake-komga-115';
+    document.title = '登录 · MangaAlpha';
     const params = new URLSearchParams(location.search);
     const redirect = params.get('redirect') || '/';
     const app = document.getElementById('app');
@@ -474,7 +474,7 @@
       <div class="auth-screen">
         <form class="auth-card" id="login-form">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-            <div class="brand"><span class="brand-mark">FK</span><span>fake-komga-115</span></div>
+            <div class="brand"><img class="brand-mark" src="/ui/mangaalpha-icon.png" alt=""><span>MangaAlpha</span></div>
             <button type="button" class="btn btn-sm" id="login-theme-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
           </div>
           <h1>登录书架</h1>
@@ -516,7 +516,7 @@
   // --- Home View (/) ---
 
   function renderHome() {
-    document.title = '书架 · fake-komga-115';
+    document.title = '书架 · MangaAlpha';
     const seq = routeSeq;
     renderShell('home', `<section id="home-libs">正在读取书库…</section>
       <section id="home-continue" aria-live="polite"></section>
@@ -542,7 +542,7 @@
       if (state.libraries.length === 0) {
         html += `
           <div class="card" style="text-align:center;padding:38px 20px">
-            <h2>欢迎来到 fake-komga-115 书架</h2>
+            <h2>欢迎来到 MangaAlpha 书架</h2>
             <p style="color:var(--text-secondary);max-width:540px;margin:8px auto 18px">
               当前暂无可展示的书库（尚未创建书库，或所有书库均已设为隐藏）。支持挂载 <strong>115 网盘目录</strong>、<strong>本地 / SMB 挂载目录</strong> 与 <strong>WebDAV 远程目录（CloudDrive2 / OpenList / NAS）</strong>，并支持 Bangumi 中文元数据刮削与内置简体中文双页阅读器。
             </p>
@@ -655,7 +655,7 @@
     const page = Math.max(0, parseInt(sp.get('page') || '0', 10) || 0);
     const size = 36;
 
-    document.title = '浏览书库 · fake-komga-115';
+    document.title = '浏览书库 · MangaAlpha';
     const oldList = document.getElementById('library-cards');
     const currentCards = oldList?.innerHTML || document.getElementById('library-updating')?.innerHTML || '';
     renderShell('libraries', currentCards
@@ -926,7 +926,7 @@
     const extras = detail.bookExtras || {};
     const lib = detail.library || {};
     const title = meta.title || detail.originalName;
-    document.title = `${title} · fake-komga-115`;
+    document.title = `${title} · MangaAlpha`;
 
     const startTarget = pickStartBook(books);
     const coverSrc = rawMeta.coverSource || 'auto';
@@ -1497,7 +1497,7 @@
     const rp = b.readProgress;
     const pgCount = (b.media && b.media.pagesCount) || 0;
     const startPg = rp && !rp.completed && rp.page > 0 ? rp.page : 1;
-    document.title = `${b.name || '单册详情'} · fake-komga-115`;
+    document.title = `${b.name || '单册详情'} · MangaAlpha`;
 
     const content = document.getElementById('page-content');
     if (!content) return;
@@ -1598,7 +1598,7 @@
     const sp = new URLSearchParams(location.search);
     const tab = sp.get('tab') || state.adminTab || 'overview';
     state.adminTab = tab;
-    document.title = '管理后台 · fake-komga-115';
+    document.title = '管理后台 · MangaAlpha';
 
     const tabs = [
       ['overview', '概览与连接'],
@@ -1809,7 +1809,7 @@
         <div class="field">
           <label>WebDAV 根地址 (Base URL)</label>
           <input type="url" id="wd-url" placeholder="http://127.0.0.1:19798/dav 或 https://nas.example.com:5006/dav" value="${esc(existing ? existing.baseUrl : '')}">
-          <div class="field-hint">CloudDrive2 默认 WebDAV 地址通常为 <code>http://&lt;IP&gt;:19798/dav</code>；OpenList 默认通常为 <code>http://&lt;IP&gt;:5244/dav</code>。</div>
+          <div class="field-hint">CloudDrive2 桌面/NAS 默认 <code>http://&lt;IP&gt;:19798/dav</code>；若 CloudDrive2 App 与 MangaAlpha 在同一台手机上，可用 <code>http://127.0.0.1:29798/dav</code>。OpenList 默认通常为 <code>http://&lt;IP&gt;:5244/dav</code>。</div>
         </div>
         <div class="grid-2">
           <div class="field">
@@ -1838,9 +1838,7 @@
         <button type="button" class="btn btn-primary" id="wd-modal-save">保存</button>
       `,
       onMount: () => {
-        const readForm = () => ({
-          id: isEdit ? existing.id : '',
-          name: document.getElementById('wd-name').value.trim(),
+        const readConnection = () => ({
           baseUrl: document.getElementById('wd-url').value.trim(),
           username: document.getElementById('wd-user').value.trim(),
           password: document.getElementById('wd-pass').value,
@@ -1849,12 +1847,14 @@
         });
         document.getElementById('wd-modal-test').onclick = async () => {
           try {
-            await api('/admin/api/webdav-accounts/test', { method: 'POST', body: readForm() });
+            const payload = readConnection();
+            if (isEdit) payload.id = existing.id;
+            await api('/admin/api/webdav-accounts/test', { method: 'POST', body: payload });
             toast('WebDAV 连接验证成功！');
           } catch (err) { toast(err.message, 'error'); }
         };
         document.getElementById('wd-modal-save').onclick = async () => {
-          const payload = readForm();
+          const payload = { ...readConnection(), name: document.getElementById('wd-name').value.trim() };
           try {
             if (isEdit) {
               await api(`/admin/api/webdav-accounts/${encodeURIComponent(existing.id)}`, { method: 'PUT', body: payload });

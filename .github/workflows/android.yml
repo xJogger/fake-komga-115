@@ -1,7 +1,6 @@
 name: Android APK preview
 
 on:
-  # The workflow can be tried without merging Android into the default branch.
   push:
     branches: ["feat/v2.1"]
   workflow_dispatch:
@@ -10,62 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  android-arm64:
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    env:
-      NDK_VERSION: 28.2.13676358
-      GOMOBILE_VERSION: v0.0.0-20261117202452-47699113848a
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-      - name: Set up Android SDK command-line tools
-        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
-        with:
-          packages: ""
-          log-accepted-android-sdk-licenses: "false"
-      - name: Prepare SDK and NDK
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
-      - name: Build bundled reader
-        run: |
-          corepack enable
-          bash scripts/build-reader.sh
-      - name: Bind Go runtime
-        run: |
-          export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${NDK_VERSION}"
-          go install "golang.org/x/mobile/cmd/gomobile@${GOMOBILE_VERSION}"
-          go install "golang.org/x/mobile/cmd/gobind@${GOMOBILE_VERSION}"
-          export PATH="$(go env GOPATH)/bin:$PATH"
-          # The binding imports x/mobile/bind. Keep this dependency in the CI
-          # checkout only: server builds do not need gomobile or its module.
-          go get "golang.org/x/mobile/bind@${GOMOBILE_VERSION}"
-          mkdir -p android/app/libs
-          gomobile bind -target=android/arm64 -androidapi 26 -o android/app/libs/fk115.aar ./mobile
-      - name: Assemble and verify APK
-        run: |
-          gradle -p android --no-daemon :app:assembleDebug
-          apk=android/app/build/outputs/apk/debug/app-debug.apk
-          "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify "${apk}"
-          "${ANDROID_HOME}/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "${apk}"
-          unzip -p "${apk}" lib/arm64-v8a/libgojni.so > "${RUNNER_TEMP}/libgojni.so"
-          "${ANDROID_HOME}/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump" -p "${RUNNER_TEMP}/libgojni.so" |
-            awk '/^[[:space:]]*LOAD/ { n++; if ($NF !~ /^2\*\*(1[4-9]|[2-9][0-9])$/) bad=1 } END { exit !n || bad }'
-          cp "${apk}" "${RUNNER_TEMP}/fake-komga-115-android-arm64.apk"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: fake-komga-115-android-arm64-preview
-          path: ${{ runner.temp }}/fake-komga-115-android-arm64.apk
-          if-no-files-found: error
+  android:
+    if: github.ref == 'refs/heads/feat/v2.1'
+    uses: ./.github/workflows/android-package.yml
+    with:
+      version-name: "2.1.0-preview"
+      version-code: 2010000

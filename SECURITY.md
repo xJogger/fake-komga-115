@@ -2,7 +2,7 @@
 
 ## 安全模型（v2）
 
-`fake-komga-115` 采用单管理员强鉴权模型：
+**MangaAlpha** 采用单管理员强鉴权模型：
 
 - **首次初始化强制设密**：新安装或从 `v1.x` 升级后首次打开服务时，所有业务页面与 `/api/v1/*`、`/admin/api/*` 均处于锁定状态（页面重定向至 `/setup`，接口返回 `401 SETUP_REQUIRED`），直到用户完成自定义管理员用户名与密码设置；初始化完成后 `/setup` 与 `/api/v1/claim` 永久锁定。
 - **密码与凭据哈希存储**：管理员密码采用 `argon2id` 哈希存储；浏览器会话 Cookie（`fk115_session` / `KOMGA-SESSION`，`HttpOnly` + `SameSite=Lax`）与 `X-API-Key` 在 SQLite 中仅保存 `SHA-256` 摘要，不存明文。
@@ -21,6 +21,7 @@
 - `.env*`、本地配置文件、Access Token、Refresh Token、WebDAV 密码、API Key
 - 真实 `downurl`、Cookie、Authorization Header
 - 包含私人漫画目录名或账号信息的调试输出
+- Android 签名库、签名私钥或密码（公开证书摘要可以公开）
 
 ## 报告漏洞
 

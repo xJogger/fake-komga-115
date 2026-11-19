@@ -83,7 +83,7 @@ public final class ReaderService extends Service {
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, ReaderService.class).setAction(STOP),
             PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, channel).setSmallIcon(android.R.drawable.ic_menu_agenda)
-            .setContentTitle("Fake Komga 115 正在运行").setContentText("仅在本机提供书架与阅读器")
+            .setContentTitle("MangaAlpha 正在运行").setContentText("仅在本机提供书架与阅读器")
             .setContentIntent(open).addAction(new Notification.Action.Builder(
                     android.R.drawable.ic_menu_close_clear_cancel, "停止", stop).build()).setOngoing(true).build();
     }

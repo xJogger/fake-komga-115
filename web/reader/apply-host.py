@@ -89,7 +89,7 @@ export default defineConfig(() => ({
     idx_html = root / "index.html"
     html_text = idx_html.read_text(encoding="utf-8")
     html_text = html_text.replace('<html lang="en">', '<html lang="zh-CN">')
-    html_text = html_text.replace("<title>Suwayomi</title>", "<title>阅读器 · fake-komga-115</title>")
+    html_text = html_text.replace("<title>Suwayomi</title>", "<title>阅读器 · MangaAlpha</title>")
     if "<style>" not in html_text:
         html_text = html_text.replace(
             "</head>",

@@ -1,0 +1,149 @@
+name: Build and sign Android APK
+
+on:
+  workflow_call:
+    inputs:
+      version-name:
+        required: true
+        type: string
+      version-code:
+        required: true
+        type: number
+      reader-artifact:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      NDK_VERSION: 28.2.13676358
+      GOMOBILE_VERSION: v0.0.0-20261117202452-47699113848a
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: ""
+          log-accepted-android-sdk-licenses: "false"
+      - name: Prepare SDK and NDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
+      - uses: actions/download-artifact@v8
+        if: inputs.reader-artifact
+        with:
+          name: reader-dist
+          path: internal/httpserver/static/reader_dist
+      - name: Build bundled reader
+        if: ${{ !inputs.reader-artifact }}
+        run: |
+          corepack enable
+          bash scripts/build-reader.sh
+      - name: Bind Go runtime
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          go install "golang.org/x/mobile/cmd/gomobile@${GOMOBILE_VERSION}"
+          go install "golang.org/x/mobile/cmd/gobind@${GOMOBILE_VERSION}"
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          # The binding imports x/mobile/bind. Keep this dependency in the CI
+          # checkout only: server builds do not need gomobile or its module.
+          go get "golang.org/x/mobile/bind@${GOMOBILE_VERSION}"
+          mkdir -p android/app/libs
+          gomobile bind -target=android/arm64 -androidapi 26 -o android/app/libs/fk115.aar ./mobile
+      - name: Assemble unsigned APK and verify alignment
+        shell: bash
+        env:
+          MANGAALPHA_VERSION_CODE: ${{ inputs.version-code }}
+          MANGAALPHA_VERSION_NAME: ${{ inputs.version-name }}
+        run: |
+          set -euo pipefail
+          gradle -p android --no-daemon :app:assembleRelease
+          apk=android/app/build/outputs/apk/release/app-release-unsigned.apk
+          unzip -p "${apk}" lib/arm64-v8a/libgojni.so > "${RUNNER_TEMP}/libgojni.so"
+          "${ANDROID_HOME}/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump" -p "${RUNNER_TEMP}/libgojni.so" |
+            awk '/^[[:space:]]*LOAD/ { n++; if ($NF !~ /^2\*\*(1[4-9]|[2-9][0-9])$/) bad=1 } END { exit !n || bad }'
+          tools="${ANDROID_HOME}/build-tools/35.0.0"
+          "${tools}/zipalign" -P 16 -f 4 "${apk}" "${RUNNER_TEMP}/mangaalpha-arm64-unsigned.apk"
+          "${tools}/zipalign" -c -P 16 4 "${RUNNER_TEMP}/mangaalpha-arm64-unsigned.apk"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mangaalpha-android-unsigned
+          path: ${{ runner.temp }}/mangaalpha-arm64-unsigned.apk
+          if-no-files-found: error
+          retention-days: 3
+
+  sign-arm64:
+    name: Sign Android APK
+    needs: build-arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Build and dependencies never need signing secrets. Only this isolated,
+    # manually approved job gets access through the protected environment.
+    environment: android-signing
+    steps:
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: "build-tools;35.0.0"
+          log-accepted-android-sdk-licenses: "false"
+      - uses: actions/download-artifact@v8
+        with:
+          name: mangaalpha-android-unsigned
+          path: unsigned
+      - name: Sign and verify certificate and alignment
+        shell: bash
+        env:
+          SIGNING_KEYSTORE_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_B64 }}
+          SIGNING_STOREPASS: ${{ secrets.ANDROID_SIGNING_STOREPASS }}
+          EXPECTED_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          : "${SIGNING_KEYSTORE_B64:?Android signing keystore is required}"
+          : "${SIGNING_STOREPASS:?Android signing password is required}"
+          [[ "${EXPECTED_CERT_SHA256}" =~ ^[a-f0-9]{64}$ ]]
+          ks=$(mktemp "${RUNNER_TEMP}/android-signing.XXXXXXXX.p12")
+          trap 'rm -f -- "${ks}"' EXIT
+          printf '%s' "${SIGNING_KEYSTORE_B64}" | base64 --decode > "${ks}"
+          unset SIGNING_KEYSTORE_B64
+          tools="${ANDROID_HOME}/build-tools/35.0.0"
+          mkdir -p signed
+          "${tools}/apksigner" sign --ks "${ks}" --ks-type PKCS12 --ks-key-alias mangaalpha \
+            --ks-pass env:SIGNING_STOREPASS --v4-signing-enabled false \
+            --out signed/mangaalpha-arm64.apk unsigned/mangaalpha-arm64-unsigned.apk
+          unset SIGNING_STOREPASS
+          report=$("${tools}/apksigner" verify --verbose --print-certs signed/mangaalpha-arm64.apk)
+          cert=$(awk -F ': ' '/^Signer #1 certificate SHA-256 digest:/ {print $2}' <<< "${report}")
+          if [[ "${cert,,}" != "${EXPECTED_CERT_SHA256}" ]]; then
+            echo "::error::APK signing certificate does not match the configured fingerprint"
+            exit 1
+          fi
+          "${tools}/zipalign" -c -P 16 4 signed/mangaalpha-arm64.apk
+          "${tools}/aapt" dump badging signed/mangaalpha-arm64.apk |
+            grep -F "package: name='io.github.xjogger.mangaalpha'"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mangaalpha-android-signed
+          path: signed/mangaalpha-arm64.apk
+          if-no-files-found: error

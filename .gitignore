@@ -21,3 +21,9 @@ coverage.out
 /dist/
 internal/httpserver/static/reader_dist/*
 !internal/httpserver/static/reader_dist/placeholder.txt
+
+# Android signing material never belongs to this repository.
+*.jks
+*.keystore
+*.p12
+*.pfx
