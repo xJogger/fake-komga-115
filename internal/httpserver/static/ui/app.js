@@ -2008,6 +2008,102 @@
     const scannableLibCount = allLibs.filter((l) => l.enabled && l.providerType !== 'union').length;
     const eligibleForNewUnion = allLibs.filter((l) => l.providerType !== 'union' && !l.unionParentId);
 
+    const libByID = new Map(allLibs.map((l) => [l.id, l]));
+    const unionIDs = new Set(allLibs.filter((l) => l.providerType === 'union').map((l) => l.id));
+    const subsByUnion = new Map();
+    allLibs.forEach((l) => {
+      if (!l.unionParentId || !unionIDs.has(l.unionParentId)) return;
+      if (!subsByUnion.has(l.unionParentId)) subsByUnion.set(l.unionParentId, []);
+      subsByUnion.get(l.unionParentId).push(l);
+    });
+    subsByUnion.forEach((list, parentID) => {
+      const parent = libByID.get(parentID);
+      const orderMap = new Map((parent && parent.unionLayers || []).map((ly, idx) => [ly.memberLibraryId, idx]));
+      list.sort((a, b) => {
+        const pa = orderMap.has(a.id) ? orderMap.get(a.id) : Number(a.unionPriority || 0);
+        const pb = orderMap.has(b.id) ? orderMap.get(b.id) : Number(b.unionPriority || 0);
+        return pa - pb || a.name.localeCompare(b.name);
+      });
+    });
+    const topLibs = allLibs.filter((l) => !l.unionParentId || !unionIDs.has(l.unionParentId));
+
+    const renderLibCardHTML = (l, nested = false, layerRank = 0) => {
+      const isUnion = l.providerType === 'union';
+      const isSub = Boolean(l.unionParentId);
+      const sched = schedulesMap[l.id];
+      const schedText = formatScheduleSummary(sched);
+      const subChildren = isUnion ? (subsByUnion.get(l.id) || []) : [];
+      const cardClass = nested ? 'lib-card lib-sub-card' : `lib-card${!l.enabled ? ' lib-card-hidden' : ''}`;
+      return `
+      <div class="${cardClass}" style="${!l.enabled && nested ? 'opacity:0.72;' : ''}">
+        <div class="lib-card-row">
+          <div style="min-width:0;flex:1">
+            ${nested ? `<span class="badge badge-accent" style="margin-right:6px">#${layerRank + 1}</span>` : ''}
+            <strong style="font-size:${nested ? '14.5px' : '15.5px'}">${esc(l.name)}</strong>
+            <span class="badge ${isUnion ? 'badge-accent' : ''}" style="margin-left:6px">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
+            ${l.oneShot ? `<span class="badge badge-accent">单本 One-Shots</span>` : ''}
+            ${isSub && !nested ? `<span class="badge">子库 · 归属：${esc(l.unionParentName)} (#${Number(l.unionPriority || 0) + 1})</span>` : ''}
+            ${!l.enabled ? `<span class="badge badge-warn">已隐藏</span>` : ''}
+            ${schedText ? `<span class="badge badge-success" title="服务器本机时区：${esc(serverTZ || 'Local')}">⏰ ${esc(schedText)}</span>` : ''}
+            <div style="font-size:12px;color:var(--text-muted);margin-top:4px">
+              ${isUnion
+                ? `叠加层级：${(l.unionLayers || []).map((ly, idx) => `#${idx + 1} ${esc(ly.memberLibraryName)} (${esc(providerLabel(ly.providerType, ly.webdavAccountName))})`).join(' → ') || '无'}`
+                : `定位标识：<code>${esc(l.providerType === '115' ? `CID:${l.rootCid}` : l.rootPath || l.rootCid)}</code>`}
+              · ${Number(l.seriesCount || 0).toLocaleString()} 系列 · ${Number(l.bookCount ?? l.booksCount ?? 0).toLocaleString()} 册 · ${fmtBytes(l.comicBytes)}
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
+              ${isSub ? `<span>联合子库：不对前台书架与 Komga 单独暴露，扫库完成后自动刷新所属联合库 · </span>` : ''}
+              ${!l.enabled ? `<span>已隐藏：保留全部数据与缓存，不参与前台书架、客户端与定时任务 · </span>` : ''}
+              ${isUnion ? '最近合并' : '最近扫描'}：${esc(l.lastScanStatus || '从未')} ${l.lastScanCompletedAt ? `(${fmtTime(l.lastScanCompletedAt)})` : ''}
+              ${l.lastScanError ? `<span style="color:var(--danger)"> · ${esc(l.lastScanError)}</span>` : ''}
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${isUnion ? `
+              ${l.enabled ? `
+                <button type="button" class="btn btn-primary btn-sm" data-lib-union-refresh="${esc(l.id)}">刷新合并</button>
+                <button type="button" class="btn btn-sm" data-lib-pipeline="${esc(l.id)}">跑流水线</button>
+                <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
+                <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
+                <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="union">补封面…</button>
+                <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
+              ` : `
+                <button type="button" class="btn btn-primary btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="true">取消隐藏</button>
+              `}
+              <button type="button" class="btn btn-sm" data-lib-edit-union="${esc(l.id)}">编辑层级</button>
+              <button type="button" class="btn btn-sm btn-danger" data-lib-del="${esc(l.id)}">删除</button>
+            ` : isSub ? `
+              ${l.enabled ? `
+                <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">独立扫描</button>
+                <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
+              ` : ''}
+              <button type="button" class="btn btn-sm" data-lib-edit='${esc(JSON.stringify(l))}'>编辑</button>
+              <button type="button" class="btn btn-sm btn-danger" disabled title="请先从所属联合库中移出后再删除">删除</button>
+            ` : `
+              ${l.enabled ? `
+                <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">扫描</button>
+                <button type="button" class="btn btn-sm" data-lib-pipeline="${esc(l.id)}">跑流水线</button>
+                <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
+                <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
+                <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="${esc(l.providerType)}">补齐首卷封面…</button>
+                <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
+              ` : `
+                <button type="button" class="btn btn-primary btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="true">取消隐藏</button>
+              `}
+              <button type="button" class="btn btn-sm" data-lib-edit='${esc(JSON.stringify(l))}'>编辑</button>
+              <button type="button" class="btn btn-sm btn-danger" data-lib-del="${esc(l.id)}">删除</button>
+            `}
+          </div>
+        </div>
+        ${isUnion && subChildren.length > 0 ? `
+          <div class="lib-union-toggle-bar">
+            <button type="button" class="lib-union-toggle-btn" data-union-toggle="${esc(l.id)}" data-sub-count="${subChildren.length}" aria-expanded="false">
+              ▸ 展开物理子库（${subChildren.length}）
+            </button>
+          </div>` : ''}
+      </div>`;
+    };
+
     body.innerHTML = `
       <div class="card">
         <h3>新增书库</h3>
@@ -2081,76 +2177,23 @@
 
       <div class="card">
         <div class="section-head">
-          <h3>已配置书库（${allLibs.length}${subLibCount > 0 ? ` · 含 ${subLibCount} 个联合子库` : ''}${hiddenLibCount > 0 ? ` · 已隐藏 ${hiddenLibCount}` : ''}）</h3>
+          <h3>已配置书库（${topLibs.length}${subLibCount > 0 ? ` · 含 ${subLibCount} 个联合子库` : ''}${hiddenLibCount > 0 ? ` · 已隐藏 ${hiddenLibCount}` : ''}）</h3>
           <button type="button" class="btn btn-sm" id="lib-scan-all" ${scannableLibCount === 0 ? 'disabled' : ''}>扫描全部物理书库</button>
         </div>
-        ${allLibs.length === 0
+        ${topLibs.length === 0
           ? `<div class="empty-box">暂无书库。</div>`
           : `<div style="display:grid;gap:12px">
-              ${allLibs.map((l) => {
+              ${topLibs.map((l) => {
                 const isUnion = l.providerType === 'union';
-                const isSub = Boolean(l.unionParentId);
-                const sched = schedulesMap[l.id];
-                const schedText = formatScheduleSummary(sched);
+                const subChildren = isUnion ? (subsByUnion.get(l.id) || []) : [];
+                if (!isUnion || subChildren.length === 0) {
+                  return renderLibCardHTML(l, false, 0);
+                }
                 return `
-                <div style="padding:14px;border-radius:10px;background:var(--bg-elevated);border:1px ${l.enabled && !isSub ? 'solid' : 'dashed'} var(--border);${!l.enabled ? 'opacity:0.72;' : ''}">
-                  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-                    <div style="min-width:0;flex:1">
-                      <strong style="font-size:15.5px">${esc(l.name)}</strong>
-                      <span class="badge ${isUnion ? 'badge-accent' : ''}" style="margin-left:6px">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
-                      ${l.oneShot ? `<span class="badge badge-accent">单本 One-Shots</span>` : ''}
-                      ${isSub ? `<span class="badge">子库 · 归属：${esc(l.unionParentName)} (#${Number(l.unionPriority || 0) + 1})</span>` : ''}
-                      ${!l.enabled ? `<span class="badge badge-warn">已隐藏</span>` : ''}
-                      ${schedText ? `<span class="badge badge-success" title="服务器本机时区：${esc(serverTZ || 'Local')}">⏰ ${esc(schedText)}</span>` : ''}
-                      <div style="font-size:12px;color:var(--text-muted);margin-top:4px">
-                        ${isUnion
-                          ? `叠加层级：${(l.unionLayers || []).map((ly, idx) => `#${idx + 1} ${esc(ly.memberLibraryName)} (${esc(providerLabel(ly.providerType, ly.webdavAccountName))})`).join(' → ') || '无'}`
-                          : `定位标识：<code>${esc(l.providerType === '115' ? `CID:${l.rootCid}` : l.rootPath || l.rootCid)}</code>`}
-                        · ${Number(l.seriesCount || 0).toLocaleString()} 系列 · ${Number(l.bookCount ?? l.booksCount ?? 0).toLocaleString()} 册 · ${fmtBytes(l.comicBytes)}
-                      </div>
-                      <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
-                        ${isSub ? `<span>已自动作为联合库子库：不对前台书架与 Komga 单独暴露，扫库完成后自动刷新所属联合库 · </span>` : ''}
-                        ${!l.enabled ? `<span>已隐藏：保留全部数据与缓存，不参与前台书架、客户端与定时任务 · </span>` : ''}
-                        ${isUnion ? '最近合并' : '最近扫描'}：${esc(l.lastScanStatus || '从未')} ${l.lastScanCompletedAt ? `(${fmtTime(l.lastScanCompletedAt)})` : ''}
-                        ${l.lastScanError ? `<span style="color:var(--danger)"> · ${esc(l.lastScanError)}</span>` : ''}
-                      </div>
-                    </div>
-                    <div style="display:flex;flex-wrap:wrap;gap:6px">
-                      ${isUnion ? `
-                        ${l.enabled ? `
-                          <button type="button" class="btn btn-primary btn-sm" data-lib-union-refresh="${esc(l.id)}">刷新合并</button>
-                          <button type="button" class="btn btn-sm" data-lib-pipeline="${esc(l.id)}">跑流水线</button>
-                          <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
-                          <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
-                          <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="union">补封面…</button>
-                          <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
-                        ` : `
-                          <button type="button" class="btn btn-primary btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="true">取消隐藏</button>
-                        `}
-                        <button type="button" class="btn btn-sm" data-lib-edit-union="${esc(l.id)}">编辑层级</button>
-                        <button type="button" class="btn btn-sm btn-danger" data-lib-del="${esc(l.id)}">删除</button>
-                      ` : isSub ? `
-                        ${l.enabled ? `
-                          <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">独立扫描</button>
-                          <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
-                        ` : ''}
-                        <button type="button" class="btn btn-sm" data-lib-edit='${esc(JSON.stringify(l))}'>编辑</button>
-                        <button type="button" class="btn btn-sm btn-danger" disabled title="请先从所属联合库中移出后再删除">删除</button>
-                      ` : `
-                        ${l.enabled ? `
-                          <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">扫描</button>
-                          <button type="button" class="btn btn-sm" data-lib-pipeline="${esc(l.id)}">跑流水线</button>
-                          <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
-                          <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
-                          <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="${esc(l.providerType)}">补齐首卷封面…</button>
-                          <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
-                        ` : `
-                          <button type="button" class="btn btn-primary btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="true">取消隐藏</button>
-                        `}
-                        <button type="button" class="btn btn-sm" data-lib-edit='${esc(JSON.stringify(l))}'>编辑</button>
-                        <button type="button" class="btn btn-sm btn-danger" data-lib-del="${esc(l.id)}">删除</button>
-                      `}
-                    </div>
+                <div class="lib-union-group">
+                  ${renderLibCardHTML(l, false, 0)}
+                  <div class="lib-sub-tree" data-union-children="${esc(l.id)}" hidden>
+                    ${subChildren.map((sub, idx) => renderLibCardHTML(sub, true, idx)).join('')}
                   </div>
                 </div>`;
               }).join('')}
@@ -2293,6 +2336,23 @@
         navigate('/admin?tab=jobs');
       } catch (err) { toast(err.message, 'error'); }
     };
+
+    body.querySelectorAll('button[data-union-toggle]').forEach((btn) => {
+      btn.onclick = () => {
+        const unionID = btn.getAttribute('data-union-toggle');
+        const subCount = btn.getAttribute('data-sub-count') || '0';
+        const tree = body.querySelector(`[data-union-children="${CSS.escape(unionID)}"]`);
+        if (!tree) return;
+        const expanded = tree.hasAttribute('hidden');
+        if (expanded) {
+          tree.removeAttribute('hidden');
+        } else {
+          tree.setAttribute('hidden', '');
+        }
+        btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        btn.textContent = expanded ? `▾ 收起物理子库（${subCount}）` : `▸ 展开物理子库（${subCount}）`;
+      };
+    });
 
     body.querySelectorAll('button[data-lib-union-refresh]').forEach((btn) => {
       btn.onclick = async () => {

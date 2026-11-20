@@ -1474,3 +1474,80 @@ table.data-table th {
   border: 1px solid var(--border);
   font-size: 13px;
 }
+
+.lib-union-group {
+  display: grid;
+  gap: 0;
+}
+
+.lib-card {
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.lib-card-hidden {
+  border-style: dashed;
+  opacity: 0.72;
+}
+
+.lib-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.lib-union-toggle-bar {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  align-items: center;
+}
+
+.lib-union-toggle-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 8px;
+  margin-left: -8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.lib-union-toggle-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.lib-sub-tree {
+  margin: 8px 0 2px 18px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border-strong);
+  display: grid;
+  gap: 8px;
+}
+
+.lib-sub-tree[hidden] {
+  display: none;
+}
+
+.lib-sub-card {
+  padding: 11px 13px;
+  border-style: dashed;
+  background: var(--bg-card);
+}
+
+@media (max-width: 768px) {
+  .lib-sub-tree {
+    margin-left: 8px;
+    padding-left: 10px;
+  }
+}

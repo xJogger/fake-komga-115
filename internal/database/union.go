@@ -1577,6 +1577,8 @@ func syncUnionZipIndexesTx(
 	enableBulk func() error,
 ) (int, error) {
 	// Drive from zip_indexes (small) via idx_union_book_sources_src so 0-change refreshes stay sub-millisecond.
+	// Allow inheriting cached page_count from lower layers ONLY when source_size matches the winning union book size,
+	// keeping same-name different-size files strictly isolated.
 	rows, err := tx.QueryContext(ctx, `
 SELECT ubs.union_book_id, z.version, z.page_count, z.index_duration_ns, z.created_at, z.updated_at
 FROM zip_indexes z
@@ -1584,9 +1586,8 @@ CROSS JOIN union_book_sources ubs ON ubs.source_book_id=z.book_id
 CROSS JOIN books ub ON ub.id=ubs.union_book_id AND ub.library_id=?
 LEFT JOIN zip_indexes uz ON uz.book_id=ub.id
 WHERE uz.book_id IS NULL
-  AND ubs.priority = (
-    SELECT MIN(u2.priority) FROM union_book_sources u2 WHERE u2.union_book_id=ubs.union_book_id
-  )`, unionLibraryID)
+  AND ubs.source_size=ub.size
+ORDER BY ubs.union_book_id ASC, ubs.priority ASC`, unionLibraryID)
 	if err != nil {
 		return 0, err
 	}
@@ -1596,12 +1597,17 @@ WHERE uz.book_id IS NULL
 		durationNS                            int64
 	}
 	var toCopy []zipRow
+	seen := make(map[string]struct{})
 	for rows.Next() {
 		var r zipRow
 		if err := rows.Scan(&r.bookID, &r.version, &r.pageCount, &r.durationNS, &r.createdAt, &r.updatedAt); err != nil {
 			rows.Close()
 			return 0, err
 		}
+		if _, dup := seen[r.bookID]; dup {
+			continue
+		}
+		seen[r.bookID] = struct{}{}
 		toCopy = append(toCopy, r)
 	}
 	if err := rows.Err(); err != nil {

@@ -396,3 +396,68 @@ INSERT INTO shelf_revision VALUES(1, 42, 7);
 		t.Fatalf("expected rollup and shelf triggers upgraded with bulk_mode guard")
 	}
 }
+
+func TestUnionZipIndexInheritSameSizeOnly(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "union_zip_size.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "lib_top", Name: "本地上层", ProviderType: ProviderLocal,
+		RootCID: "local:/top", RootPath: "/top", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "lib_bot", Name: "115下层", ProviderType: Provider115,
+		RootCID: "cid_bot", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t1 := "2026-01-01T00:00:00Z"
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,updated_at,seen_scan_id) VALUES
+('st','lib_top','Cat/M','M','Top/Cat/M',0,?,?,'s1'),
+('sb','lib_bot','100','M','Bot/Cat/M',0,?,?,'s2')`, t1, t1, t1, t1); err != nil {
+		t.Fatal(err)
+	}
+	// Vol 01: same size (5000) across layers; only lower layer has zip_indexes (32 pages) -> SHOULD inherit!
+	// Vol 02: different size (top=6000, bot=7000); only lower layer has zip_indexes (40 pages) -> MUST NOT inherit!
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO books(id,series_id,library_id,file_id,parent_cid,name,size,pick_code,number_sort,created_at,updated_at,seen_scan_id) VALUES
+('bt1','st','lib_top','Cat/M/01.cbz','Cat/M','01.cbz',5000,'',1,?,?,'s1'),
+('bt2','st','lib_top','Cat/M/02.cbz','Cat/M','02.cbz',6000,'',2,?,?,'s1'),
+('bb1','sb','lib_bot','f1','100','01.cbz',5000,'pk1',1,?,?,'s2'),
+('bb2','sb','lib_bot','f2','100','02.cbz',7000,'pk2',2,?,?,'s2')`,
+		t1, t1, t1, t1, t1, t1, t1, t1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO zip_indexes(book_id,version,page_count,index_json,index_duration_ns,created_at,updated_at) VALUES
+('bb1','v1',32,'[]',10,?,?),
+('bb2','v2',40,'[]',10,?,?)`, t1, t1, t1, t1); err != nil {
+		t.Fatal(err)
+	}
+
+	unionLib, _, err := store.CreateUnionLibrary(ctx, "ZipUnion", true, []string{"lib_top", "lib_bot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	books, _, err := store.BooksPage(ctx, BookQuery{LibraryIDs: []string{unionLib.ID}, Unpaged: true})
+	if err != nil || len(books) != 2 {
+		t.Fatalf("unexpected union books: len=%d err=%v", len(books), err)
+	}
+	pagesByName := map[string]int{}
+	for _, b := range books {
+		pagesByName[b.Name] = b.PageCount
+	}
+	if pagesByName["01.cbz"] != 32 {
+		t.Fatalf("expected same-size lower replica page_count=32 inherited for 01.cbz, got %d", pagesByName["01.cbz"])
+	}
+	if pagesByName["02.cbz"] != 0 {
+		t.Fatalf("expected different-size lower replica page_count NOT inherited for 02.cbz, got %d", pagesByName["02.cbz"])
+	}
+}
