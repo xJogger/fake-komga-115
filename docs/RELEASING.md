@@ -13,6 +13,6 @@ gh workflow run docker-promote.yml --ref main -f version="$VERSION" -f digest="$
 
 其中 `VERSION` 为 `vX.Y.Z`，`VERIFIED_DIGEST` 为核对后的 `sha256:…` 索引摘要。
 
-MangaAlpha 首次正式发版完成前，保持 GitHub 原仓库地址不变。待 Release 与产物核对通过后再原地改仓库名，并验证新地址下的 Release、Issues、Git 远端和网页页脚；Docker 镜像名及已有服务端二进制/数据路径不变。
+从 `v2.2.0` 起，GitHub Release 服务端归档与二进制名统一为 `mangaalpha_vX.Y.Z_<os>_<arch>` / `mangaalpha`（`mangaalpha.exe`）；`Promote Docker latest` 同时兼容新命名与历史 `fake-komga-115_vX.Y.Z_*` 归档以便回退。Docker 镜像名 `blacktal/fake-komga-115`、容器入口、`FK115_*` 环境变量与既有默认数据路径保持不变。
 
 发布和部署是两件事。验证发布产物后再升级运行中的服务；重大版本升级前先备份原数据目录。Docker 用户可通过固定版本标签选择何时升级。

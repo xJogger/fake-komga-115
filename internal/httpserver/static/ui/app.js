@@ -40,6 +40,21 @@
     return 'auto';
   }
 
+  function brandIconURL(theme) {
+    return theme === 'dark' ? '/ui/mangaalpha-icon-dark.png' : '/ui/mangaalpha-icon.png';
+  }
+
+  function syncBrandIcons() {
+    const src = brandIconURL(state.theme);
+    const fav = document.getElementById('app-favicon') || document.querySelector('link[rel="icon"]');
+    if (fav && fav.getAttribute('href') !== src) {
+      fav.setAttribute('href', src);
+    }
+    document.querySelectorAll('img.brand-mark').forEach((img) => {
+      if (img.getAttribute('src') !== src) img.setAttribute('src', src);
+    });
+  }
+
   function syncThemeButtons() {
     document.querySelectorAll('[data-theme-btn]').forEach((btn) => {
       btn.textContent = themeButtonLabel(state.themeMode);
@@ -53,6 +68,7 @@
     document.documentElement.setAttribute('data-theme', state.theme);
     localStorage.setItem(THEME_MODE_KEY, state.themeMode);
     syncThemeButtons();
+    syncBrandIcons();
   }
 
   if (darkMediaQuery) {
@@ -60,6 +76,7 @@
       if (state.themeMode === 'auto') {
         state.theme = resolveEffectiveTheme('auto');
         document.documentElement.setAttribute('data-theme', state.theme);
+        syncBrandIcons();
       }
     };
     if (typeof darkMediaQuery.addEventListener === 'function') {
@@ -68,6 +85,16 @@
       darkMediaQuery.addListener(onSysChange);
     }
   }
+  window.addEventListener('storage', (ev) => {
+    if (!ev.key || ev.key === THEME_MODE_KEY) {
+      const m = localStorage.getItem(THEME_MODE_KEY) || 'auto';
+      state.themeMode = (m === 'light' || m === 'dark') ? m : 'auto';
+      state.theme = resolveEffectiveTheme(state.themeMode);
+      document.documentElement.setAttribute('data-theme', state.theme);
+      syncThemeButtons();
+      syncBrandIcons();
+    }
+  });
   setThemeMode(state.themeMode);
 
   // Sync visualViewport height into --vvh and track mobile keyboard focus to prevent
@@ -339,12 +366,14 @@
       <header class="topbar">
         <div class="topbar-inner">
           <a href="/" data-nav class="brand">
-            <img class="brand-mark" src="/ui/mangaalpha-icon.png" alt="">
+            <img class="brand-mark" src="${brandIconURL(state.theme)}" alt="">
             <span>MangaAlpha</span>
           </a>
           <nav class="topnav">
             <a href="/" data-nav class="${activeNav === 'home' ? 'active' : ''}">书架</a>
             <a href="/libraries" data-nav class="${activeNav === 'libraries' ? 'active' : ''}">浏览书库</a>
+            <a href="/collections" data-nav class="${activeNav === 'collections' ? 'active' : ''}">收藏夹</a>
+            <a href="/readlists" data-nav class="${activeNav === 'readlists' ? 'active' : ''}">阅读列表</a>
             <a href="/admin" data-nav class="${activeNav === 'admin' ? 'active' : ''}">管理后台</a>
           </nav>
           <form class="topbar-search" id="global-search-form">
@@ -417,7 +446,7 @@
       <div class="auth-screen">
         <form class="auth-card" id="setup-form">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-            <div class="brand"><img class="brand-mark" src="/ui/mangaalpha-icon.png" alt=""><span>MangaAlpha</span></div>
+            <div class="brand"><img class="brand-mark" src="${brandIconURL(state.theme)}" alt=""><span>MangaAlpha</span></div>
             <button type="button" class="btn btn-sm" id="setup-theme-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
           </div>
           <h1>初始化管理员账号</h1>
@@ -474,7 +503,7 @@
       <div class="auth-screen">
         <form class="auth-card" id="login-form">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-            <div class="brand"><img class="brand-mark" src="/ui/mangaalpha-icon.png" alt=""><span>MangaAlpha</span></div>
+            <div class="brand"><img class="brand-mark" src="${brandIconURL(state.theme)}" alt=""><span>MangaAlpha</span></div>
             <button type="button" class="btn btn-sm" id="login-theme-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
           </div>
           <h1>登录书架</h1>
@@ -985,11 +1014,14 @@
               ${!books.length || maintJobs.some((j) => j.operation === 'series_thumbnail' && ['queued','running'].includes(j.status)) ? 'disabled' : ''}>生成首卷封面</button>
             <button type="button" class="btn btn-bgm" id="btn-open-bgm">Bangumi 刮削 / 匹配</button>
             <button type="button" class="btn" id="btn-edit-meta">编辑元数据</button>
+            <button type="button" class="btn btn-sm" id="btn-series-collections">+ 收藏夹</button>
             <button type="button" class="btn btn-sm" id="btn-mark-series-read">全部标为已读</button>
             <button type="button" class="btn btn-sm" id="btn-reset-series-read">重置未读</button>
           </div>
 
           ${meta.summary ? `<p class="detail-summary">${esc(meta.summary)}</p>` : ''}
+
+          <div id="series-collections-bar" class="chip-group" style="display:none"></div>
 
           ${authors.length > 0 ? `
             <div class="chip-group">
@@ -1065,6 +1097,7 @@
                 <div class="volume-actions">
                   <a href="/reader/series/${encodeURIComponent(seriesID)}/book/${encodeURIComponent(b.id)}?page=${startPg}" class="btn btn-primary btn-sm">${rp && !rp.completed && rp.page > 0 ? '继续读' : '阅读'}</a>
                   <a href="/book/${encodeURIComponent(b.id)}" data-nav class="btn btn-sm">详情</a>
+                  <button type="button" class="btn btn-sm" data-book-readlist="${esc(b.id)}" data-book-name="${esc(b.name)}">+ 列表</button>
                   ${rp && rp.completed
                     ? `<button type="button" class="btn btn-sm" data-book-unread="${esc(b.id)}">标未读</button>`
                     : `<button type="button" class="btn btn-sm" data-book-read="${esc(b.id)}">标已读</button>`}
@@ -1092,7 +1125,9 @@
 
     document.getElementById('btn-open-bgm').onclick = () => openBangumiMatchModal(seriesID, detail);
     loadSeriesVersions(seriesID);
+    loadSeriesCollectionsBar(seriesID);
     document.getElementById('btn-edit-meta').onclick = () => openMetadataEditModal(seriesID, detail);
+    document.getElementById('btn-series-collections').onclick = () => openAddSeriesToCollectionModal(seriesID, title, () => loadSeriesCollectionsBar(seriesID));
 
     document.getElementById('btn-mark-series-read').onclick = async () => {
       try {
@@ -1126,6 +1161,14 @@
           await api(`/api/v1/books/${encodeURIComponent(bid)}/read-progress`, { method: 'DELETE' });
           renderSeriesDetail(seriesID);
         } catch (err) { toast(err.message, 'error'); }
+      };
+    });
+    content.querySelectorAll('button[data-book-readlist]').forEach((btn) => {
+      btn.onclick = () => {
+        openAddBookToReadListModal(
+          btn.getAttribute('data-book-readlist'),
+          btn.getAttribute('data-book-name') || '单册',
+        );
       };
     });
 
@@ -1527,9 +1570,11 @@
           </a>
           ${detail.previousBookId ? `<a href="/book/${encodeURIComponent(detail.previousBookId)}" data-nav class="btn">← 上一卷</a>` : ''}
           ${detail.nextBookId ? `<a href="/book/${encodeURIComponent(detail.nextBookId)}" data-nav class="btn">下一卷 →</a>` : ''}
+          <button type="button" class="btn btn-sm" id="bk-add-readlist">+ 阅读列表</button>
           <button type="button" class="btn btn-sm" id="bk-mark-read">标记已读</button>
           <button type="button" class="btn btn-sm" id="bk-mark-unread">重置未读</button>
         </div>
+        <div id="book-readlists-bar" class="chip-group" style="display:none;margin-top:12px"></div>
 
         <div class="stat-grid" style="margin-top:18px">
           <div class="stat-box"><div class="k">文件大小</div><div class="v" style="font-size:17px">${esc(b.size)}</div></div>
@@ -1546,6 +1591,10 @@
       </section>
     `;
 
+    document.getElementById('bk-add-readlist').onclick = () => {
+      openAddBookToReadListModal(bookID, b.name || '单册', () => loadBookReadListsBar(bookID));
+    };
+    loadBookReadListsBar(bookID);
     document.getElementById('bk-mark-read').onclick = async () => {
       try {
         await api(`/api/v1/books/${encodeURIComponent(bookID)}/read-progress`, { method: 'PATCH', body: { completed: true } });
@@ -2878,6 +2927,727 @@
     });
   }
 
+  // --- Collections & ReadLists Views ---
+
+  async function loadSeriesCollectionsBar(seriesID) {
+    const seq = routeSeq;
+    const bar = document.getElementById('series-collections-bar');
+    if (!bar) return;
+    try {
+      const items = await api(`/api/v1/series/${encodeURIComponent(seriesID)}/collections`);
+      if (seq !== routeSeq || !bar.isConnected) return;
+      if (!items || !items.length) {
+        bar.style.display = 'none';
+        bar.innerHTML = '';
+        return;
+      }
+      bar.style.display = '';
+      bar.innerHTML = `<span style="font-size:12px;color:var(--text-muted)">收藏夹：</span>` +
+        items.map((c) => `<a href="/collections/${encodeURIComponent(c.id)}" data-nav class="chip chip-org">★ ${esc(c.name)}</a>`).join('');
+    } catch (_) {}
+  }
+
+  async function loadBookReadListsBar(bookID) {
+    const seq = routeSeq;
+    const bar = document.getElementById('book-readlists-bar');
+    if (!bar) return;
+    try {
+      const items = await api(`/api/v1/books/${encodeURIComponent(bookID)}/readlists`);
+      if (seq !== routeSeq || !bar.isConnected) return;
+      if (!items || !items.length) {
+        bar.style.display = 'none';
+        bar.innerHTML = '';
+        return;
+      }
+      bar.style.display = '';
+      bar.innerHTML = `<span style="font-size:12px;color:var(--text-muted)">阅读列表：</span>` +
+        items.map((rl) => `<a href="/readlists/${encodeURIComponent(rl.id)}" data-nav class="chip chip-org">▤ ${esc(rl.name)}</a>`).join('');
+    } catch (_) {}
+  }
+
+  function openCollectionFormModal(existing, onSaved) {
+    const isEdit = !!existing;
+    openModal({
+      title: isEdit ? '编辑收藏夹' : '新建收藏夹',
+      maxWidth: '480px',
+      bodyHTML: `
+        <form id="org-col-form" style="display:grid;gap:14px">
+          <div class="field">
+            <label for="org-col-name">收藏夹名称</label>
+            <input id="org-col-name" type="text" value="${esc(existing ? existing.name : '')}" placeholder="例如：必看神作、周末补番" required>
+          </div>
+          <label class="org-check-row">
+            <input type="checkbox" id="org-col-ordered" ${existing && existing.ordered ? 'checked' : ''}>
+            <span>启用手动排序（支持在详情页调整作品顺序）</span>
+          </label>
+        </form>
+      `,
+      footHTML: `
+        <button type="button" class="btn" id="org-col-cancel">取消</button>
+        <button type="submit" form="org-col-form" class="btn btn-primary" id="org-col-save">${isEdit ? '保存修改' : '创建收藏夹'}</button>
+      `,
+      onMount: () => {
+        document.getElementById('org-col-cancel').onclick = closeModal;
+        focusIfDesktop(document.getElementById('org-col-name'));
+        document.getElementById('org-col-form').onsubmit = async (e) => {
+          e.preventDefault();
+          const name = document.getElementById('org-col-name').value.trim();
+          const ordered = document.getElementById('org-col-ordered').checked;
+          if (!name) { toast('请输入收藏夹名称', 'error'); return; }
+          const btn = document.getElementById('org-col-save');
+          btn.disabled = true;
+          try {
+            if (isEdit) {
+              await api(`/api/v1/collections/${encodeURIComponent(existing.id)}`, {
+                method: 'PATCH',
+                body: { name, ordered },
+              });
+              toast('收藏夹已更新');
+            } else {
+              await api('/api/v1/collections', {
+                method: 'POST',
+                body: { name, ordered, seriesIds: [] },
+              });
+              toast('收藏夹已创建');
+            }
+            closeModal();
+            if (onSaved) onSaved();
+          } catch (err) {
+            toast(err.message, 'error');
+            btn.disabled = false;
+          }
+        };
+      },
+    });
+  }
+
+  function openReadListFormModal(existing, onSaved) {
+    const isEdit = !!existing;
+    openModal({
+      title: isEdit ? '编辑阅读列表' : '新建阅读列表',
+      maxWidth: '500px',
+      bodyHTML: `
+        <form id="org-rl-form" style="display:grid;gap:14px">
+          <div class="field">
+            <label for="org-rl-name">阅读列表名称</label>
+            <input id="org-rl-name" type="text" value="${esc(existing ? existing.name : '')}" placeholder="例如：联动阅读顺序、待看单册" required>
+          </div>
+          <div class="field">
+            <label for="org-rl-summary">简介（可选）</label>
+            <textarea id="org-rl-summary" rows="3" placeholder="记录阅读顺序说明或备注…">${esc(existing ? (existing.summary || '') : '')}</textarea>
+          </div>
+          <label class="org-check-row">
+            <input type="checkbox" id="org-rl-ordered" ${!existing || existing.ordered ? 'checked' : ''}>
+            <span>启用手动排序（按添加与调整后的顺序阅读）</span>
+          </label>
+        </form>
+      `,
+      footHTML: `
+        <button type="button" class="btn" id="org-rl-cancel">取消</button>
+        <button type="submit" form="org-rl-form" class="btn btn-primary" id="org-rl-save">${isEdit ? '保存修改' : '创建阅读列表'}</button>
+      `,
+      onMount: () => {
+        document.getElementById('org-rl-cancel').onclick = closeModal;
+        focusIfDesktop(document.getElementById('org-rl-name'));
+        document.getElementById('org-rl-form').onsubmit = async (e) => {
+          e.preventDefault();
+          const name = document.getElementById('org-rl-name').value.trim();
+          const summary = document.getElementById('org-rl-summary').value.trim();
+          const ordered = document.getElementById('org-rl-ordered').checked;
+          if (!name) { toast('请输入阅读列表名称', 'error'); return; }
+          const btn = document.getElementById('org-rl-save');
+          btn.disabled = true;
+          try {
+            if (isEdit) {
+              await api(`/api/v1/readlists/${encodeURIComponent(existing.id)}`, {
+                method: 'PATCH',
+                body: { name, summary, ordered },
+              });
+              toast('阅读列表已更新');
+            } else {
+              await api('/api/v1/readlists', {
+                method: 'POST',
+                body: { name, summary, ordered, bookIds: [] },
+              });
+              toast('阅读列表已创建');
+            }
+            closeModal();
+            if (onSaved) onSaved();
+          } catch (err) {
+            toast(err.message, 'error');
+            btn.disabled = false;
+          }
+        };
+      },
+    });
+  }
+
+  async function openAddSeriesToCollectionModal(seriesID, seriesTitle, onChanged) {
+    let collections = [];
+    try {
+      const page = await api('/api/v1/collections?unpaged=true&sort=name,asc');
+      collections = (page && page.content) || [];
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+    const initialSet = new Set();
+    collections.forEach((c) => {
+      if ((c.seriesIds || []).includes(seriesID)) initialSet.add(c.id);
+    });
+
+    const renderListHTML = () => {
+      if (!collections.length) {
+        return `<div class="empty-box" style="padding:18px">还没有收藏夹，请在下方输入名称快速创建并加入。</div>`;
+      }
+      return `<div class="org-picker-list">${collections.map((c) => `
+        <label class="org-check-item">
+          <input type="checkbox" data-pick-col="${esc(c.id)}" ${(c.seriesIds || []).includes(seriesID) ? 'checked' : ''}>
+          <span class="org-check-name">${esc(c.name)}</span>
+          <span class="badge">${(c.seriesIds || []).length} 部</span>
+        </label>
+      `).join('')}</div>`;
+    };
+
+    openModal({
+      title: `管理收藏夹 · ${seriesTitle}`,
+      maxWidth: '520px',
+      bodyHTML: `
+        <div style="display:grid;gap:14px">
+          <div id="org-col-picker-wrap">${renderListHTML()}</div>
+          <form id="org-col-quick-create" class="org-quick-create">
+            <input type="text" id="org-col-quick-name" placeholder="输入新收藏夹名称并直接加入…">
+            <button type="submit" class="btn btn-sm btn-primary">新建并加入</button>
+          </form>
+        </div>
+      `,
+      footHTML: `
+        <button type="button" class="btn" id="org-col-pick-cancel">关闭</button>
+        <button type="button" class="btn btn-primary" id="org-col-pick-save">保存更改</button>
+      `,
+      onMount: (body) => {
+        document.getElementById('org-col-pick-cancel').onclick = closeModal;
+        document.getElementById('org-col-quick-create').onsubmit = async (e) => {
+          e.preventDefault();
+          const input = document.getElementById('org-col-quick-name');
+          const name = input.value.trim();
+          if (!name) return;
+          try {
+            const created = await api('/api/v1/collections', {
+              method: 'POST',
+              body: { name, ordered: false, seriesIds: [seriesID] },
+            });
+            collections.push(created);
+            initialSet.add(created.id);
+            input.value = '';
+            document.getElementById('org-col-picker-wrap').innerHTML = renderListHTML();
+            toast(`已创建并加入「${created.name}」`);
+            if (onChanged) onChanged();
+          } catch (err) { toast(err.message, 'error'); }
+        };
+        document.getElementById('org-col-pick-save').onclick = async () => {
+          const btn = document.getElementById('org-col-pick-save');
+          btn.disabled = true;
+          try {
+            const boxes = Array.from(body.querySelectorAll('input[data-pick-col]'));
+            let changed = 0;
+            for (const box of boxes) {
+              const cid = box.getAttribute('data-pick-col');
+              const checked = box.checked;
+              const wasIn = initialSet.has(cid);
+              if (checked === wasIn) continue;
+              const col = collections.find((x) => x.id === cid);
+              if (!col) continue;
+              const nextIDs = checked
+                ? [...(col.seriesIds || []), seriesID]
+                : (col.seriesIds || []).filter((x) => x !== seriesID);
+              await api(`/api/v1/collections/${encodeURIComponent(cid)}`, {
+                method: 'PATCH',
+                body: { seriesIds: nextIDs },
+              });
+              changed++;
+            }
+            if (changed > 0) toast('收藏夹已更新');
+            closeModal();
+            if (onChanged) onChanged();
+          } catch (err) {
+            toast(err.message, 'error');
+            btn.disabled = false;
+          }
+        };
+      },
+    });
+  }
+
+  async function openAddBookToReadListModal(bookID, bookName, onChanged) {
+    let readlists = [];
+    try {
+      const page = await api('/api/v1/readlists?unpaged=true&sort=name,asc');
+      readlists = (page && page.content) || [];
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+    const initialSet = new Set();
+    readlists.forEach((rl) => {
+      if ((rl.bookIds || []).includes(bookID)) initialSet.add(rl.id);
+    });
+
+    const renderListHTML = () => {
+      if (!readlists.length) {
+        return `<div class="empty-box" style="padding:18px">还没有阅读列表，请在下方输入名称快速创建并加入。</div>`;
+      }
+      return `<div class="org-picker-list">${readlists.map((rl) => `
+        <label class="org-check-item">
+          <input type="checkbox" data-pick-rl="${esc(rl.id)}" ${(rl.bookIds || []).includes(bookID) ? 'checked' : ''}>
+          <span class="org-check-name">${esc(rl.name)}</span>
+          <span class="badge">${(rl.bookIds || []).length} 册</span>
+        </label>
+      `).join('')}</div>`;
+    };
+
+    openModal({
+      title: `加入阅读列表 · ${bookName}`,
+      maxWidth: '520px',
+      bodyHTML: `
+        <div style="display:grid;gap:14px">
+          <div id="org-rl-picker-wrap">${renderListHTML()}</div>
+          <form id="org-rl-quick-create" class="org-quick-create">
+            <input type="text" id="org-rl-quick-name" placeholder="输入新阅读列表名称并直接加入…">
+            <button type="submit" class="btn btn-sm btn-primary">新建并加入</button>
+          </form>
+        </div>
+      `,
+      footHTML: `
+        <button type="button" class="btn" id="org-rl-pick-cancel">关闭</button>
+        <button type="button" class="btn btn-primary" id="org-rl-pick-save">保存更改</button>
+      `,
+      onMount: (body) => {
+        document.getElementById('org-rl-pick-cancel').onclick = closeModal;
+        document.getElementById('org-rl-quick-create').onsubmit = async (e) => {
+          e.preventDefault();
+          const input = document.getElementById('org-rl-quick-name');
+          const name = input.value.trim();
+          if (!name) return;
+          try {
+            const created = await api('/api/v1/readlists', {
+              method: 'POST',
+              body: { name, summary: '', ordered: true, bookIds: [bookID] },
+            });
+            readlists.push(created);
+            initialSet.add(created.id);
+            input.value = '';
+            document.getElementById('org-rl-picker-wrap').innerHTML = renderListHTML();
+            toast(`已创建并加入「${created.name}」`);
+            if (onChanged) onChanged();
+          } catch (err) { toast(err.message, 'error'); }
+        };
+        document.getElementById('org-rl-pick-save').onclick = async () => {
+          const btn = document.getElementById('org-rl-pick-save');
+          btn.disabled = true;
+          try {
+            const boxes = Array.from(body.querySelectorAll('input[data-pick-rl]'));
+            let changed = 0;
+            for (const box of boxes) {
+              const rid = box.getAttribute('data-pick-rl');
+              const checked = box.checked;
+              const wasIn = initialSet.has(rid);
+              if (checked === wasIn) continue;
+              const rl = readlists.find((x) => x.id === rid);
+              if (!rl) continue;
+              const nextIDs = checked
+                ? [...(rl.bookIds || []), bookID]
+                : (rl.bookIds || []).filter((x) => x !== bookID);
+              await api(`/api/v1/readlists/${encodeURIComponent(rid)}`, {
+                method: 'PATCH',
+                body: { bookIds: nextIDs },
+              });
+              changed++;
+            }
+            if (changed > 0) toast('阅读列表已更新');
+            closeModal();
+            if (onChanged) onChanged();
+          } catch (err) {
+            toast(err.message, 'error');
+            btn.disabled = false;
+          }
+        };
+      },
+    });
+  }
+
+  async function renderCollections() {
+    const seq = routeSeq;
+    document.title = '收藏夹 · MangaAlpha';
+    const sp = new URLSearchParams(location.search);
+    const search = (sp.get('search') || '').trim();
+    renderShell('collections', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在加载收藏夹…</p></div>`);
+    try {
+      const qs = new URLSearchParams({ size: '100', sort: 'name,asc' });
+      if (search) qs.set('search', search);
+      const page = await api(`/api/v1/collections?${qs.toString()}`);
+      if (seq !== routeSeq) return;
+      const items = (page && page.content) || [];
+      const content = document.getElementById('page-content');
+      if (!content) return;
+      content.innerHTML = `
+        <section class="section">
+          <div class="section-head" style="flex-wrap:wrap;gap:10px">
+            <h2>收藏夹（${page ? page.totalElements : items.length}）</h2>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <form id="collections-filter-form" style="display:flex;gap:6px">
+                <input type="text" id="collections-search-input" value="${esc(search)}" placeholder="筛选收藏夹…" style="height:34px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input)">
+                <button type="submit" class="btn btn-sm">搜索</button>
+              </form>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-create-collection">+ 新建收藏夹</button>
+            </div>
+          </div>
+          ${items.length ? `
+            <div class="poster-grid">
+              ${items.map((c) => `
+                <a href="/collections/${encodeURIComponent(c.id)}" data-nav class="poster-card">
+                  <div class="poster-thumb">
+                    <img loading="lazy" src="/api/v1/collections/${encodeURIComponent(c.id)}/thumbnail?v=${state.coverVer}" alt="${esc(c.name)}">
+                    ${c.ordered ? `<span class="poster-badge-top-left">手动排序</span>` : ''}
+                    <span class="poster-badge-top-right">${(c.seriesIds || []).length} 部</span>
+                  </div>
+                  <div class="poster-body">
+                    <div class="poster-title" title="${esc(c.name)}">${esc(c.name)}</div>
+                    <div class="poster-sub">共 ${(c.seriesIds || []).length} 部作品${c.filtered ? ' · 含已隐藏项' : ''}</div>
+                  </div>
+                </a>
+              `).join('')}
+            </div>
+          ` : `
+            <div class="empty-box">
+              <p style="margin:0 0 12px">${search ? '没有找到匹配的收藏夹。' : '还没有创建任何收藏夹。你可以在这里创建，或从任意漫画详情页快速加入，与 Koharia 实时同步。'}</p>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-empty-create-col">+ 创建收藏夹</button>
+            </div>
+          `}
+        </section>
+      `;
+      document.getElementById('collections-filter-form').onsubmit = (e) => {
+        e.preventDefault();
+        const val = document.getElementById('collections-search-input').value.trim();
+        navigate(val ? `/collections?search=${encodeURIComponent(val)}` : '/collections');
+      };
+      const openCreate = () => openCollectionFormModal(null, () => renderCollections());
+      document.getElementById('btn-create-collection').onclick = openCreate;
+      const emptyBtn = document.getElementById('btn-empty-create-col');
+      if (emptyBtn) emptyBtn.onclick = openCreate;
+    } catch (err) {
+      if (seq !== routeSeq) return;
+      toast(err.message, 'error');
+    }
+  }
+
+  async function renderCollectionDetail(collectionID) {
+    const seq = routeSeq;
+    renderShell('collections', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在加载收藏夹…</p></div>`);
+    try {
+      const [col, seriesPage] = await Promise.all([
+        api(`/api/v1/collections/${encodeURIComponent(collectionID)}`),
+        api(`/api/v1/collections/${encodeURIComponent(collectionID)}/series?unpaged=true`),
+      ]);
+      if (seq !== routeSeq) return;
+      const items = (seriesPage && seriesPage.content) || [];
+      document.title = `${col.name} · 收藏夹 · MangaAlpha`;
+      const content = document.getElementById('page-content');
+      if (!content) return;
+      content.innerHTML = `
+        <div style="margin-bottom:12px;font-size:13px;color:var(--text-muted)">
+          <a href="/collections" data-nav style="color:var(--accent)">← 返回收藏夹列表</a>
+          <span> / </span>
+          <span>${esc(col.name)}</span>
+        </div>
+        <section class="card org-header-card">
+          <div class="org-header-cover">
+            <img src="/api/v1/collections/${encodeURIComponent(col.id)}/thumbnail?v=${state.coverVer}" alt="${esc(col.name)}">
+          </div>
+          <div class="org-header-main">
+            <div class="detail-badges">
+              <span class="badge badge-accent">收藏夹</span>
+              <span class="badge">共 ${items.length} 部可见作品</span>
+              <span class="badge">${col.ordered ? '手动排序' : '按书名排序'}</span>
+              ${col.filtered ? `<span class="badge badge-warn">含隐藏/NSFW 过滤项</span>` : ''}
+            </div>
+            <h1 style="margin:6px 0 10px;font-size:22px">${esc(col.name)}</h1>
+            <div class="detail-cta">
+              <button type="button" class="btn btn-sm" id="btn-edit-col">编辑收藏夹</button>
+              <button type="button" class="btn btn-sm btn-danger" id="btn-delete-col">删除收藏夹</button>
+            </div>
+          </div>
+        </section>
+        <section class="section" style="margin-top:18px">
+          ${items.length ? `
+            <div class="poster-grid">
+              ${items.map((s, idx) => {
+                const meta = s.metadata || {};
+                const title = meta.title || s.name || '未命名';
+                const total = Number(s.booksCount || 0);
+                const unread = Number(s.booksUnreadCount || 0);
+                const read = Number(s.booksReadCount || 0);
+                const pct = total > 0 ? Math.min(100, Math.round((read / total) * 100)) : 0;
+                return `
+                  <div class="poster-card org-member-card">
+                    <a href="/series/${encodeURIComponent(s.id)}" data-nav style="display:flex;flex-direction:column;flex:1">
+                      <div class="poster-thumb">
+                        <img loading="lazy" src="/api/v1/series/${encodeURIComponent(s.id)}/thumbnail?v=${state.coverVer}" alt="${esc(title)}">
+                        ${col.ordered ? `<span class="poster-badge-top-left">#${idx + 1}</span>` : ''}
+                        ${unread > 0 ? `<span class="poster-badge-top-right">${unread}</span>` : ''}
+                        ${read > 0 ? `<div class="poster-progress-bar"><span style="width:${pct}%"></span></div>` : ''}
+                      </div>
+                      <div class="poster-body">
+                        <div class="poster-title" title="${esc(title)}">${esc(title)}</div>
+                        <div class="poster-sub">${s.oneshot ? '单本' : `共 ${total} 册`}</div>
+                      </div>
+                    </a>
+                    <div class="org-card-actions">
+                      ${col.ordered ? `
+                        <button type="button" class="btn btn-sm" data-col-move="${idx}" data-dir="-1" ${idx === 0 ? 'disabled' : ''} title="前移">↑</button>
+                        <button type="button" class="btn btn-sm" data-col-move="${idx}" data-dir="1" ${idx === items.length - 1 ? 'disabled' : ''} title="后移">↓</button>
+                      ` : ''}
+                      <button type="button" class="btn btn-sm" data-col-remove="${esc(s.id)}">移除</button>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          ` : `<div class="empty-box">该收藏夹暂无可见作品。请前往任意漫画详情页点击「+ 收藏夹」添加。</div>`}
+        </section>
+      `;
+
+      document.getElementById('btn-edit-col').onclick = () => openCollectionFormModal(col, () => renderCollectionDetail(collectionID));
+      document.getElementById('btn-delete-col').onclick = async () => {
+        if (!confirm(`确定删除收藏夹「${col.name}」？这不会删除其中的漫画文件。`)) return;
+        try {
+          await api(`/api/v1/collections/${encodeURIComponent(collectionID)}`, { method: 'DELETE' });
+          toast('收藏夹已删除');
+          navigate('/collections', true);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+
+      const visibleIDs = items.map((s) => s.id);
+      const saveSeriesOrder = async (nextIDs) => {
+        try {
+          await api(`/api/v1/collections/${encodeURIComponent(collectionID)}`, {
+            method: 'PATCH',
+            body: { seriesIds: nextIDs },
+          });
+          renderCollectionDetail(collectionID);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+      content.querySelectorAll('button[data-col-move]').forEach((btn) => {
+        btn.onclick = () => {
+          const i = Number(btn.getAttribute('data-col-move'));
+          const d = Number(btn.getAttribute('data-dir'));
+          const j = i + d;
+          if (j < 0 || j >= visibleIDs.length) return;
+          const next = visibleIDs.slice();
+          [next[i], next[j]] = [next[j], next[i]];
+          saveSeriesOrder(next);
+        };
+      });
+      content.querySelectorAll('button[data-col-remove]').forEach((btn) => {
+        btn.onclick = () => {
+          const sid = btn.getAttribute('data-col-remove');
+          saveSeriesOrder(visibleIDs.filter((id) => id !== sid));
+        };
+      });
+    } catch (err) {
+      if (seq !== routeSeq) return;
+      toast(err.message, 'error');
+    }
+  }
+
+  async function renderReadLists() {
+    const seq = routeSeq;
+    document.title = '阅读列表 · MangaAlpha';
+    const sp = new URLSearchParams(location.search);
+    const search = (sp.get('search') || '').trim();
+    renderShell('readlists', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在加载阅读列表…</p></div>`);
+    try {
+      const qs = new URLSearchParams({ size: '100', sort: 'name,asc' });
+      if (search) qs.set('search', search);
+      const page = await api(`/api/v1/readlists?${qs.toString()}`);
+      if (seq !== routeSeq) return;
+      const items = (page && page.content) || [];
+      const content = document.getElementById('page-content');
+      if (!content) return;
+      content.innerHTML = `
+        <section class="section">
+          <div class="section-head" style="flex-wrap:wrap;gap:10px">
+            <h2>阅读列表（${page ? page.totalElements : items.length}）</h2>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <form id="readlists-filter-form" style="display:flex;gap:6px">
+                <input type="text" id="readlists-search-input" value="${esc(search)}" placeholder="筛选阅读列表…" style="height:34px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input)">
+                <button type="submit" class="btn btn-sm">搜索</button>
+              </form>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-create-readlist">+ 新建阅读列表</button>
+            </div>
+          </div>
+          ${items.length ? `
+            <div class="poster-grid">
+              ${items.map((rl) => `
+                <a href="/readlists/${encodeURIComponent(rl.id)}" data-nav class="poster-card">
+                  <div class="poster-thumb">
+                    <img loading="lazy" src="/api/v1/readlists/${encodeURIComponent(rl.id)}/thumbnail?v=${state.coverVer}" alt="${esc(rl.name)}">
+                    ${rl.ordered ? `<span class="poster-badge-top-left">有序</span>` : ''}
+                    <span class="poster-badge-top-right">${(rl.bookIds || []).length} 册</span>
+                  </div>
+                  <div class="poster-body">
+                    <div class="poster-title" title="${esc(rl.name)}">${esc(rl.name)}</div>
+                    <div class="poster-sub" title="${esc(rl.summary || '')}">${esc(rl.summary || `共 ${(rl.bookIds || []).length} 册`)}${rl.filtered ? ' · 含已隐藏项' : ''}</div>
+                  </div>
+                </a>
+              `).join('')}
+            </div>
+          ` : `
+            <div class="empty-box">
+              <p style="margin:0 0 12px">${search ? '没有找到匹配的阅读列表。' : '还没有创建任何阅读列表。你可以在这里创建，或将不同作品的单卷加入列表，与 Koharia 实时同步。'}</p>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-empty-create-rl">+ 创建阅读列表</button>
+            </div>
+          `}
+        </section>
+      `;
+      document.getElementById('readlists-filter-form').onsubmit = (e) => {
+        e.preventDefault();
+        const val = document.getElementById('readlists-search-input').value.trim();
+        navigate(val ? `/readlists?search=${encodeURIComponent(val)}` : '/readlists');
+      };
+      const openCreate = () => openReadListFormModal(null, () => renderReadLists());
+      document.getElementById('btn-create-readlist').onclick = openCreate;
+      const emptyBtn = document.getElementById('btn-empty-create-rl');
+      if (emptyBtn) emptyBtn.onclick = openCreate;
+    } catch (err) {
+      if (seq !== routeSeq) return;
+      toast(err.message, 'error');
+    }
+  }
+
+  async function renderReadListDetail(readListID) {
+    const seq = routeSeq;
+    renderShell('readlists', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在加载阅读列表…</p></div>`);
+    try {
+      const [rl, booksPage] = await Promise.all([
+        api(`/api/v1/readlists/${encodeURIComponent(readListID)}`),
+        api(`/api/v1/readlists/${encodeURIComponent(readListID)}/books?unpaged=true`),
+      ]);
+      if (seq !== routeSeq) return;
+      const books = (booksPage && booksPage.content) || [];
+      document.title = `${rl.name} · 阅读列表 · MangaAlpha`;
+      const content = document.getElementById('page-content');
+      if (!content) return;
+      content.innerHTML = `
+        <div style="margin-bottom:12px;font-size:13px;color:var(--text-muted)">
+          <a href="/readlists" data-nav style="color:var(--accent)">← 返回阅读列表</a>
+          <span> / </span>
+          <span>${esc(rl.name)}</span>
+        </div>
+        <section class="card org-header-card">
+          <div class="org-header-cover">
+            <img src="/api/v1/readlists/${encodeURIComponent(rl.id)}/thumbnail?v=${state.coverVer}" alt="${esc(rl.name)}">
+          </div>
+          <div class="org-header-main">
+            <div class="detail-badges">
+              <span class="badge badge-accent">阅读列表</span>
+              <span class="badge">共 ${books.length} 册可见单卷</span>
+              <span class="badge">${rl.ordered ? '手动排序' : '按文件名排序'}</span>
+              ${rl.filtered ? `<span class="badge badge-warn">含隐藏/NSFW 过滤项</span>` : ''}
+            </div>
+            <h1 style="margin:6px 0 8px;font-size:22px">${esc(rl.name)}</h1>
+            ${rl.summary ? `<p class="detail-summary" style="margin:0 0 12px">${esc(rl.summary)}</p>` : ''}
+            <div class="detail-cta">
+              <button type="button" class="btn btn-sm" id="btn-edit-rl">编辑阅读列表</button>
+              <button type="button" class="btn btn-sm btn-danger" id="btn-delete-rl">删除阅读列表</button>
+            </div>
+          </div>
+        </section>
+        <section class="card" style="margin-top:18px">
+          <div class="section-head" style="margin-bottom:12px">
+            <h2>包含单册（${books.length}）</h2>
+          </div>
+          ${books.length ? `
+            <div class="volume-list">
+              ${books.map((b, idx) => {
+                const rp = b.readProgress;
+                const pgCount = (b.media && b.media.pagesCount) || 0;
+                const startPg = rp && !rp.completed && rp.page > 0 ? rp.page : 1;
+                let stateBadge = `<span class="badge">未读</span>`;
+                if (rp && rp.completed) stateBadge = `<span class="badge badge-success">已读</span>`;
+                else if (rp && rp.page > 0) stateBadge = `<span class="badge badge-accent">第 ${rp.page}${pgCount > 0 ? ` / ${pgCount}` : ''} 页</span>`;
+                return `
+                  <div class="volume-row">
+                    <div class="volume-info">
+                      <div class="volume-title">
+                        ${rl.ordered ? `<span class="badge" style="margin-right:6px">#${idx + 1}</span>` : ''}
+                        <a href="/book/${encodeURIComponent(b.id)}" data-nav>${esc(b.name)}</a>
+                      </div>
+                      <div class="volume-meta">
+                        ${stateBadge}
+                        <a href="/series/${encodeURIComponent(b.seriesId)}" data-nav style="color:var(--accent)">${esc(b.seriesTitle || '查看系列')}</a>
+                        <span>${esc(b.size || '')}</span>
+                      </div>
+                    </div>
+                    <div class="volume-actions">
+                      <a href="/reader/series/${encodeURIComponent(b.seriesId)}/book/${encodeURIComponent(b.id)}?page=${startPg}" class="btn btn-primary btn-sm">${rp && !rp.completed && rp.page > 0 ? '继续读' : '阅读'}</a>
+                      ${rl.ordered ? `
+                        <button type="button" class="btn btn-sm" data-rl-move="${idx}" data-dir="-1" ${idx === 0 ? 'disabled' : ''} title="上移">↑</button>
+                        <button type="button" class="btn btn-sm" data-rl-move="${idx}" data-dir="1" ${idx === books.length - 1 ? 'disabled' : ''} title="下移">↓</button>
+                      ` : ''}
+                      <button type="button" class="btn btn-sm" data-rl-remove="${esc(b.id)}">移除</button>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          ` : `<div class="empty-box">该阅读列表暂无可见单册。请前往漫画详情页或单册页点击「+ 列表 / + 阅读列表」添加。</div>`}
+        </section>
+      `;
+
+      document.getElementById('btn-edit-rl').onclick = () => openReadListFormModal(rl, () => renderReadListDetail(readListID));
+      document.getElementById('btn-delete-rl').onclick = async () => {
+        if (!confirm(`确定删除阅读列表「${rl.name}」？这不会删除其中的漫画文件。`)) return;
+        try {
+          await api(`/api/v1/readlists/${encodeURIComponent(readListID)}`, { method: 'DELETE' });
+          toast('阅读列表已删除');
+          navigate('/readlists', true);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+
+      const visibleIDs = books.map((b) => b.id);
+      const saveBookOrder = async (nextIDs) => {
+        try {
+          await api(`/api/v1/readlists/${encodeURIComponent(readListID)}`, {
+            method: 'PATCH',
+            body: { bookIds: nextIDs },
+          });
+          renderReadListDetail(readListID);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+      content.querySelectorAll('button[data-rl-move]').forEach((btn) => {
+        btn.onclick = () => {
+          const i = Number(btn.getAttribute('data-rl-move'));
+          const d = Number(btn.getAttribute('data-dir'));
+          const j = i + d;
+          if (j < 0 || j >= visibleIDs.length) return;
+          const next = visibleIDs.slice();
+          [next[i], next[j]] = [next[j], next[i]];
+          saveBookOrder(next);
+        };
+      });
+      content.querySelectorAll('button[data-rl-remove]').forEach((btn) => {
+        btn.onclick = () => {
+          const bid = btn.getAttribute('data-rl-remove');
+          saveBookOrder(visibleIDs.filter((id) => id !== bid));
+        };
+      });
+    } catch (err) {
+      if (seq !== routeSeq) return;
+      toast(err.message, 'error');
+    }
+  }
+
   // --- Router ---
 
   let routeSeq = 0;
@@ -2932,6 +3702,24 @@
     if (p.startsWith('/libraries/')) {
       const libID = decodeURIComponent(p.slice('/libraries/'.length));
       await renderLibraries(libID);
+      return;
+    }
+    if (p === '/collections') {
+      await renderCollections();
+      return;
+    }
+    if (p.startsWith('/collections/')) {
+      const cid = decodeURIComponent(p.slice('/collections/'.length));
+      await renderCollectionDetail(cid);
+      return;
+    }
+    if (p === '/readlists') {
+      await renderReadLists();
+      return;
+    }
+    if (p.startsWith('/readlists/')) {
+      const rid = decodeURIComponent(p.slice('/readlists/'.length));
+      await renderReadListDetail(rid);
       return;
     }
     if (p.startsWith('/series/')) {

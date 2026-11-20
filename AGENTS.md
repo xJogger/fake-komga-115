@@ -24,7 +24,7 @@ node --check internal/httpserver/static/ui/app.js
 gofmt -w cmd internal
 go test -count=1 -race ./...
 go vet ./...
-CGO_ENABLED=0 go build -o /tmp/fake-komga-115 ./cmd/server
+CGO_ENABLED=0 go build -o /tmp/mangaalpha ./cmd/server
 ```
 
 注意：`internal/httpserver/static/reader_dist/` 的编译产物已被 `.gitignore` 忽略（仅保留 `placeholder.txt` 使无前端产物的纯 Go 单测可直接编译）。正式打包二进制或镜像前必须先运行 `bash scripts/build-reader.sh`（或 `make build`）。

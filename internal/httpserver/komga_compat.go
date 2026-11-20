@@ -15,17 +15,20 @@ const (
 )
 
 type komgaSearchFilters struct {
-	Search       string
-	LibraryIDs   []string
-	ReadStatuses []string
-	Statuses     []string
-	Genres       []string
-	Tags         []string
-	Publishers   []string
-	Authors      []string
-	Languages    []string
-	OneShot      *bool
-	Empty        bool
+	Search        string
+	LibraryIDs    []string
+	CollectionIDs []string
+	ReadListIDs   []string
+	SeriesID      string
+	ReadStatuses  []string
+	Statuses      []string
+	Genres        []string
+	Tags          []string
+	Publishers    []string
+	Authors       []string
+	Languages     []string
+	OneShot       *bool
+	Empty         bool
 }
 
 type komgaSearchRequest struct {
@@ -131,20 +134,21 @@ func (s *Server) komgaSeriesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, total, err := s.store.SeriesPage(r.Context(), database.SeriesQuery{
-		Search:     filters.Search,
-		LibraryIDs: filters.LibraryIDs,
-		ReadStatus: filters.ReadStatuses,
-		Statuses:   filters.Statuses,
-		Genres:     filters.Genres,
-		Tags:       filters.Tags,
-		Publishers: filters.Publishers,
-		Authors:    filters.Authors,
-		Languages:  filters.Languages,
-		OneShot:    filters.OneShot,
-		Empty:      filters.Empty,
-		Page:       page,
-		Size:       size,
-		Sort:       r.URL.Query().Get("sort"),
+		Search:        filters.Search,
+		LibraryIDs:    filters.LibraryIDs,
+		CollectionIDs: filters.CollectionIDs,
+		ReadStatus:    filters.ReadStatuses,
+		Statuses:      filters.Statuses,
+		Genres:        filters.Genres,
+		Tags:          filters.Tags,
+		Publishers:    filters.Publishers,
+		Authors:       filters.Authors,
+		Languages:     filters.Languages,
+		OneShot:       filters.OneShot,
+		Empty:         filters.Empty,
+		Page:          page,
+		Size:          size,
+		Sort:          r.URL.Query().Get("sort"),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
@@ -165,16 +169,18 @@ func (s *Server) komgaBooksList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, total, err := s.store.BooksPage(r.Context(), database.BookQuery{
-		Search:     filters.Search,
-		LibraryIDs: filters.LibraryIDs,
-		ReadStatus: filters.ReadStatuses,
-		Tags:       filters.Tags,
-		Authors:    filters.Authors,
-		OneShot:    filters.OneShot,
-		Empty:      filters.Empty,
-		Page:       page,
-		Size:       size,
-		Sort:       r.URL.Query().Get("sort"),
+		Search:      filters.Search,
+		LibraryIDs:  filters.LibraryIDs,
+		ReadListIDs: filters.ReadListIDs,
+		SeriesID:    filters.SeriesID,
+		ReadStatus:  filters.ReadStatuses,
+		Tags:        filters.Tags,
+		Authors:     filters.Authors,
+		OneShot:     filters.OneShot,
+		Empty:       filters.Empty,
+		Page:        page,
+		Size:        size,
+		Sort:        r.URL.Query().Get("sort"),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
@@ -214,14 +220,16 @@ func readKomgaSearchRequest(
 
 func legacyKomgaFilters(r *http.Request, target string) komgaSearchFilters {
 	filters := komgaSearchFilters{
-		Search:     strings.TrimSpace(r.URL.Query().Get("search")),
-		LibraryIDs: listQuery(r, "library_id"),
-		Genres:     listQuery(r, "genre"),
-		Tags:       listQuery(r, "tag"),
-		Publishers: listQuery(r, "publisher"),
-		Authors:    parseLegacyAuthorParams(r),
-		Languages:  listQuery(r, "language"),
-		OneShot:    boolQuery(r, "oneshot"),
+		Search:        strings.TrimSpace(r.URL.Query().Get("search")),
+		LibraryIDs:    listQuery(r, "library_id"),
+		CollectionIDs: listQuery(r, "collection_id"),
+		ReadListIDs:   listQuery(r, "readlist_id"),
+		Genres:        listQuery(r, "genre"),
+		Tags:          listQuery(r, "tag"),
+		Publishers:    listQuery(r, "publisher"),
+		Authors:       parseLegacyAuthorParams(r),
+		Languages:     listQuery(r, "language"),
+		OneShot:       boolQuery(r, "oneshot"),
 	}
 	statuses, ok := normalizeReadStatuses(listQuery(r, "read_status"))
 	if !ok {
@@ -244,9 +252,6 @@ func legacyKomgaFilters(r *http.Request, target string) komgaSearchFilters {
 			return filters
 		}
 		filters.Statuses = sList
-	}
-	if len(listQuery(r, "collection_id")) > 0 {
-		filters.Empty = true
 	}
 	return filters
 }
@@ -381,8 +386,27 @@ func parseKomgaSimpleCondition(raw json.RawMessage) (
 			case "istrue":
 				return field, "", boolPtr(true), false, false, nil
 			}
-		case "libraryid", "readstatus", "seriesstatus", "genre", "tag", "publisher", "language":
+		case "libraryid", "collectionid", "readlistid", "seriesid", "readstatus", "seriesstatus", "genre", "tag", "publisher", "language":
 			if operator != "is" && operator != "" {
+				return field, "", nil, false, true, nil
+			}
+			if err = json.Unmarshal(condition.Value, &value); err != nil {
+				return "", "", nil, false, false, err
+			}
+			return field, value, nil, false, false, nil
+		case "mediastatus":
+			if operator != "is" && operator != "" {
+				return field, "", nil, false, true, nil
+			}
+			if err = json.Unmarshal(condition.Value, &value); err != nil {
+				return "", "", nil, false, false, err
+			}
+			if !strings.EqualFold(strings.TrimSpace(value), "READY") {
+				return field, value, nil, true, false, nil
+			}
+			return field, value, nil, false, false, nil
+		case "title":
+			if operator != "is" && operator != "contains" && operator != "" {
 				return field, "", nil, false, true, nil
 			}
 			if err = json.Unmarshal(condition.Value, &value); err != nil {
@@ -403,8 +427,6 @@ func parseKomgaSimpleCondition(raw json.RawMessage) (
 				return field, value, nil, false, false, nil
 			}
 			return field, "", nil, true, false, nil
-		case "collectionid", "readlistid":
-			return field, "", nil, false, true, nil
 		default:
 			return field, "", nil, false, true, nil
 		}
@@ -429,6 +451,46 @@ func applyKomgaField(
 	case "libraryid":
 		if value != "" {
 			filters.LibraryIDs = appendUnique(filters.LibraryIDs, value)
+		}
+	case "collectionid":
+		if target != "series" {
+			filters.Empty = true
+			return
+		}
+		if value != "" {
+			filters.CollectionIDs = appendUnique(filters.CollectionIDs, value)
+		}
+	case "readlistid":
+		if target != "books" {
+			filters.Empty = true
+			return
+		}
+		if value != "" {
+			filters.ReadListIDs = appendUnique(filters.ReadListIDs, value)
+		}
+	case "seriesid":
+		if target != "books" {
+			filters.Empty = true
+			return
+		}
+		if value != "" {
+			if filters.SeriesID != "" && filters.SeriesID != value {
+				filters.Empty = true
+				return
+			}
+			filters.SeriesID = value
+		}
+	case "mediastatus":
+		if !strings.EqualFold(value, "READY") {
+			filters.Empty = true
+		}
+	case "title":
+		if value != "" {
+			if filters.Search == "" {
+				filters.Search = value
+			} else {
+				filters.Search = filters.Search + " " + value
+			}
 		}
 	case "readstatus":
 		statuses, ok := normalizeReadStatuses([]string{value})

@@ -40,14 +40,26 @@ jobs:
             --json tagName,isDraft,isPrerelease,assets |
             jq -e --arg tag "$RELEASE_TAG" '
               (.tagName == $tag) and (.isDraft == false) and (.isPrerelease == false) and
-              ([.assets[].name] | contains([
-                "SHA256SUMS",
-                "fake-komga-115_\($tag)_windows_amd64.zip",
-                "fake-komga-115_\($tag)_linux_amd64.tar.gz",
-                "fake-komga-115_\($tag)_linux_arm64.tar.gz",
-                "fake-komga-115_\($tag)_darwin_amd64.tar.gz",
-                "fake-komga-115_\($tag)_darwin_arm64.tar.gz"
-              ]))
+              ([.assets[].name] as $names |
+                ($names | contains(["SHA256SUMS"])) and
+                (
+                  ($names | contains([
+                    "mangaalpha_\($tag)_windows_amd64.zip",
+                    "mangaalpha_\($tag)_linux_amd64.tar.gz",
+                    "mangaalpha_\($tag)_linux_arm64.tar.gz",
+                    "mangaalpha_\($tag)_darwin_amd64.tar.gz",
+                    "mangaalpha_\($tag)_darwin_arm64.tar.gz"
+                  ]))
+                  or
+                  ($names | contains([
+                    "fake-komga-115_\($tag)_windows_amd64.zip",
+                    "fake-komga-115_\($tag)_linux_amd64.tar.gz",
+                    "fake-komga-115_\($tag)_linux_arm64.tar.gz",
+                    "fake-komga-115_\($tag)_darwin_amd64.tar.gz",
+                    "fake-komga-115_\($tag)_darwin_arm64.tar.gz"
+                  ]))
+                )
+              )
             '
 
       - name: Set up Docker Buildx

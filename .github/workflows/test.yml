@@ -34,4 +34,4 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Build pure-Go binary
-        run: CGO_ENABLED=0 go build -o /tmp/fake-komga-115 ./cmd/server
+        run: CGO_ENABLED=0 go build -o /tmp/mangaalpha ./cmd/server

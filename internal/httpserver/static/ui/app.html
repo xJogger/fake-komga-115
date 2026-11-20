@@ -5,7 +5,18 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-visual">
   <meta name="color-scheme" content="dark light">
   <title>MangaAlpha</title>
-  <link rel="icon" type="image/png" href="/ui/mangaalpha-icon.png">
+  <link id="app-favicon" rel="icon" type="image/png" href="/ui/mangaalpha-icon.png">
+  <script>
+    (function(){
+      try{
+        var m=localStorage.getItem('fk115_theme_mode')||'auto';
+        var dark=(m==='dark')||(m!=='light'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.setAttribute('data-theme',dark?'dark':'light');
+        var l=document.getElementById('app-favicon');
+        if(l)l.href=dark?'/ui/mangaalpha-icon-dark.png':'/ui/mangaalpha-icon.png';
+      }catch(e){}
+    })();
+  </script>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body>

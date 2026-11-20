@@ -378,11 +378,15 @@ INSERT INTO books(
 	var capabilities map[string]any
 	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/server/capabilities", &capabilities)
 	features := capabilities["features"].(map[string]any)
-	if capabilities["name"] != "fake-komga-115" ||
+	if capabilities["name"] != "MangaAlpha" ||
 		features["authentication"] != true ||
 		features["builtInReader"] != true ||
 		features["bangumiMetadata"] != true ||
-		features["bookSiblingNavigation"] != true {
+		features["bookSiblingNavigation"] != true ||
+		features["collections"] != true ||
+		features["readLists"] != true ||
+		features["sse"] != true ||
+		features["gzip"] != true {
 		t.Fatalf("unexpected capabilities: %#v", capabilities)
 	}
 

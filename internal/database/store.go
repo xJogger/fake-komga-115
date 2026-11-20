@@ -16,8 +16,9 @@ import (
 )
 
 type Store struct {
-	db    *sql.DB
-	shelf shelfCache
+	db                   *sql.DB
+	shelf                shelfCache
+	unpagedBookThreshold int64
 
 	basicAuthMu    sync.RWMutex
 	basicAuthCache map[string]time.Time
@@ -28,7 +29,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	dsn := "file:" + filepath.ToSlash(path) +
-		"?_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+		"?_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-16384)&_pragma=temp_store(MEMORY)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -224,11 +225,13 @@ func (s *Store) Libraries(ctx context.Context, enabledOnly bool) ([]Library, err
 SELECT l.id,l.name,l.provider_type,l.root_cid,l.webdav_account_id,coalesce(w.name,''),l.root_path,
  l.enabled,l.one_shot,l.created_at,l.updated_at,
  l.last_scan_started_at,l.last_scan_completed_at,l.last_scan_status,l.last_scan_error,
- (SELECT count(*) FROM series s WHERE s.library_id=l.id),
- (SELECT count(*) FROM books b WHERE b.library_id=l.id),
- (SELECT coalesce(sum(b.size),0) FROM books b WHERE b.library_id=l.id)
+ coalesce(sc.cnt,0),
+ coalesce(bc.cnt,0),
+ coalesce(bc.bytes,0)
 FROM libraries l
-LEFT JOIN webdav_accounts w ON w.id=l.webdav_account_id`
+LEFT JOIN webdav_accounts w ON w.id=l.webdav_account_id
+LEFT JOIN (SELECT library_id, count(*) AS cnt FROM series GROUP BY library_id) sc ON sc.library_id=l.id
+LEFT JOIN (SELECT library_id, count(*) AS cnt, coalesce(sum(size),0) AS bytes FROM books GROUP BY library_id) bc ON bc.library_id=l.id`
 	if enabledOnly {
 		query += ` WHERE l.enabled=1`
 	}
@@ -252,6 +255,23 @@ LEFT JOIN webdav_accounts w ON w.id=l.webdav_account_id`
 		}
 		item.ProviderType = item.EffectiveProvider()
 		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) enabledLibraryIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM libraries WHERE enabled=1 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0, 8)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
 	return out, rows.Err()
 }

@@ -45,6 +45,7 @@ INSERT OR IGNORE INTO shelf_revision VALUES(1,0,0);`); err != nil {
 		{"series_genres", "catalog", "", ""},
 		{"series_authors", "catalog", "", ""},
 		{"book_read_progress", "progress", "", ""},
+		{"book_read_progress_tombstones", "progress", "", ""},
 		{"zip_indexes", "progress", " OF page_count", ""},
 		{"settings", "catalog", " OF value", "show_nsfw"},
 	}
@@ -163,7 +164,7 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 		strings.EqualFold(q.Sort, "createdDate,desc") || strings.EqualFold(q.Sort, "bgmRank,asc")
 	common := commonSort && q.Page == 0 && (q.Size == 12 || q.Size == 18 || q.Size == 36) &&
 		!q.IncludeHidden && q.NSFWMode == "" && q.Search == "" && !q.Empty &&
-		len(q.LibraryIDs) <= 1 && len(q.ReadStatus)+len(q.Tags)+len(q.Genres)+len(q.Statuses)+
+		len(q.LibraryIDs) <= 1 && len(q.CollectionIDs)+len(q.ReadStatus)+len(q.Tags)+len(q.Genres)+len(q.Statuses)+
 		len(q.Publishers)+len(q.Authors)+len(q.Languages) == 0 && q.OneShot == nil && q.ScrapeStatus == ""
 	if common && len(q.LibraryIDs) == 1 && !s.IsLibraryEnabled(ctx, q.LibraryIDs[0]) {
 		common = false
@@ -186,7 +187,7 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 
 func (s *Store) BooksPage(ctx context.Context, q BookQuery) ([]Book, int64, error) {
 	if !isRecentProgressQuery(q) || q.Size != 8 || q.Page != 0 || q.Unpaged ||
-		q.Search != "" || q.SeriesID != "" || len(q.LibraryIDs)+len(q.Tags)+len(q.Authors) != 0 || q.OneShot != nil || q.Empty {
+		q.Search != "" || q.SeriesID != "" || len(q.LibraryIDs)+len(q.ReadListIDs)+len(q.Tags)+len(q.Authors) != 0 || q.OneShot != nil || q.Empty {
 		return s.queryBooksPage(ctx, q)
 	}
 	r, err := shelfCached(ctx, s, "continue-reading", true, func(ctx context.Context) (bookPageResult, error) {
@@ -239,9 +240,12 @@ func (s *Store) warmShelfQueries(ctx context.Context, catalog bool) {
 		{Size: 36, Sort: "lastModifiedDate,desc"},
 		{Size: 36, Sort: "bgmRank,asc"},
 	}
+	_, _, _, _, _ = s.Counts(ctx)
+	_, _, _, _ = s.ScrapeSummary(ctx)
 	_, _ = s.Genres(ctx, nil)
 	_, _ = s.Tags(ctx, nil)
 	_, _ = s.Publishers(ctx, nil)
+	_, _ = s.Authors(ctx, nil, "", "")
 	for _, group := range []bool{false, true} {
 		if group && !groupSeen {
 			continue

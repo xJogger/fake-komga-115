@@ -41,8 +41,9 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           labels: |
-            org.opencontainers.image.title=fake-komga-115
+            org.opencontainers.image.title=MangaAlpha
             org.opencontainers.image.description=Multi-source Komga-compatible manga server with a built-in reader
+            org.opencontainers.image.source=https://github.com/xJogger/MangaAlpha
             org.opencontainers.image.vendor=xJogger
 
       - name: Build and push Docker image

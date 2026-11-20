@@ -96,8 +96,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          package="fake-komga-115_${tag}_${GOOS}_${GOARCH}"
-          executable="fake-komga-115"
+          package="mangaalpha_${tag}_${GOOS}_${GOARCH}"
+          executable="mangaalpha"
           if [[ "${GOOS}" == "windows" ]]; then
             executable="${executable}.exe"
           fi
@@ -123,7 +123,7 @@ jobs:
           fi
       - uses: actions/upload-artifact@v7
         with:
-          name: fake-komga-115-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: mangaalpha-server-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*.${{ matrix.archive }}
           if-no-files-found: error
 
@@ -148,7 +148,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
         with:
-          pattern: fake-komga-115-*
+          pattern: mangaalpha-server-*
           path: dist
           merge-multiple: true
       - uses: actions/download-artifact@v8
@@ -168,7 +168,7 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           cd dist
-          sha256sum fake-komga-115_* mangaalpha-arm64.apk > SHA256SUMS
+          sha256sum mangaalpha_* mangaalpha-arm64.apk > SHA256SUMS
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

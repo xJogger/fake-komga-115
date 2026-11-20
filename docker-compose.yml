@@ -1,6 +1,6 @@
 services:
   fake-komga-115:
-    image: blacktal/fake-komga-115:v2.0.0
+    image: blacktal/fake-komga-115:v2.2.0
     container_name: fake-komga-115
     restart: unless-stopped
     ports:

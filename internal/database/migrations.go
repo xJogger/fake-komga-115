@@ -27,6 +27,9 @@ func applyMigrations(db *sql.DB) error {
 	if err := ensureMetadataAndScrapeTables(db); err != nil {
 		return err
 	}
+	if err := ensureOrganizationTables(db); err != nil {
+		return err
+	}
 	migrations := []struct {
 		table      string
 		column     string
@@ -37,6 +40,11 @@ func applyMigrations(db *sql.DB) error {
 		{"libraries", "webdav_account_id", "TEXT NOT NULL DEFAULT ''"},
 		{"libraries", "root_path", "TEXT NOT NULL DEFAULT ''"},
 		{"series", "one_shot", "INTEGER NOT NULL DEFAULT 0"},
+		{"series", "books_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"series", "latest_book_modified_at", "TEXT"},
+		{"series", "latest_book_created_at", "TEXT"},
+		{"series", "sort_modified_at", "TEXT NOT NULL DEFAULT ''"},
+		{"series", "sort_created_at", "TEXT NOT NULL DEFAULT ''"},
 		{"series_metadata", "is_nsfw", "INTEGER NOT NULL DEFAULT 0"},
 		{"series_metadata", "bgm_rank", "INTEGER"},
 		{"series_metadata", "nsfw_lock", "INTEGER NOT NULL DEFAULT 0"},
@@ -47,6 +55,9 @@ func applyMigrations(db *sql.DB) error {
 		}
 	}
 	if err := ensurePerformanceIndexes(db); err != nil {
+		return err
+	}
+	if err := ensureSeriesRollups(db); err != nil {
 		return err
 	}
 	return createShelfRevisions(db)
@@ -109,6 +120,20 @@ CREATE TABLE IF NOT EXISTS webdav_accounts (
 }
 
 func ensurePerformanceIndexes(db *sql.DB) error {
+	if exists, err := tableExists(db, "series"); err != nil {
+		return err
+	} else if exists {
+		for _, stmt := range []string{
+			`CREATE INDEX IF NOT EXISTS idx_series_lib_sort_mod ON series(library_id, sort_modified_at DESC, name COLLATE NOCASE, id)`,
+			`CREATE INDEX IF NOT EXISTS idx_series_lib_sort_cre ON series(library_id, sort_created_at DESC, name COLLATE NOCASE, id)`,
+			`CREATE INDEX IF NOT EXISTS idx_series_sort_mod ON series(sort_modified_at DESC, name COLLATE NOCASE, id, library_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_series_sort_cre ON series(sort_created_at DESC, name COLLATE NOCASE, id, library_id)`,
+		} {
+			if _, err := db.Exec(stmt); err != nil {
+				return err
+			}
+		}
+	}
 	if exists, err := tableExists(db, "books"); err != nil {
 		return err
 	} else if exists {
@@ -122,15 +147,219 @@ func ensurePerformanceIndexes(db *sql.DB) error {
 		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated ON book_read_progress(completed, updated_at DESC)`); err != nil {
 			return err
 		}
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated_all ON book_read_progress(updated_at DESC, book_id)`); err != nil {
+			return err
+		}
 	}
 	if exists, err := tableExists(db, "series_metadata"); err != nil {
 		return err
 	} else if exists {
-		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_metadata_nsfw ON series_metadata(is_nsfw)`); err != nil {
-			return err
+		for _, stmt := range []string{
+			`CREATE INDEX IF NOT EXISTS idx_series_metadata_nsfw ON series_metadata(is_nsfw)`,
+			`CREATE INDEX IF NOT EXISTS idx_series_metadata_nsfw_series ON series_metadata(is_nsfw, series_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_series_metadata_fast ON series_metadata(series_id, is_nsfw, scrape_status, bgm_subject_id, bgm_rank, bgm_score)`,
+			`CREATE INDEX IF NOT EXISTS idx_series_metadata_bgm_rank ON series_metadata(bgm_rank ASC, series_id, is_nsfw) WHERE bgm_rank > 0`,
+			`CREATE INDEX IF NOT EXISTS idx_series_metadata_bgm_sub ON series_metadata(bgm_subject_id, series_id, bgm_rank, bgm_score) WHERE bgm_subject_id > 0`,
+			`CREATE INDEX IF NOT EXISTS idx_series_metadata_pub_series ON series_metadata(publisher COLLATE NOCASE, series_id)`,
+		} {
+			if _, err := db.Exec(stmt); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func ensureOrganizationTables(db *sql.DB) error {
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS book_read_progress_tombstones (
+  book_id TEXT PRIMARY KEY,
+  series_id TEXT NOT NULL,
+  deleted_at TEXT NOT NULL,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_progress_tombstones_series ON book_read_progress_tombstones(series_id);
+CREATE INDEX IF NOT EXISTS idx_progress_tombstones_deleted ON book_read_progress_tombstones(deleted_at);
+
+CREATE TABLE IF NOT EXISTS collections (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  ordered INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collection_series (
+  collection_id TEXT NOT NULL,
+  series_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY(collection_id, series_id),
+  FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_collection_series_pos ON collection_series(collection_id, position);
+CREATE INDEX IF NOT EXISTS idx_collection_series_series ON collection_series(series_id, collection_id);
+
+CREATE TABLE IF NOT EXISTS readlists (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  summary TEXT NOT NULL DEFAULT '',
+  ordered INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS readlist_books (
+  readlist_id TEXT NOT NULL,
+  book_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY(readlist_id, book_id),
+  FOREIGN KEY(readlist_id) REFERENCES readlists(id) ON DELETE CASCADE,
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_readlist_books_pos ON readlist_books(readlist_id, position);
+CREATE INDEX IF NOT EXISTS idx_readlist_books_book ON readlist_books(book_id, readlist_id);
+`)
+	return err
+}
+
+func ensureSeriesRollups(db *sql.DB) error {
+	triggers := []string{
+		`CREATE TRIGGER IF NOT EXISTS fk115_series_rollup_ins
+AFTER INSERT ON series
+WHEN NEW.sort_modified_at='' OR NEW.sort_created_at=''
+BEGIN
+  UPDATE series
+  SET sort_modified_at=COALESCE(NULLIF(latest_book_modified_at,''), NULLIF(file_modified_at,''), updated_at),
+      sort_created_at=COALESCE(NULLIF(latest_book_created_at,''), created_at)
+  WHERE id=NEW.id;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS fk115_series_rollup_upd
+AFTER UPDATE OF file_modified_at, updated_at, created_at ON series
+BEGIN
+  UPDATE series
+  SET sort_modified_at=COALESCE(NULLIF(latest_book_modified_at,''), NULLIF(NEW.file_modified_at,''), NEW.updated_at),
+      sort_created_at=COALESCE(NULLIF(latest_book_created_at,''), NEW.created_at)
+  WHERE id=NEW.id;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS fk115_books_rollup_ins
+AFTER INSERT ON books
+BEGIN
+  UPDATE series
+  SET books_count=books_count+1,
+      latest_book_modified_at=CASE
+        WHEN NEW.file_modified_at IS NULL OR NEW.file_modified_at='' THEN latest_book_modified_at
+        WHEN latest_book_modified_at IS NULL OR latest_book_modified_at='' OR NEW.file_modified_at>latest_book_modified_at THEN NEW.file_modified_at
+        ELSE latest_book_modified_at
+      END,
+      latest_book_created_at=CASE
+        WHEN NEW.file_created_at IS NULL OR NEW.file_created_at='' THEN latest_book_created_at
+        WHEN latest_book_created_at IS NULL OR latest_book_created_at='' OR NEW.file_created_at>latest_book_created_at THEN NEW.file_created_at
+        ELSE latest_book_created_at
+      END,
+      sort_modified_at=COALESCE(
+        NULLIF(CASE
+          WHEN NEW.file_modified_at IS NULL OR NEW.file_modified_at='' THEN latest_book_modified_at
+          WHEN latest_book_modified_at IS NULL OR latest_book_modified_at='' OR NEW.file_modified_at>latest_book_modified_at THEN NEW.file_modified_at
+          ELSE latest_book_modified_at
+        END,''),
+        NULLIF(file_modified_at,''),
+        updated_at
+      ),
+      sort_created_at=COALESCE(
+        NULLIF(CASE
+          WHEN NEW.file_created_at IS NULL OR NEW.file_created_at='' THEN latest_book_created_at
+          WHEN latest_book_created_at IS NULL OR latest_book_created_at='' OR NEW.file_created_at>latest_book_created_at THEN NEW.file_created_at
+          ELSE latest_book_created_at
+        END,''),
+        created_at
+      )
+  WHERE id=NEW.series_id;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS fk115_books_rollup_del
+AFTER DELETE ON books
+BEGIN
+  UPDATE series
+  SET books_count=(SELECT count(*) FROM books b WHERE b.series_id=OLD.series_id),
+      latest_book_modified_at=(SELECT MAX(NULLIF(b.file_modified_at,'')) FROM books b WHERE b.series_id=OLD.series_id),
+      latest_book_created_at=(SELECT MAX(NULLIF(b.file_created_at,'')) FROM books b WHERE b.series_id=OLD.series_id),
+      sort_modified_at=COALESCE((SELECT MAX(NULLIF(b.file_modified_at,'')) FROM books b WHERE b.series_id=OLD.series_id), NULLIF(file_modified_at,''), updated_at),
+      sort_created_at=COALESCE((SELECT MAX(NULLIF(b.file_created_at,'')) FROM books b WHERE b.series_id=OLD.series_id), created_at)
+  WHERE id=OLD.series_id;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS fk115_books_rollup_upd
+AFTER UPDATE OF series_id, file_modified_at, file_created_at ON books
+BEGIN
+  UPDATE series
+  SET books_count=(SELECT count(*) FROM books b WHERE b.series_id=NEW.series_id),
+      latest_book_modified_at=(SELECT MAX(NULLIF(b.file_modified_at,'')) FROM books b WHERE b.series_id=NEW.series_id),
+      latest_book_created_at=(SELECT MAX(NULLIF(b.file_created_at,'')) FROM books b WHERE b.series_id=NEW.series_id),
+      sort_modified_at=COALESCE((SELECT MAX(NULLIF(b.file_modified_at,'')) FROM books b WHERE b.series_id=NEW.series_id), NULLIF(file_modified_at,''), updated_at),
+      sort_created_at=COALESCE((SELECT MAX(NULLIF(b.file_created_at,'')) FROM books b WHERE b.series_id=NEW.series_id), created_at)
+  WHERE id=NEW.series_id;
+  UPDATE series
+  SET books_count=(SELECT count(*) FROM books b WHERE b.series_id=OLD.series_id),
+      latest_book_modified_at=(SELECT MAX(NULLIF(b.file_modified_at,'')) FROM books b WHERE b.series_id=OLD.series_id),
+      latest_book_created_at=(SELECT MAX(NULLIF(b.file_created_at,'')) FROM books b WHERE b.series_id=OLD.series_id),
+      sort_modified_at=COALESCE((SELECT MAX(NULLIF(b.file_modified_at,'')) FROM books b WHERE b.series_id=OLD.series_id), NULLIF(file_modified_at,''), updated_at),
+      sort_created_at=COALESCE((SELECT MAX(NULLIF(b.file_created_at,'')) FROM books b WHERE b.series_id=OLD.series_id), created_at)
+  WHERE OLD.series_id<>NEW.series_id AND id=OLD.series_id;
+END`,
+	}
+	for _, stmt := range triggers {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+
+	var done string
+	err := db.QueryRow(`SELECT value FROM settings WHERE key='series_rollups_v1'`).Scan(&done)
+	if err == nil && done == "1" {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS temp._fk115_series_agg`,
+		`CREATE TEMP TABLE _fk115_series_agg (
+  series_id TEXT PRIMARY KEY,
+  cnt INTEGER NOT NULL,
+  max_mod TEXT,
+  max_cre TEXT
+)`,
+		`INSERT INTO _fk115_series_agg(series_id, cnt, max_mod, max_cre)
+SELECT series_id, count(*), MAX(NULLIF(file_modified_at,'')), MAX(NULLIF(file_created_at,''))
+FROM books
+GROUP BY series_id`,
+		`UPDATE series
+SET books_count=0,
+    latest_book_modified_at=NULL,
+    latest_book_created_at=NULL,
+    sort_modified_at=COALESCE(NULLIF(file_modified_at,''), updated_at),
+    sort_created_at=created_at`,
+		`UPDATE series
+SET books_count=a.cnt,
+    latest_book_modified_at=a.max_mod,
+    latest_book_created_at=a.max_cre,
+    sort_modified_at=COALESCE(a.max_mod, NULLIF(series.file_modified_at,''), series.updated_at),
+    sort_created_at=COALESCE(a.max_cre, series.created_at)
+FROM _fk115_series_agg a
+WHERE a.series_id=series.id`,
+		`DROP TABLE IF EXISTS temp._fk115_series_agg`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`
+INSERT INTO settings(key,value,updated_at) VALUES('series_rollups_v1','1',?)
+ON CONFLICT(key) DO UPDATE SET value='1',updated_at=excluded.updated_at`, nowText()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func ensureMetadataAndScrapeTables(db *sql.DB) error {

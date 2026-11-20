@@ -1195,7 +1195,129 @@ table.data-table th {
   word-break: break-all;
 }
 
+/* Collections & ReadLists */
+.chip-org {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.org-header-card {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+}
+
+.org-header-cover {
+  width: 112px;
+  flex: 0 0 112px;
+  aspect-ratio: 2 / 3;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #141821;
+  border: 1px solid var(--border);
+}
+
+.org-header-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.org-header-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.org-member-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.org-card-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  padding: 0 10px 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.org-picker-list {
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.org-check-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  cursor: pointer;
+}
+
+.org-check-item:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.org-check-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.org-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.org-quick-create {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.org-quick-create input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+}
+
 @media (max-width: 780px) {
+  .topnav {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+  .topnav a {
+    padding: 6px 9px;
+    font-size: 13px;
+  }
+  .org-header-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .org-header-cover {
+    width: 128px;
+    margin: 0 auto;
+  }
   html.kb-typing .topbar {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;

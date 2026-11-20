@@ -109,6 +109,11 @@ CREATE TABLE IF NOT EXISTS series (
   relative_path TEXT NOT NULL,
   one_shot INTEGER NOT NULL DEFAULT 0,
   file_modified_at TEXT,
+  books_count INTEGER NOT NULL DEFAULT 0,
+  latest_book_modified_at TEXT,
+  latest_book_created_at TEXT,
+  sort_modified_at TEXT NOT NULL DEFAULT '',
+  sort_created_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   seen_scan_id TEXT NOT NULL,
@@ -414,4 +419,52 @@ CREATE TABLE IF NOT EXISTS cache_entries (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cache_entries_type_access ON cache_entries(cache_type, last_access_at);
+
+CREATE TABLE IF NOT EXISTS book_read_progress_tombstones (
+  book_id TEXT PRIMARY KEY,
+  series_id TEXT NOT NULL,
+  deleted_at TEXT NOT NULL,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_progress_tombstones_series ON book_read_progress_tombstones(series_id);
+CREATE INDEX IF NOT EXISTS idx_progress_tombstones_deleted ON book_read_progress_tombstones(deleted_at);
+
+CREATE TABLE IF NOT EXISTS collections (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  ordered INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collection_series (
+  collection_id TEXT NOT NULL,
+  series_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY(collection_id, series_id),
+  FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_collection_series_pos ON collection_series(collection_id, position);
+CREATE INDEX IF NOT EXISTS idx_collection_series_series ON collection_series(series_id, collection_id);
+
+CREATE TABLE IF NOT EXISTS readlists (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  summary TEXT NOT NULL DEFAULT '',
+  ordered INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS readlist_books (
+  readlist_id TEXT NOT NULL,
+  book_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY(readlist_id, book_id),
+  FOREIGN KEY(readlist_id) REFERENCES readlists(id) ON DELETE CASCADE,
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_readlist_books_pos ON readlist_books(readlist_id, position);
+CREATE INDEX IF NOT EXISTS idx_readlist_books_book ON readlist_books(book_id, readlist_id);
 `

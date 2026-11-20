@@ -57,8 +57,13 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1
 
 ## 5. 内置书架、简体中文阅读器与 Agent 接口
 
-- **内置书架与后台 SPA（`internal/httpserver/static/ui/`）**：支持系统自动深浅色切换、移动端防横向溢出栅格、缓存页全 `MiB` 单位展示与输入、NSFW 开关与自适应空闲零轮询。
+- **内置书架与后台 SPA（`internal/httpserver/static/ui/`）**：支持系统自动深浅色切换、日夜双套小鱼图标（含 `/reader/*` 标签页同步）、收藏夹（`/collections`）与阅读列表（`/readlists`）管理、移动端防横向溢出栅格、缓存页全 `MiB` 单位展示与输入、NSFW 开关与自适应空闲零轮询。
 - **内置简体中文阅读器（`/reader/*`，`web/reader/` + `scripts/build-reader.sh`）**：基于上游 `Suwayomi/Suwayomi-WebUI`（`MPL-2.0`）构建，默认加载 `zh-Hans` 简体中文语言包并在首屏渲染前完成激活，通过 `KomgaHostBridge` 内存桥接至 `/api/v1/*` Komga REST 接口。
+- **Koharia 深度兼容与大书库性能**：
+  - `series` 表通过轻量 SQLite 触发器与一次性升级回填维护 `books_count`、`sort_modified_at`、`sort_created_at`，配合复合覆盖索引与分块 `IN` 批查，消除大库关联扫描与 `too many SQL variables` 错误；
+  - 递归下降检索解析器（`internal/database/search.go`）支持 Koharia 的 `(<q>) OR tag:(<q>)` 联合检索、Komga 字段语法、`AND`/`OR`/`NOT` 与 `sort=relevance`；
+  - `book_read_progress_tombstones`（90 天保留）在大书库场景下让 Koharia 的全局无过滤 `GET /api/v1/books?unpaged=true&deleted=false` 仅返回活跃阅读进度及近期重置进度所属系列的全部可见单册，配合 HTTP `gzip` 压缩与 Komga SSE（`/api/v1/sse/v1/events`），同时保证历史/已读角标与重置未读同步准确；
+  - 完整持久化 `collections` / `readlists` 及关联表，提供 Komga v1 Collections / ReadLists CRUD 与 `/api/v2/authors` 分页作者接口。
 - **Agent 专用接口（`/api/agent/v1/*`，`internal/httpserver/agent.go`）**：提供 `/manifest`、`/overview`、书库 CRUD、紧凑分页 `/series`（支持 `nsfw=all|only|exclude`）与单次最多 200 条异构 `/series/batch`，详见 `docs/AGENT_API.md`。
 
 - **书架查询缓存**：`internal/database/shelf_cache.go` 缓存常用首屏与分类查询（内存、固定容量，不缓存任意搜索组合）。SQLite 触发器在同一写入事务里递增目录、阅读进度版本；读缓存前核对版本，扫描、刮削、隐藏/NSFW 开关和阅读进度提交后不复用旧结果。启动与变更后预热只查询数据库，不读取漫画归档。

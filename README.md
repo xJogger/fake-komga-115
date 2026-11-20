@@ -54,11 +54,13 @@
   - Bangumi 条目严格依据官方布尔字段 `nsfw: true` 判定分级（不会误伤仅带用户标签但 `nsfw: false` 的普通青年漫画），未命中条目辅助识别显式成人目录关键词，也支持在元数据弹窗中手动开关并锁定 NSFW 标记；
   - 默认全局隐藏 NSFW 作品（前台书架、分类筛选、客户端与阅读直链均自动隔离），可在管理后台随时一键切换显示或隐藏。
 
-### 3. 内置响应式书架与简体中文双页阅读器
-- **内置书架（`/`）与管理中心（`/admin`）**：默认自动跟随系统白天/黑夜模式切换（支持手动固定日间/夜间），移动端自适应防横向溢出布局，支持「继续阅读」、最近更新、多维筛选排序，缓存页面全部采用直观的 `MiB` 单位配置与展示，空闲状态零后台轮询刷屏。
+### 3. 内置响应式书架、收藏夹 / 阅读列表与简体中文双页阅读器
+- **内置书架（`/`）与管理中心（`/admin`）**：默认自动跟随系统白天/黑夜模式切换（支持手动固定日间/夜间），网页导航、登录页与标签页图标（含 `/reader/*` 阅读器标签页）统一按书架日夜模式切换（日间为黑底白鱼，夜间为白底线稿鱼）；移动端自适应防横向溢出布局，支持「继续阅读」、最近更新、多维筛选排序，缓存页面全部采用直观的 `MiB` 单位配置与展示，空闲状态零后台轮询刷屏。
+- **收藏夹（`/collections`）与阅读列表（`/readlists`）**：完整支持 Komga Collections / ReadLists 持久化存储与 REST CRUD，内置网页书架提供列表、详情、手动排序及作品/单卷页快捷加入弹窗，并与 Koharia 实时同步；成员自动遵循隐藏书库与 NSFW 隔离策略。
 - **Bangumi 排名与版本切换**：可按 Bangumi 排名排序，未收录排名的作品靠后。书库页可选「合并相同 Bangumi ID」（默认关闭），只合并网页版的作品展示，详情页可选版本/来源；原始系列、卷和阅读进度保持独立，Mihon、Koharia 不受影响。
 - **按需补齐封面**：作品页可生成首卷第一页的缩略图，不改变封面显示偏好。书库批量任务可仅补缺封面且未绑定 Bangumi 的作品；本地/SMB 默认全库（需确认），115/WebDAV 默认最近更新的 5 部，可自定数量。
 - **内置简体中文阅读器（`/reader/*`）**：基于 `Suwayomi-WebUI` 深度定制的无 GraphQL/WebSocket 纯 REST 宿主阅读器，默认界面语言为**简体中文**，纯黑画布护眼背景，桌面端默认日漫右翻双页拼合（宽幅跨页图自动独占一屏），移动端默认单页自适应，支持条漫长图模式、跨卷无缝连读与页级阅读进度双向同步。
+- **完整 Koharia 兼容与大书库优化**：支持 Koharia `(<q>) OR tag:(<q>)` 联合检索、Komga 字段检索语法与 `relevance` 相关性排序、完整 `readProgress` 字段与 90 天进度重置墓碑保护、轻量级 Komga SSE 事件流（`/api/v1/sse/v1/events`）、`/api/v2/authors` 分页作者接口与 HTTP `gzip` 压缩，在数十万册规模书库下仍可流畅同步。
 
 ### 4. 安全鉴权与 AI Agent 友好接口
 - **单管理员强制鉴权**：首次访问（含从 `v1.x` 升级后首次访问）强制引导设置管理员账号密码（`argon2id` 哈希）；浏览器登录会话支持持久自动续期，外部客户端与工具支持 `HTTP Basic Auth`、`Authorization: Bearer <API_KEY>` 与 `X-API-Key: <API_KEY>`。
@@ -85,15 +87,15 @@
 
 ### 方式一：Windows 下载即用
 
-1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载文件名以 `_windows_amd64.zip` 结尾的压缩包（例如 `fake-komga-115_v2.1.0_windows_amd64.zip`）并解压。
-2. 双击运行 `fake-komga-115.exe`，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置。
-3. 数据默认存储在 `%LOCALAPPDATA%\fake-komga-115\data`。
+1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载文件名以 `_windows_amd64.zip` 结尾的压缩包（例如 `mangaalpha_v2.2.0_windows_amd64.zip`）并解压。
+2. 双击运行 `mangaalpha.exe`，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置。
+3. 数据默认存储在 `%LOCALAPPDATA%\fake-komga-115\data`（保持兼容，原地升级无需迁移目录）。
 
 ### 方式二：Linux / macOS 二进制运行
 
 ```bash
-chmod +x fake-komga-115
-./fake-komga-115
+chmod +x mangaalpha
+./mangaalpha
 ```
 
 浏览器打开 `http://127.0.0.1:25600/` 设置管理员账号密码后，进入右上角「管理后台」（`/admin`）添加存储源与书库即可。
@@ -110,10 +112,10 @@ docker run -d \
   -v fake-komga-115-data:/data \
   -v /share/manga:/manga:ro \
   -e TZ=Asia/Shanghai \
-  blacktal/fake-komga-115:v2.1.0
+  blacktal/fake-komga-115:v2.2.0
 ```
 
-项目改名不改变镜像名、服务端可执行文件或已有数据路径。已有容器升级时，请保留挂载在 `/data` 的原数据卷。建议固定使用版本标签，避免自动更新工具在未备份时跨大版本升级。首次启动后同样需要在网页设置管理员。
+从 `v2.2.0` 起，GitHub Release 桌面/服务端压缩包与本地构建产物名统一为 `mangaalpha`；Docker 镜像名 `blacktal/fake-komga-115`、容器内入口命令、环境变量 `FK115_*` 与既有默认数据路径保持不变。已有容器升级时，请保留挂载在 `/data` 的原数据卷。建议固定使用版本标签，避免自动更新工具在未备份时跨大版本升级。首次启动后同样需要在网页设置管理员。
 
 ### 方式四：从源码构建
 
@@ -123,7 +125,7 @@ docker run -d \
 git clone https://github.com/xJogger/MangaAlpha.git
 cd MangaAlpha
 make build
-./fake-komga-115
+./mangaalpha
 ```
 
 ### Android 独立预览版

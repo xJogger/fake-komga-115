@@ -26,6 +26,7 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Post("/login/set-cookie", s.komgaSetCookie)
 
 	r.Get("/server/capabilities", s.komgaCapabilities)
+	r.Get("/sse/v1/events", s.komgaSSEEvents)
 	r.Get("/libraries", s.komgaLibraries)
 	r.Get("/users/me", s.komgaMe)
 	r.Get("/client-settings/user/list", s.komgaClientSettings)
@@ -34,6 +35,7 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Get("/series", s.komgaSeries)
 	r.Post("/series/list", s.komgaSeriesList)
 	r.Get("/series/{seriesID}", s.komgaSeriesByID)
+	r.Get("/series/{seriesID}/collections", s.komgaSeriesCollections)
 	r.Patch("/series/{seriesID}/metadata", s.patchKomgaSeriesMetadata)
 	r.Post("/series/{seriesID}/read-progress", s.markKomgaSeriesRead)
 	r.Delete("/series/{seriesID}/read-progress", s.deleteKomgaSeriesReadProgress)
@@ -43,6 +45,7 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Get("/books", s.komgaBooks)
 	r.Post("/books/list", s.komgaBooksList)
 	r.Get("/books/{bookID}", s.komgaBookByID)
+	r.Get("/books/{bookID}/readlists", s.komgaBookReadLists)
 	r.Get("/books/{bookID}/next", s.komgaBookNext)
 	r.Get("/books/{bookID}/previous", s.komgaBookPrevious)
 	r.Get("/books/{bookID}/read-progress", s.komgaBookReadProgress)
@@ -54,11 +57,25 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Get("/books/{bookID}/pages/{pageNumber}/thumbnail", s.komgaBookPlaceholderThumbnail)
 	r.Get("/books/{bookID}/thumbnail", s.komgaBookPlaceholderThumbnail)
 
-	r.Get("/collections", s.emptyPage)
-	r.Get("/collections/{id}/series", s.emptyPage)
-	r.Get("/collections/{id}/thumbnail", func(w http.ResponseWriter, _ *http.Request) { s.writePlaceholder(w) })
-	r.Get("/readlists", s.emptyPage)
-	r.Get("/readlists/{id}/thumbnail", func(w http.ResponseWriter, _ *http.Request) { s.writePlaceholder(w) })
+	r.Get("/collections", s.komgaCollections)
+	r.Post("/collections", s.komgaCreateCollection)
+	r.Get("/collections/{id}", s.komgaCollectionByID)
+	r.Patch("/collections/{id}", s.komgaUpdateCollection)
+	r.Delete("/collections/{id}", s.komgaDeleteCollection)
+	r.Get("/collections/{id}/series", s.komgaCollectionSeries)
+	r.Get("/collections/{id}/thumbnail", s.komgaCollectionThumbnail)
+	r.Get("/collections/{id}/thumbnails", s.emptyList)
+
+	r.Get("/readlists", s.komgaReadLists)
+	r.Post("/readlists", s.komgaCreateReadList)
+	r.Get("/readlists/{id}", s.komgaReadListByID)
+	r.Patch("/readlists/{id}", s.komgaUpdateReadList)
+	r.Delete("/readlists/{id}", s.komgaDeleteReadList)
+	r.Get("/readlists/{id}/books", s.komgaReadListBooks)
+	r.Get("/readlists/{id}/books/{bookID}/next", s.komgaReadListBookNext)
+	r.Get("/readlists/{id}/books/{bookID}/previous", s.komgaReadListBookPrevious)
+	r.Get("/readlists/{id}/thumbnail", s.komgaReadListThumbnail)
+	r.Get("/readlists/{id}/thumbnails", s.emptyList)
 
 	r.Get("/genres", s.komgaGenres)
 	r.Get("/tags", s.komgaTags)
@@ -73,7 +90,7 @@ func (s *Server) komgaRoutes(r chi.Router) {
 
 func (s *Server) komgaCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":          "fake-komga-115",
+		"name":          "MangaAlpha",
 		"version":       buildinfo.Version,
 		"apiBasePath":   "/api/v1",
 		"compatibility": "komga-partial",
@@ -94,6 +111,10 @@ func (s *Server) komgaCapabilities(w http.ResponseWriter, _ *http.Request) {
 			"deleteBookReadProgress": true,
 			"bookSiblingNavigation":  true,
 			"clientSettings":         true,
+			"collections":            true,
+			"readLists":              true,
+			"sse":                    true,
+			"gzip":                   true,
 		},
 	})
 }
@@ -138,22 +159,23 @@ func (s *Server) serveSeriesList(w http.ResponseWriter, r *http.Request, group b
 	page, size := intQuery(r, "page", 0), intQuery(r, "size", 20)
 	filters := legacyKomgaFilters(r, "series")
 	items, total, err := s.store.SeriesPage(r.Context(), database.SeriesQuery{
-		Search:       filters.Search,
-		LibraryIDs:   filters.LibraryIDs,
-		ReadStatus:   filters.ReadStatuses,
-		Statuses:     filters.Statuses,
-		Genres:       filters.Genres,
-		Tags:         filters.Tags,
-		Publishers:   filters.Publishers,
-		Authors:      filters.Authors,
-		Languages:    filters.Languages,
-		ScrapeStatus: strings.TrimSpace(r.URL.Query().Get("scrape_status")),
-		GroupBangumi: group,
-		OneShot:      filters.OneShot,
-		Empty:        filters.Empty,
-		Page:         page,
-		Size:         size,
-		Sort:         r.URL.Query().Get("sort"),
+		Search:        filters.Search,
+		LibraryIDs:    filters.LibraryIDs,
+		CollectionIDs: filters.CollectionIDs,
+		ReadStatus:    filters.ReadStatuses,
+		Statuses:      filters.Statuses,
+		Genres:        filters.Genres,
+		Tags:          filters.Tags,
+		Publishers:    filters.Publishers,
+		Authors:       filters.Authors,
+		Languages:     filters.Languages,
+		ScrapeStatus:  strings.TrimSpace(r.URL.Query().Get("scrape_status")),
+		GroupBangumi:  group,
+		OneShot:       filters.OneShot,
+		Empty:         filters.Empty,
+		Page:          page,
+		Size:          size,
+		Sort:          r.URL.Query().Get("sort"),
 	})
 	if err != nil {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
@@ -222,6 +244,10 @@ func (s *Server) markKomgaSeriesRead(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
 		return
 	}
+	s.sse.Publish("ReadProgressSeriesChanged", map[string]any{
+		"seriesId": seriesID,
+		"userId":   "admin",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -235,6 +261,10 @@ func (s *Server) deleteKomgaSeriesReadProgress(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
 		return
 	}
+	s.sse.Publish("ReadProgressSeriesDeleted", map[string]any{
+		"seriesId": seriesID,
+		"userId":   "admin",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -328,18 +358,19 @@ func (s *Server) komgaBookPage(w http.ResponseWriter, r *http.Request, seriesID 
 	unpaged := r.URL.Query().Get("unpaged") == "true"
 	filters := legacyKomgaFilters(r, "books")
 	items, total, err := s.store.BooksPage(r.Context(), database.BookQuery{
-		Search:     filters.Search,
-		LibraryIDs: filters.LibraryIDs,
-		ReadStatus: filters.ReadStatuses,
-		Tags:       filters.Tags,
-		Authors:    filters.Authors,
-		SeriesID:   seriesID,
-		OneShot:    filters.OneShot,
-		Empty:      filters.Empty,
-		Page:       page,
-		Size:       size,
-		Unpaged:    unpaged,
-		Sort:       r.URL.Query().Get("sort"),
+		Search:      filters.Search,
+		LibraryIDs:  filters.LibraryIDs,
+		ReadListIDs: filters.ReadListIDs,
+		ReadStatus:  filters.ReadStatuses,
+		Tags:        filters.Tags,
+		Authors:     filters.Authors,
+		SeriesID:    seriesID,
+		OneShot:     filters.OneShot,
+		Empty:       filters.Empty,
+		Page:        page,
+		Size:        size,
+		Unpaged:     unpaged,
+		Sort:        r.URL.Query().Get("sort"),
 	})
 	if err != nil {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
@@ -514,6 +545,10 @@ func (s *Server) deleteKomgaBookReadProgress(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
 		return
 	}
+	s.sse.Publish("ReadProgressDeleted", map[string]any{
+		"bookId": book.ID,
+		"userId": "admin",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -547,6 +582,10 @@ func (s *Server) patchKomgaBookReadProgress(w http.ResponseWriter, r *http.Reque
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
 	}
+	s.sse.Publish("ReadProgressChanged", map[string]any{
+		"bookId": book.ID,
+		"userId": "admin",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -689,6 +728,10 @@ func (s *Server) putSeriesProgress(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "DATABASE_ERROR", err.Error())
 		return
 	}
+	s.sse.Publish("ReadProgressSeriesChanged", map[string]any{
+		"seriesId": seriesID,
+		"userId":   "admin",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -888,18 +931,24 @@ func bookDTOWithProgressAndMeta(
 }
 
 func bookReadProgressDTO(progress database.BookReadProgress) map[string]any {
-	var page any
-	if progress.Page != nil {
+	page := 1
+	if progress.Page != nil && *progress.Page > 0 {
 		page = *progress.Page
 	}
-	var readDate any
+	ts := progress.UpdatedAt.UTC()
 	if progress.ReadDate != nil {
-		readDate = progress.ReadDate.UTC().Format(time.RFC3339)
+		ts = progress.ReadDate.UTC()
 	}
+	readDateStr := ts.Format(time.RFC3339)
+	lastModStr := progress.UpdatedAt.UTC().Format(time.RFC3339)
 	return map[string]any{
-		"completed": progress.Completed,
-		"page":      page,
-		"readDate":  readDate,
+		"completed":    progress.Completed,
+		"page":         page,
+		"readDate":     readDateStr,
+		"created":      readDateStr,
+		"lastModified": lastModStr,
+		"deviceId":     "",
+		"deviceName":   "",
 	}
 }
 

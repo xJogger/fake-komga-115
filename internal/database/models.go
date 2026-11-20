@@ -230,6 +230,27 @@ type BookReadProgress struct {
 	UpdatedAt   time.Time
 }
 
+type Collection struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Ordered   bool      `json:"ordered"`
+	SeriesIDs []string  `json:"seriesIds"`
+	Filtered  bool      `json:"filtered"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type ReadList struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Summary   string    `json:"summary"`
+	Ordered   bool      `json:"ordered"`
+	BookIDs   []string  `json:"bookIds"`
+	Filtered  bool      `json:"filtered"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 type BookPageProgress struct {
 	BookID         string
 	SeriesID       string

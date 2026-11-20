@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 func (s *Store) SeriesReadProgress(ctx context.Context, seriesID string) (SeriesReadProgress, error) {
@@ -58,11 +59,16 @@ func (s *Store) SeriesReadProgresses(
 		return out, nil
 	}
 	unique := cleanStringSliceCaseSensitive(seriesIDs)
-	args := make([]any, 0, len(unique))
+	continuousMap := make(map[string]bool, len(unique))
 	for _, id := range unique {
-		args = append(args, id)
+		continuousMap[id] = true
 	}
-	query := `
+	for _, chunk := range chunkStrings(unique, sqlInChunkSize) {
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		query := `
 SELECT b.series_id, b.number_sort,
  CASE WHEN p.book_id IS NULL THEN 0 ELSE 1 END AS has_progress,
  coalesce(p.completed,0)
@@ -70,42 +76,40 @@ FROM books b
 LEFT JOIN book_read_progress p ON p.book_id=b.id
 WHERE b.series_id IN ` + Placeholders(len(args)) + `
 ORDER BY b.series_id ASC,b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	continuousMap := make(map[string]bool, len(unique))
-	for _, id := range unique {
-		continuousMap[id] = true
-	}
-	for rows.Next() {
-		var seriesID string
-		var numberSort float64
-		var hasProgress, completed int
-		if err := rows.Scan(&seriesID, &numberSort, &hasProgress, &completed); err != nil {
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
 			return nil, err
 		}
-		progress := out[seriesID]
-		progress.BooksCount++
-		progress.MaxNumberSort = numberSort
-		switch {
-		case hasProgress != 0 && completed != 0:
-			progress.BooksReadCount++
-			if continuousMap[seriesID] {
-				progress.LastReadContinuousNumberSort = numberSort
+		for rows.Next() {
+			var seriesID string
+			var numberSort float64
+			var hasProgress, completed int
+			if err := rows.Scan(&seriesID, &numberSort, &hasProgress, &completed); err != nil {
+				rows.Close()
+				return nil, err
 			}
-		case hasProgress != 0:
-			progress.BooksInProgressCount++
-			continuousMap[seriesID] = false
-		default:
-			continuousMap[seriesID] = false
+			progress := out[seriesID]
+			progress.BooksCount++
+			progress.MaxNumberSort = numberSort
+			switch {
+			case hasProgress != 0 && completed != 0:
+				progress.BooksReadCount++
+				if continuousMap[seriesID] {
+					progress.LastReadContinuousNumberSort = numberSort
+				}
+			case hasProgress != 0:
+				progress.BooksInProgressCount++
+				continuousMap[seriesID] = false
+			default:
+				continuousMap[seriesID] = false
+			}
+			out[seriesID] = progress
 		}
-		out[seriesID] = progress
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
 	for id, progress := range out {
 		progress.BooksUnreadCount = progress.BooksCount -
@@ -115,20 +119,53 @@ ORDER BY b.series_id ASC,b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC`
 	return out, nil
 }
 
+func tombstoneCutoffText() string {
+	return time.Now().UTC().Add(-progressTombstoneRetention).Format(time.RFC3339Nano)
+}
+
 func (s *Store) DeleteSeriesReadProgress(ctx context.Context, seriesID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM book_read_progress WHERE series_id=?`, seriesID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := nowText()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO book_read_progress_tombstones(book_id,series_id,deleted_at)
+SELECT book_id,series_id,? FROM book_read_progress WHERE series_id=?
+ON CONFLICT(book_id) DO UPDATE SET
+ series_id=excluded.series_id,
+ deleted_at=excluded.deleted_at`, now, seriesID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress WHERE series_id=?`, seriesID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE deleted_at<?`, tombstoneCutoffText()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) MarkSeriesCompleted(ctx context.Context, seriesID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	now := nowText()
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO book_read_progress(book_id,series_id,completed,read_date,completed_at,updated_at)
 SELECT id,series_id,1,?,?,? FROM books WHERE series_id=?
 ON CONFLICT(book_id) DO UPDATE SET
  completed=1,read_date=excluded.read_date,completed_at=excluded.completed_at,updated_at=excluded.updated_at`,
-		now, now, now, seriesID)
-	return err
+		now, now, now, seriesID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE series_id=?`, seriesID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdateSeriesReadProgress(
@@ -143,6 +180,17 @@ func (s *Store) UpdateSeriesReadProgress(
 	defer tx.Rollback()
 
 	now := nowText()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO book_read_progress_tombstones(book_id,series_id,deleted_at)
+SELECT p.book_id,p.series_id,?
+FROM book_read_progress p
+JOIN books b ON b.id=p.book_id
+WHERE p.series_id=? AND b.number_sort>?
+ON CONFLICT(book_id) DO UPDATE SET
+ series_id=excluded.series_id,
+ deleted_at=excluded.deleted_at`, now, seriesID, lastBookNumberSortRead); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM book_read_progress
 WHERE series_id=? AND book_id IN (
@@ -161,6 +209,16 @@ ON CONFLICT(book_id) DO UPDATE SET
  completed_at=excluded.completed_at,
  read_date=excluded.read_date,
  updated_at=excluded.updated_at`, now, now, now, seriesID, lastBookNumberSortRead); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM book_read_progress_tombstones
+WHERE series_id=? AND book_id IN (
+ SELECT id FROM books WHERE series_id=? AND number_sort<=?
+)`, seriesID, seriesID, lastBookNumberSortRead); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE deleted_at<?`, tombstoneCutoffText()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -236,40 +294,48 @@ func (s *Store) BookReadProgresses(
 	if len(bookIDs) == 0 {
 		return out, nil
 	}
-	query := `
+	unique := cleanStringSliceCaseSensitive(bookIDs)
+	for _, chunk := range chunkStrings(unique, sqlInChunkSize) {
+		query := `
 SELECT book_id,series_id,completed,page,read_date,completed_at,updated_at
-FROM book_read_progress WHERE book_id IN ` + Placeholders(len(bookIDs))
-	args := make([]any, 0, len(bookIDs))
-	for _, id := range bookIDs {
-		args = append(args, id)
-	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var progress BookReadProgress
-		var completed int
-		var page sql.NullInt64
-		var readDate, completedAt, updatedAt sql.NullString
-		if err := rows.Scan(
-			&progress.BookID, &progress.SeriesID, &completed,
-			&page, &readDate, &completedAt, &updatedAt,
-		); err != nil {
+FROM book_read_progress WHERE book_id IN ` + Placeholders(len(chunk))
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
 			return nil, err
 		}
-		progress.Completed = completed != 0
-		if page.Valid {
-			value := int(page.Int64)
-			progress.Page = &value
+		for rows.Next() {
+			var progress BookReadProgress
+			var completed int
+			var page sql.NullInt64
+			var readDate, completedAt, updatedAt sql.NullString
+			if err := rows.Scan(
+				&progress.BookID, &progress.SeriesID, &completed,
+				&page, &readDate, &completedAt, &updatedAt,
+			); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			progress.Completed = completed != 0
+			if page.Valid {
+				value := int(page.Int64)
+				progress.Page = &value
+			}
+			progress.ReadDate = parseNullableTime(readDate)
+			progress.CompletedAt = parseNullableTime(completedAt)
+			progress.UpdatedAt = parseTime(updatedAt.String)
+			out[progress.BookID] = progress
 		}
-		progress.ReadDate = parseNullableTime(readDate)
-		progress.CompletedAt = parseNullableTime(completedAt)
-		progress.UpdatedAt = parseTime(updatedAt.String)
-		out[progress.BookID] = progress
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) UpdateBookReadProgress(
@@ -295,7 +361,12 @@ func (s *Store) UpdateBookReadProgress(
 	if page != nil && *page > 0 {
 		pageValue = *page
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO book_read_progress(
  book_id,series_id,completed,page,read_date,completed_at,updated_at
 ) VALUES(?,?,?,?,?,?,?)
@@ -306,13 +377,37 @@ ON CONFLICT(book_id) DO UPDATE SET
  read_date=excluded.read_date,
  completed_at=excluded.completed_at,
  updated_at=excluded.updated_at`,
-		book.ID, book.SeriesID, completedInt, pageValue, now, completedAt, now)
-	return err
+		book.ID, book.SeriesID, completedInt, pageValue, now, completedAt, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE book_id=?`, book.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteBookReadProgress(ctx context.Context, bookID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM book_read_progress WHERE book_id=?`, bookID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := nowText()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO book_read_progress_tombstones(book_id,series_id,deleted_at)
+SELECT book_id,series_id,? FROM book_read_progress WHERE book_id=?
+ON CONFLICT(book_id) DO UPDATE SET
+ series_id=excluded.series_id,
+ deleted_at=excluded.deleted_at`, now, bookID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress WHERE book_id=?`, bookID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE deleted_at<?`, tombstoneCutoffText()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) RecordBookPageProgress(

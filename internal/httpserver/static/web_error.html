@@ -5,7 +5,23 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>暂时无法显示 · MangaAlpha</title>
-  <link rel="icon" type="image/png" href="/ui/mangaalpha-icon.png">
+  <link id="app-favicon" rel="icon" type="image/png" href="/ui/mangaalpha-icon.png">
+  <script>
+    (function(){
+      var mq=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)');
+      function sync(){
+        try{
+          var m=localStorage.getItem('fk115_theme_mode')||'auto';
+          var dark=(m==='dark')||(m!=='light'&&mq&&mq.matches);
+          var l=document.getElementById('app-favicon');
+          if(l)l.href=dark?'/ui/mangaalpha-icon-dark.png':'/ui/mangaalpha-icon.png';
+        }catch(e){}
+      }
+      sync();
+      if(mq&&mq.addEventListener)mq.addEventListener('change',sync);
+      window.addEventListener('storage',function(ev){if(!ev.key||ev.key==='fk115_theme_mode')sync();});
+    })();
+  </script>
   <link rel="stylesheet" href="/assets/web.css">
 </head>
 <body>

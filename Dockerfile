@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY scripts/build-reader.sh ./scripts/build-reader.sh
 COPY web/reader ./web/reader
 COPY internal/httpserver/static/ui/mangaalpha-icon.png ./internal/httpserver/static/ui/mangaalpha-icon.png
+COPY internal/httpserver/static/ui/mangaalpha-icon-dark.png ./internal/httpserver/static/ui/mangaalpha-icon-dark.png
 RUN mkdir -p internal/httpserver/static/reader_dist \
     && touch internal/httpserver/static/reader_dist/placeholder.txt \
     && bash scripts/build-reader.sh
@@ -45,9 +46,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM alpine:3.22
 
 ARG VERSION=dev
-LABEL org.opencontainers.image.title="fake-komga-115" \
+LABEL org.opencontainers.image.title="MangaAlpha" \
       org.opencontainers.image.description="Komga-compatible manga server for 115 Open API, Local directories, and WebDAV with built-in bookshelf, reader, and Bangumi metadata" \
-      org.opencontainers.image.source="https://github.com/xJogger/fake-komga-115" \
+      org.opencontainers.image.source="https://github.com/xJogger/MangaAlpha" \
       org.opencontainers.image.licenses="MIT AND MPL-2.0" \
       org.opencontainers.image.version="${VERSION}"
 

@@ -52,6 +52,7 @@ type Server struct {
 	router  chi.Router
 	web     *template.Template
 	runtime RuntimeInfo
+	sse     *sseHub
 
 	placeholder []byte
 }
@@ -79,7 +80,7 @@ func New(
 		scanner: scanManager, cache: cacheManager,
 		archive: archiveService, thumbs: thumbnailService, covers: coverManager,
 		tasks:   maintenanceManager,
-		runtime: runtimeInfo, logger: logger, placeholder: makePlaceholder(),
+		runtime: runtimeInfo, logger: logger, sse: newSSEHub(), placeholder: makePlaceholder(),
 		web: template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
 	}
 	s.router = s.routes()
@@ -102,11 +103,13 @@ func (s *Server) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(s.requestLogger)
+	r.Use(gzipMiddleware)
 	r.Use(s.authMiddleware)
 
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	r.Get("/favicon.ico", s.serveFavicon)
 
 	// Embedded Bookshelf + Auth + Admin SPA routes
 	r.Get("/", s.serveSPA)
@@ -114,6 +117,10 @@ func (s *Server) routes() chi.Router {
 	r.Get("/login", s.serveSPA)
 	r.Get("/libraries", s.serveSPA)
 	r.Get("/libraries/{libraryID}", s.serveLibraryPageOrSPA)
+	r.Get("/collections", s.serveSPA)
+	r.Get("/collections/{collectionID}", s.serveCollectionPageOrSPA)
+	r.Get("/readlists", s.serveSPA)
+	r.Get("/readlists/{readListID}", s.serveReadListPageOrSPA)
 	r.Get("/series/{seriesID}", s.serveSeriesPageOrSPA)
 	r.Get("/book/{bookID}", s.serveBookPageOrSPA)
 	r.Get("/books/{bookID}", s.serveBookPageOrSPA)
@@ -140,6 +147,7 @@ func (s *Server) routes() chi.Router {
 	r.Route("/api/v1", s.komgaRoutes)
 	r.Get("/api/v2/users/me", s.komgaMe)
 	r.Patch("/api/v2/users/me/password", s.komgaPatchMyPassword)
+	r.Get("/api/v2/authors", s.komgaAuthorsV2)
 	r.Get("/api/v2/series/{seriesID}/read-progress/tachiyomi", s.getSeriesProgress)
 	r.Put("/api/v2/series/{seriesID}/read-progress/tachiyomi", s.putSeriesProgress)
 
@@ -172,6 +180,43 @@ func (s *Server) serveLibraryPageOrSPA(w http.ResponseWriter, r *http.Request) {
 	}
 	if !lib.Enabled {
 		s.renderNotFound(w)
+		return
+	}
+	s.serveSPA(w, r)
+}
+
+func (s *Server) serveFavicon(w http.ResponseWriter, _ *http.Request) {
+	data, err := staticFiles.ReadFile("static/ui/mangaalpha-icon.png")
+	if err != nil {
+		http.NotFound(w, nil)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(data)
+}
+
+func (s *Server) serveCollectionPageOrSPA(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "collectionID")
+	if _, err := s.store.CollectionByID(r.Context(), id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.renderNotFound(w)
+			return
+		}
+		s.renderWebError(w, err)
+		return
+	}
+	s.serveSPA(w, r)
+}
+
+func (s *Server) serveReadListPageOrSPA(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "readListID")
+	if _, err := s.store.ReadListByID(r.Context(), id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.renderNotFound(w)
+			return
+		}
+		s.renderWebError(w, err)
 		return
 	}
 	s.serveSPA(w, r)

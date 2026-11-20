@@ -44,7 +44,7 @@ func (s *Server) agentRoutes(r chi.Router) {
 
 func (s *Server) agentManifest(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":       "fake-komga-115 Agent API",
+		"name":       "MangaAlpha Agent API",
 		"apiVersion": "v1",
 		"appVersion": buildinfo.Version,
 		"basePath":   "/api/agent/v1",

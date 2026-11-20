@@ -259,34 +259,48 @@ func (s *Store) SeriesMetadatas(
 		return out, nil
 	}
 	byID := make(map[string]Series, len(seriesList))
-	args := make([]any, 0, len(seriesList))
+	ids := make([]string, 0, len(seriesList))
 	for _, item := range seriesList {
+		if _, exists := byID[item.ID]; exists {
+			continue
+		}
 		byID[item.ID] = item
 		out[item.ID] = defaultSeriesMetadata(item)
-		args = append(args, item.ID)
+		ids = append(ids, item.ID)
 	}
-	query := `SELECT ` + seriesMetadataColumns +
-		` FROM series_metadata WHERE series_id IN ` + Placeholders(len(args))
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		meta, err := scanSeriesMetadataRow(rows)
+	for _, chunk := range chunkStrings(ids, sqlInChunkSize) {
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		query := `SELECT ` + seriesMetadataColumns +
+			` FROM series_metadata WHERE series_id IN ` + Placeholders(len(args))
+		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
-		series := byID[meta.SeriesID]
-		if strings.TrimSpace(meta.Title) == "" {
-			meta.Title = series.Name
+		for rows.Next() {
+			meta, err := scanSeriesMetadataRow(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			series := byID[meta.SeriesID]
+			if strings.TrimSpace(meta.Title) == "" {
+				meta.Title = series.Name
+			}
+			if strings.TrimSpace(meta.TitleSort) == "" {
+				meta.TitleSort = meta.Title
+			}
+			out[meta.SeriesID] = meta
 		}
-		if strings.TrimSpace(meta.TitleSort) == "" {
-			meta.TitleSort = meta.Title
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
 		}
-		out[meta.SeriesID] = meta
+		rows.Close()
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) ApplyScrapedMetadata(
@@ -720,22 +734,41 @@ func (s *Store) Publishers(ctx context.Context, libraryIDs []string) ([]string, 
 	return s.queryPublishers(ctx, libraryIDs)
 }
 
+type AuthorQuery struct {
+	LibraryIDs    []string
+	CollectionIDs []string
+	ReadListIDs   []string
+	Search        string
+	Role          string
+	Page          int
+	Size          int
+	Unpaged       bool
+}
+
+type scrapeSummaryResult struct {
+	matched, unmatched, total int64
+}
+
 func (s *Store) queryPublishers(ctx context.Context, libraryIDs []string) ([]string, error) {
+	enabledLibs, err := s.enabledLibraryIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	libs, empty := intersectLibraryIDs(libraryIDs, enabledLibs)
+	if empty {
+		return []string{}, nil
+	}
 	query := `
 SELECT DISTINCT sm.publisher
 FROM series_metadata sm
 JOIN series s ON s.id=sm.series_id
-JOIN libraries l ON l.id=s.library_id AND l.enabled=1
-WHERE sm.publisher<>''`
+WHERE sm.publisher<>'' AND s.library_id IN ` + Placeholders(len(libs))
 	if !s.ShowNSFW(ctx) {
 		query += ` AND sm.is_nsfw=0`
 	}
-	var args []any
-	if len(libraryIDs) > 0 {
-		query += ` AND s.library_id IN ` + Placeholders(len(libraryIDs))
-		for _, id := range libraryIDs {
-			args = append(args, id)
-		}
+	args := make([]any, 0, len(libs))
+	for _, id := range libs {
+		args = append(args, id)
 	}
 	query += ` ORDER BY sm.publisher COLLATE NOCASE ASC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -759,31 +792,58 @@ func (s *Store) Authors(
 	libraryIDs []string,
 	search, role string,
 ) ([]Author, error) {
-	query := `
-SELECT DISTINCT sa.name,sa.role
-FROM series_authors sa
-JOIN series s ON s.id=sa.series_id
-JOIN libraries l ON l.id=s.library_id AND l.enabled=1
-WHERE sa.name<>''`
+	search = strings.TrimSpace(search)
+	role = strings.TrimSpace(role)
+	if len(libraryIDs) == 0 && search == "" && role == "" {
+		return shelfCached(ctx, s, "taxonomy:authors", false, func(ctx context.Context) ([]Author, error) {
+			return s.queryAuthorsTop(ctx, nil, "", "", 500)
+		})
+	}
+	return s.queryAuthorsTop(ctx, libraryIDs, search, role, 500)
+}
+
+func (s *Store) queryAuthorsTop(
+	ctx context.Context,
+	libraryIDs []string,
+	search, role string,
+	limit int,
+) ([]Author, error) {
+	enabledLibs, err := s.enabledLibraryIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	libs, empty := intersectLibraryIDs(libraryIDs, enabledLibs)
+	if empty {
+		return []Author{}, nil
+	}
+	clauses := []string{
+		`sa.name<>''`,
+		`s.library_id IN ` + Placeholders(len(libs)),
+	}
+	args := make([]any, 0, len(libs)+3)
+	for _, id := range libs {
+		args = append(args, id)
+	}
 	if !s.ShowNSFW(ctx) {
-		query += ` AND NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=s.id AND sm_nsfw.is_nsfw=1)`
+		clauses = append(clauses, `s.id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`)
 	}
-	var args []any
-	if len(libraryIDs) > 0 {
-		query += ` AND s.library_id IN ` + Placeholders(len(libraryIDs))
-		for _, id := range libraryIDs {
-			args = append(args, id)
-		}
-	}
-	if search = strings.TrimSpace(search); search != "" {
-		query += ` AND sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`
+	if search != "" {
+		clauses = append(clauses, `sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
 		args = append(args, "%"+escapeLike(search)+"%")
 	}
-	if role = strings.TrimSpace(role); role != "" {
-		query += ` AND sa.role=? COLLATE NOCASE`
+	if role != "" {
+		clauses = append(clauses, `sa.role=? COLLATE NOCASE`)
 		args = append(args, strings.ToLower(role))
 	}
-	query += ` ORDER BY sa.name COLLATE NOCASE ASC,sa.role ASC LIMIT 500`
+	// Drive from series_authors in idx_series_authors_name order so LIMIT 500 stops early!
+	query := `
+SELECT DISTINCT sa.name, sa.role
+FROM series_authors sa
+CROSS JOIN series s ON s.id=sa.series_id
+WHERE ` + strings.Join(clauses, " AND ") + `
+ORDER BY sa.name COLLATE NOCASE ASC, sa.role ASC
+LIMIT ?`
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -800,30 +860,166 @@ WHERE sa.name<>''`
 	return out, rows.Err()
 }
 
-func (s *Store) ScrapeSummary(ctx context.Context) (matched, unmatched, total int64, err error) {
-	if s.ShowNSFW(ctx) {
-		err = s.db.QueryRowContext(ctx, `
-SELECT
- (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.scrape_status='matched'),
- (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.scrape_status='unmatched'),
- (SELECT count(*) FROM series s JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1)`).Scan(&matched, &unmatched, &total)
-		return
+func (s *Store) AuthorsPage(ctx context.Context, q AuthorQuery) ([]Author, int64, error) {
+	if q.Page < 0 {
+		q.Page = 0
 	}
-	err = s.db.QueryRowContext(ctx, `
+	if !q.Unpaged && (q.Size <= 0 || q.Size > 500) {
+		q.Size = 20
+	}
+	enabledLibs, err := s.enabledLibraryIDs(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	libs, empty := intersectLibraryIDs(q.LibraryIDs, enabledLibs)
+	if empty {
+		return []Author{}, 0, nil
+	}
+
+	clauses := []string{
+		`sa.name<>''`,
+		`s.library_id IN ` + Placeholders(len(libs)),
+	}
+	args := make([]any, 0, len(libs)+4)
+	for _, id := range libs {
+		args = append(args, id)
+	}
+	if !s.ShowNSFW(ctx) {
+		clauses = append(clauses, `s.id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`)
+	}
+	if len(q.CollectionIDs) > 0 {
+		cids := cleanStringSliceCaseSensitive(q.CollectionIDs)
+		clauses = append(clauses, `s.id IN (SELECT cs.series_id FROM collection_series cs WHERE cs.collection_id IN `+Placeholders(len(cids))+`)`)
+		for _, id := range cids {
+			args = append(args, id)
+		}
+	}
+	if len(q.ReadListIDs) > 0 {
+		rids := cleanStringSliceCaseSensitive(q.ReadListIDs)
+		clauses = append(clauses, `s.id IN (SELECT b.series_id FROM readlist_books rb JOIN books b ON b.id=rb.book_id WHERE rb.readlist_id IN `+Placeholders(len(rids))+`)`)
+		for _, id := range rids {
+			args = append(args, id)
+		}
+	}
+	if search := strings.TrimSpace(q.Search); search != "" {
+		clauses = append(clauses, `sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
+		args = append(args, "%"+escapeLike(search)+"%")
+	}
+	if role := strings.TrimSpace(q.Role); role != "" {
+		clauses = append(clauses, `sa.role=? COLLATE NOCASE`)
+		args = append(args, strings.ToLower(role))
+	}
+
+	base := ` FROM series s JOIN series_authors sa ON sa.series_id=s.id WHERE ` + strings.Join(clauses, " AND ")
+	var total int64
+	if !q.Unpaged {
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT count(*) FROM (SELECT DISTINCT sa.name, sa.role`+base+`)`, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		if total == 0 {
+			return []Author{}, 0, nil
+		}
+	}
+
+	query := `SELECT DISTINCT sa.name, sa.role` + base + ` ORDER BY sa.name COLLATE NOCASE ASC, sa.role ASC`
+	queryArgs := append([]any(nil), args...)
+	if !q.Unpaged {
+		query += ` LIMIT ? OFFSET ?`
+		queryArgs = append(queryArgs, q.Size, q.Page*q.Size)
+	}
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]Author, 0)
+	for rows.Next() {
+		var item Author
+		if err := rows.Scan(&item.Name, &item.Role); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	if q.Unpaged {
+		total = int64(len(out))
+	}
+	return out, total, nil
+}
+
+func (s *Store) ScrapeSummary(ctx context.Context) (matched, unmatched, total int64, err error) {
+	r, err := shelfCached(ctx, s, "scrape-summary", false, s.queryScrapeSummary)
+	return r.matched, r.unmatched, r.total, err
+}
+
+func (s *Store) queryScrapeSummary(ctx context.Context) (scrapeSummaryResult, error) {
+	enabledLibs, err := s.enabledLibraryIDs(ctx)
+	if err != nil {
+		return scrapeSummaryResult{}, err
+	}
+	if len(enabledLibs) == 0 {
+		return scrapeSummaryResult{}, nil
+	}
+	libPH := Placeholders(len(enabledLibs))
+	libArgs := make([]any, 0, len(enabledLibs))
+	for _, id := range enabledLibs {
+		libArgs = append(libArgs, id)
+	}
+
+	var out scrapeSummaryResult
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM series WHERE library_id IN `+libPH, libArgs...).Scan(&out.total); err != nil {
+		return scrapeSummaryResult{}, err
+	}
+	showNSFW := s.ShowNSFW(ctx)
+	if !showNSFW {
+		var nsfwSeries int64
+		if err := s.db.QueryRowContext(ctx, `
+SELECT count(*)
+FROM series_metadata sm
+JOIN series s ON s.id=sm.series_id
+WHERE sm.is_nsfw=1 AND s.library_id IN `+libPH, libArgs...).Scan(&nsfwSeries); err != nil {
+			return scrapeSummaryResult{}, err
+		}
+		out.total = max(int64(0), out.total-nsfwSeries)
+	}
+
+	statusQuery := `
 SELECT
- (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.is_nsfw=0 AND sm.scrape_status='matched'),
- (SELECT count(*) FROM series_metadata sm JOIN series s ON s.id=sm.series_id JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND sm.is_nsfw=0 AND sm.scrape_status='unmatched'),
- (SELECT count(*) FROM series s JOIN libraries l ON l.id=s.library_id WHERE l.enabled=1 AND NOT EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.is_nsfw=1))`).Scan(&matched, &unmatched, &total)
-	return
+ coalesce(sum(CASE WHEN sm.scrape_status='matched' THEN 1 ELSE 0 END), 0),
+ coalesce(sum(CASE WHEN sm.scrape_status='unmatched' THEN 1 ELSE 0 END), 0)
+FROM series s
+CROSS JOIN series_metadata sm ON sm.series_id=s.id
+WHERE s.library_id IN ` + libPH + ` AND sm.scrape_status IN ('matched','unmatched')`
+	if !showNSFW {
+		statusQuery += ` AND sm.is_nsfw=0`
+	}
+	if err := s.db.QueryRowContext(ctx, statusQuery, libArgs...).Scan(&out.matched, &out.unmatched); err != nil {
+		return scrapeSummaryResult{}, err
+	}
+	return out, nil
 }
 
 func (s *Store) NSFWSeriesCount(ctx context.Context) (int64, error) {
+	enabledLibs, err := s.enabledLibraryIDs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(enabledLibs) == 0 {
+		return 0, nil
+	}
+	args := make([]any, 0, len(enabledLibs))
+	for _, id := range enabledLibs {
+		args = append(args, id)
+	}
 	var count int64
-	err := s.db.QueryRowContext(ctx, `
+	err = s.db.QueryRowContext(ctx, `
 SELECT count(*) FROM series_metadata sm
 JOIN series s ON s.id=sm.series_id
-JOIN libraries l ON l.id=s.library_id
-WHERE l.enabled=1 AND sm.is_nsfw=1`).Scan(&count)
+WHERE sm.is_nsfw=1 AND s.library_id IN `+Placeholders(len(args)), args...).Scan(&count)
 	return count, err
 }
 
@@ -832,21 +1028,25 @@ func (s *Store) distinctSeriesValues(
 	table, column string,
 	libraryIDs []string,
 ) ([]string, error) {
+	enabledLibs, err := s.enabledLibraryIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	libs, empty := intersectLibraryIDs(libraryIDs, enabledLibs)
+	if empty {
+		return []string{}, nil
+	}
 	query := `
 SELECT DISTINCT t.` + column + `
-FROM ` + table + ` t
-JOIN series s ON s.id=t.series_id
-JOIN libraries l ON l.id=s.library_id AND l.enabled=1
-WHERE t.` + column + `<>''`
+FROM series s
+JOIN ` + table + ` t ON t.series_id=s.id
+WHERE s.library_id IN ` + Placeholders(len(libs)) + ` AND t.` + column + `<>''`
 	if !s.ShowNSFW(ctx) {
-		query += ` AND NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=s.id AND sm_nsfw.is_nsfw=1)`
+		query += ` AND s.id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`
 	}
-	var args []any
-	if len(libraryIDs) > 0 {
-		query += ` AND s.library_id IN ` + Placeholders(len(libraryIDs))
-		for _, id := range libraryIDs {
-			args = append(args, id)
-		}
+	args := make([]any, 0, len(libs))
+	for _, id := range libs {
+		args = append(args, id)
 	}
 	query += ` ORDER BY t.` + column + ` COLLATE NOCASE ASC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
