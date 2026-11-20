@@ -234,7 +234,8 @@ func (s *Server) serveReadListPageOrSPA(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) serveSeriesPageOrSPA(w http.ResponseWriter, r *http.Request) {
 	seriesID := chi.URLParam(r, "seriesID")
-	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+	series, err := s.store.SeriesByID(r.Context(), seriesID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			s.renderNotFound(w)
 			return
@@ -242,17 +243,34 @@ func (s *Server) serveSeriesPageOrSPA(w http.ResponseWriter, r *http.Request) {
 		s.renderWebError(w, err)
 		return
 	}
+	if series.ID != seriesID {
+		target := "/series/" + series.ID
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+		return
+	}
 	s.serveSPA(w, r)
 }
 
 func (s *Server) serveBookPageOrSPA(w http.ResponseWriter, r *http.Request) {
 	bookID := chi.URLParam(r, "bookID")
-	if _, err := s.store.BookByID(r.Context(), bookID); err != nil {
+	book, err := s.store.BookByID(r.Context(), bookID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			s.renderNotFound(w)
 			return
 		}
 		s.renderWebError(w, err)
+		return
+	}
+	if book.ID != bookID {
+		target := "/books/" + book.ID
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 		return
 	}
 	s.serveSPA(w, r)
@@ -319,7 +337,8 @@ func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
 			s.renderNotFound(w)
 			return
 		}
-		if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+		series, err := s.store.SeriesByID(r.Context(), seriesID)
+		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				s.renderNotFound(w)
 				return
@@ -337,10 +356,25 @@ func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
 				s.renderWebError(w, err)
 				return
 			}
-			if book.SeriesID != seriesID {
+			if book.SeriesID != series.ID {
 				s.renderNotFound(w)
 				return
 			}
+			if series.ID != seriesID || book.ID != parts[2] {
+				target := "/reader/series/" + series.ID + "/book/" + book.ID
+				if r.URL.RawQuery != "" {
+					target += "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+				return
+			}
+		} else if series.ID != seriesID {
+			target := "/reader/series/" + series.ID
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+			return
 		}
 	}
 

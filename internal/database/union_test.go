@@ -461,3 +461,90 @@ INSERT INTO zip_indexes(book_id,version,page_count,index_json,index_duration_ns,
 		t.Fatalf("expected different-size lower replica page_count NOT inherited for 02.cbz, got %d", pagesByName["02.cbz"])
 	}
 }
+
+func TestUnionSubLibraryLegacyIDTransparentResolution(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "union_alias.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "lib_top", Name: "本地层", ProviderType: ProviderLocal,
+		RootCID: "local:/top", RootPath: "/top", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "lib_115", Name: "115层", ProviderType: Provider115,
+		RootCID: "cid_115", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := nowText()
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,updated_at,seen_scan_id) VALUES
+('s_top','lib_top','Cat/K','K','Top/Cat/K',0,?,?,'s1'),
+('s_115','lib_115','100','K','Cloud/Cat/K',0,?,?,'s2')`, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO books(id,series_id,library_id,file_id,parent_cid,name,size,pick_code,number_sort,created_at,updated_at,seen_scan_id) VALUES
+('b_top_1','s_top','lib_top','Cat/K/01.cbz','Cat/K','01.cbz',1000,'',1,?,?,'s1'),
+('b_top_2','s_top','lib_top','Cat/K/02.cbz','Cat/K','02.cbz',1200,'',2,?,?,'s1'),
+('b_115_1','s_115','lib_115','f1','100','01.cbz',1000,'pk1',1,?,?,'s2')`,
+		now, now, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	unionLib, _, err := store.CreateUnionLibrary(ctx, "AliasUnion", true, []string{"lib_top", "lib_115"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Old physical sub-library series/book IDs transparently resolve to the union series/book.
+	uSeries, err := store.SeriesByID(ctx, "s_115")
+	if err != nil || uSeries.LibraryID != unionLib.ID || uSeries.ID == "s_115" {
+		t.Fatalf("expected s_115 resolved to union series, got %+v err=%v", uSeries, err)
+	}
+	uBook, err := store.BookByID(ctx, "b_115_1")
+	if err != nil || uBook.LibraryID != unionLib.ID || uBook.SeriesID != uSeries.ID || uBook.ID == "b_115_1" {
+		t.Fatalf("expected b_115_1 resolved to union book, got %+v err=%v", uBook, err)
+	}
+	// BooksPage filtered by old physical series ID returns all merged union books (including Vol 02 from top layer).
+	books, total, err := store.BooksPage(ctx, BookQuery{SeriesID: "s_115", Unpaged: true})
+	if err != nil || total != 2 || len(books) != 2 {
+		t.Fatalf("expected 2 merged books via legacy seriesID s_115, got total=%d len=%d err=%v", total, len(books), err)
+	}
+
+	// Manually hiding the parent union library must return sql.ErrNoRows for BOTH union and old sub-library IDs.
+	disabled := false
+	if _, _, err := store.UpdateUnionLibrary(ctx, unionLib.ID, nil, &disabled, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SeriesByID(ctx, "s_115"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected ErrNoRows when parent union is hidden, got %v", err)
+	}
+	if _, err := store.BookByID(ctx, "b_115_1"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected ErrNoRows for book when parent union is hidden, got %v", err)
+	}
+
+	// Re-enable union, then manually hide lib_115: old s_115 ID must return ErrNoRows while s_top still resolves.
+	enabled := true
+	if _, _, err := store.UpdateUnionLibrary(ctx, unionLib.ID, nil, &enabled, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "lib_115", Name: "115层", ProviderType: Provider115,
+		RootCID: "cid_115", Enabled: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SeriesByID(ctx, "s_115"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected ErrNoRows when source physical library is manually hidden, got %v", err)
+	}
+	if sTopResolved, err := store.SeriesByID(ctx, "s_top"); err != nil || sTopResolved.ID != uSeries.ID {
+		t.Fatalf("expected enabled source s_top still resolves to union, got %+v err=%v", sTopResolved, err)
+	}
+}

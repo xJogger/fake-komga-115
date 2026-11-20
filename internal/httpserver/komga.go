@@ -244,34 +244,34 @@ func (s *Server) patchKomgaSeriesMetadata(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) markKomgaSeriesRead(w http.ResponseWriter, r *http.Request) {
-	seriesID := chi.URLParam(r, "seriesID")
-	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 		return
 	}
-	if err := s.store.MarkSeriesCompleted(r.Context(), seriesID); err != nil {
+	if err := s.store.MarkSeriesCompleted(r.Context(), series.ID); err != nil {
 		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("ReadProgressSeriesChanged", map[string]any{
-		"seriesId": seriesID,
+		"seriesId": series.ID,
 		"userId":   "admin",
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) deleteKomgaSeriesReadProgress(w http.ResponseWriter, r *http.Request) {
-	seriesID := chi.URLParam(r, "seriesID")
-	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 		return
 	}
-	if err := s.store.DeleteSeriesReadProgress(r.Context(), seriesID); err != nil {
+	if err := s.store.DeleteSeriesReadProgress(r.Context(), series.ID); err != nil {
 		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("ReadProgressSeriesDeleted", map[string]any{
-		"seriesId": seriesID,
+		"seriesId": series.ID,
 		"userId":   "admin",
 	})
 	w.WriteHeader(http.StatusNoContent)
@@ -346,8 +346,8 @@ func (s *Server) komgaAuthorNames(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) komgaSeriesBooks(w http.ResponseWriter, r *http.Request) {
-	seriesID := chi.URLParam(r, "seriesID")
-	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 			return
@@ -355,7 +355,7 @@ func (s *Server) komgaSeriesBooks(w http.ResponseWriter, r *http.Request) {
 		s.writeDBError(w, r, err)
 		return
 	}
-	s.komgaBookPage(w, r, seriesID)
+	s.komgaBookPage(w, r, series.ID)
 }
 
 func (s *Server) komgaBooks(w http.ResponseWriter, r *http.Request) {
@@ -667,8 +667,8 @@ func (s *Server) komgaBookPlaceholderThumbnail(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) komgaSeriesThumbnail(w http.ResponseWriter, r *http.Request) {
-	seriesID := chi.URLParam(r, "seriesID")
-	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 			return
@@ -676,7 +676,7 @@ func (s *Server) komgaSeriesThumbnail(w http.ResponseWriter, r *http.Request) {
 		s.writeDBError(w, r, err)
 		return
 	}
-	data, ok, err := s.thumbs.Get(r.Context(), seriesID)
+	data, ok, err := s.thumbs.Get(r.Context(), series.ID)
 	if err != nil {
 		s.logger.Error("series thumbnail", "error", err)
 		s.writeUncachedPlaceholder(w)
@@ -701,12 +701,12 @@ func (s *Server) emptyList(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) getSeriesProgress(w http.ResponseWriter, r *http.Request) {
-	seriesID := chi.URLParam(r, "seriesID")
-	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	if err != nil {
 		writeError(w, 404, "NOT_FOUND", "Series not found.")
 		return
 	}
-	progress, err := s.store.SeriesReadProgress(r.Context(), seriesID)
+	progress, err := s.store.SeriesReadProgress(r.Context(), series.ID)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return
@@ -715,8 +715,8 @@ func (s *Server) getSeriesProgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) putSeriesProgress(w http.ResponseWriter, r *http.Request) {
-	seriesID := chi.URLParam(r, "seriesID")
-	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	if err != nil {
 		writeError(w, 404, "NOT_FOUND", "Series not found.")
 		return
 	}
@@ -733,12 +733,12 @@ func (s *Server) putSeriesProgress(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PROGRESS", "lastBookNumberSortRead must be positive or zero.")
 		return
 	}
-	if err := s.store.UpdateSeriesReadProgress(r.Context(), seriesID, request.LastBookNumberSortRead); err != nil {
+	if err := s.store.UpdateSeriesReadProgress(r.Context(), series.ID, request.LastBookNumberSortRead); err != nil {
 		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("ReadProgressSeriesChanged", map[string]any{
-		"seriesId": seriesID,
+		"seriesId": series.ID,
 		"userId":   "admin",
 	})
 	w.WriteHeader(http.StatusNoContent)

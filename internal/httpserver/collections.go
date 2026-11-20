@@ -217,8 +217,8 @@ func (s *Server) komgaCollectionThumbnail(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) komgaSeriesCollections(w http.ResponseWriter, r *http.Request) {
-	seriesID := chi.URLParam(r, "seriesID")
-	if _, err := s.store.SeriesByID(r.Context(), seriesID); err != nil {
+	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 			return
@@ -226,7 +226,7 @@ func (s *Server) komgaSeriesCollections(w http.ResponseWriter, r *http.Request) 
 		s.writeDBError(w, r, err)
 		return
 	}
-	items, err := s.store.CollectionsForSeries(r.Context(), seriesID)
+	items, err := s.store.CollectionsForSeries(r.Context(), series.ID)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return
@@ -445,8 +445,8 @@ func (s *Server) komgaReadListThumbnail(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) komgaBookReadLists(w http.ResponseWriter, r *http.Request) {
-	bookID := chi.URLParam(r, "bookID")
-	if _, err := s.store.BookByID(r.Context(), bookID); err != nil {
+	book, err := s.store.BookByID(r.Context(), chi.URLParam(r, "bookID"))
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Book not found.")
 			return
@@ -454,7 +454,7 @@ func (s *Server) komgaBookReadLists(w http.ResponseWriter, r *http.Request) {
 		s.writeDBError(w, r, err)
 		return
 	}
-	items, err := s.store.ReadListsForBook(r.Context(), bookID)
+	items, err := s.store.ReadListsForBook(r.Context(), book.ID)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return

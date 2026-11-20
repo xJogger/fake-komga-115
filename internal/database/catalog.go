@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -417,7 +418,54 @@ func (s *Store) SeriesByIDAny(ctx context.Context, id string, includeHidden bool
 	return s.seriesByID(ctx, id, includeHidden, false)
 }
 
+func (s *Store) resolveUnionSeriesID(ctx context.Context, sourceSeriesID string) (string, bool) {
+	var unionSeriesID string
+	err := s.db.QueryRowContext(ctx, `
+SELECT uss.union_series_id
+FROM union_series_sources uss
+JOIN series src ON src.id=uss.source_series_id
+JOIN libraries sl ON sl.id=src.library_id AND sl.enabled=1
+JOIN series us ON us.id=uss.union_series_id
+JOIN libraries ul ON ul.id=us.library_id AND ul.enabled=1
+WHERE uss.source_series_id=?
+LIMIT 1`, sourceSeriesID).Scan(&unionSeriesID)
+	if err != nil || unionSeriesID == "" {
+		return "", false
+	}
+	return unionSeriesID, true
+}
+
+func (s *Store) resolveUnionBookID(ctx context.Context, sourceBookID string) (string, bool) {
+	var unionBookID string
+	err := s.db.QueryRowContext(ctx, `
+SELECT ubs.union_book_id
+FROM union_book_sources ubs
+JOIN books src ON src.id=ubs.source_book_id
+JOIN libraries sl ON sl.id=src.library_id AND sl.enabled=1
+JOIN books ub ON ub.id=ubs.union_book_id
+JOIN libraries ul ON ul.id=ub.library_id AND ul.enabled=1
+WHERE ubs.source_book_id=?
+LIMIT 1`, sourceBookID).Scan(&unionBookID)
+	if err != nil || unionBookID == "" {
+		return "", false
+	}
+	return unionBookID, true
+}
+
 func (s *Store) seriesByID(ctx context.Context, id string, includeHidden, excludeNSFW bool) (Series, error) {
+	item, err := s.seriesByIDDirect(ctx, id, includeHidden, excludeNSFW)
+	if err == nil || includeHidden || !errors.Is(err, sql.ErrNoRows) {
+		return item, err
+	}
+	// Transparent compatibility alias for clients (e.g. Mihon saved manga / bookmarks)
+	// requesting an old physical sub-library series ID after enrollment into an enabled union library.
+	if unionID, ok := s.resolveUnionSeriesID(ctx, id); ok && unionID != id {
+		return s.seriesByIDDirect(ctx, unionID, false, excludeNSFW)
+	}
+	return Series{}, err
+}
+
+func (s *Store) seriesByIDDirect(ctx context.Context, id string, includeHidden, excludeNSFW bool) (Series, error) {
 	var item Series
 	var modified sql.NullString
 	var created, updated string
@@ -507,6 +555,11 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 	}
 	if len(enabledLibs) == 0 {
 		return []Book{}, 0, nil
+	}
+	if q.SeriesID != "" {
+		if resolved, ok := s.resolveUnionSeriesID(ctx, q.SeriesID); ok {
+			q.SeriesID = resolved
+		}
 	}
 
 	// Large-library protection for Koharia's global unfiltered GET /api/v1/books?unpaged=true&deleted=false:
@@ -769,6 +822,17 @@ func (s *Store) BookByIDAny(ctx context.Context, id string) (Book, error) {
 }
 
 func (s *Store) bookByID(ctx context.Context, id string, includeHidden, excludeNSFW bool) (Book, error) {
+	item, err := s.bookByIDDirect(ctx, id, includeHidden, excludeNSFW)
+	if err == nil || includeHidden || !errors.Is(err, sql.ErrNoRows) {
+		return item, err
+	}
+	if unionID, ok := s.resolveUnionBookID(ctx, id); ok && unionID != id {
+		return s.bookByIDDirect(ctx, unionID, false, excludeNSFW)
+	}
+	return Book{}, err
+}
+
+func (s *Store) bookByIDDirect(ctx context.Context, id string, includeHidden, excludeNSFW bool) (Book, error) {
 	var item Book
 	var fileCreated, fileModified sql.NullString
 	var created, updated string

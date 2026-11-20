@@ -298,4 +298,51 @@ VALUES(?,?,?,?,?,?,?,'pk',1,?,?,'sc')`, row.bid, row.sid, row.libID, row.bid, ro
 		!strings.Contains(string(usBody), ts.URL) || !strings.Contains(string(usBody), "const DEFAULT_API_KEY = '';") {
 		t.Fatalf("unexpected userscript response: status=%d len=%d", rUS.StatusCode, len(usBody))
 	}
+
+	// 9. Legacy physical sub-library IDs transparently resolve to the enabled union library (Mihon/bookmark compat)
+	rLegacySeries := doReq(http.MethodGet, "/api/v1/series/s_loc", "", true)
+	var legacySeriesDTO struct {
+		ID        string `json:"id"`
+		LibraryID string `json:"libraryId"`
+	}
+	_ = json.NewDecoder(rLegacySeries.Body).Decode(&legacySeriesDTO)
+	rLegacySeries.Body.Close()
+	if rLegacySeries.StatusCode != 200 || legacySeriesDTO.ID != uSeriesList[0].ID || legacySeriesDTO.LibraryID != uSeriesList[0].LibraryID {
+		t.Fatalf("legacy /api/v1/series/s_loc: status=%d dto=%+v", rLegacySeries.StatusCode, legacySeriesDTO)
+	}
+
+	rLegacyBooks := doReq(http.MethodGet, "/api/v1/series/s_loc/books?unpaged=true", "", true)
+	var legacyBooksResp struct {
+		Content []struct {
+			ID       string `json:"id"`
+			SeriesID string `json:"seriesId"`
+		} `json:"content"`
+	}
+	_ = json.NewDecoder(rLegacyBooks.Body).Decode(&legacyBooksResp)
+	rLegacyBooks.Body.Close()
+	if rLegacyBooks.StatusCode != 200 || len(legacyBooksResp.Content) != 2 || legacyBooksResp.Content[0].SeriesID != uSeriesList[0].ID {
+		t.Fatalf("legacy /api/v1/series/s_loc/books: status=%d body=%+v", rLegacyBooks.StatusCode, legacyBooksResp)
+	}
+
+	rLegacyProg := doReq(http.MethodPatch, "/api/v1/books/b_loc_1/read-progress", `{"page":12,"completed":false}`, true)
+	rLegacyProg.Body.Close()
+	if rLegacyProg.StatusCode != http.StatusNoContent {
+		t.Fatalf("legacy PATCH /api/v1/books/b_loc_1/read-progress: status=%d", rLegacyProg.StatusCode)
+	}
+	if p, ok, err := store.BookReadProgress(ctx, legacyBooksResp.Content[0].ID); err != nil || !ok || p.Page == nil || *p.Page != 12 {
+		t.Fatalf("legacy progress patch did not update union book: ok=%v p=%+v err=%v", ok, p, err)
+	}
+
+	// Old web/reader bookmarks redirect 307 to canonical union URLs
+	rWebAlias := doReq(http.MethodGet, "/series/s_loc", "", false)
+	rWebAlias.Body.Close()
+	if rWebAlias.StatusCode != http.StatusTemporaryRedirect || rWebAlias.Header.Get("Location") != "/series/"+uSeriesList[0].ID {
+		t.Fatalf("legacy web /series/s_loc: status=%d loc=%q", rWebAlias.StatusCode, rWebAlias.Header.Get("Location"))
+	}
+	rReaderAlias := doReq(http.MethodGet, "/reader/series/s_loc/book/b_loc_1", "", false)
+	rReaderAlias.Body.Close()
+	wantReaderLoc := "/reader/series/" + uSeriesList[0].ID + "/book/" + legacyBooksResp.Content[0].ID
+	if rReaderAlias.StatusCode != http.StatusTemporaryRedirect || rReaderAlias.Header.Get("Location") != wantReaderLoc {
+		t.Fatalf("legacy reader redirect: status=%d loc=%q want=%q", rReaderAlias.StatusCode, rReaderAlias.Header.Get("Location"), wantReaderLoc)
+	}
 }
