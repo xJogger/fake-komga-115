@@ -52,7 +52,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		claimed, err := s.store.HasAdmin(r.Context())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", "Failed to verify authentication state.")
+			s.writeDBErrorMessage(w, r, err, "Failed to verify authentication state.")
 			return
 		}
 
@@ -284,7 +284,7 @@ func clearSessionCookies(w http.ResponseWriter, r *http.Request) {
 func (s *Server) authStatusHandler(w http.ResponseWriter, r *http.Request) {
 	claimed, err := s.store.HasAdmin(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	principal, authed := s.currentPrincipal(r)
@@ -313,7 +313,7 @@ func (s *Server) authSetupHandler(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, database.ErrInvalidUsername), errors.Is(err, database.ErrWeakPassword):
 			writeError(w, http.StatusBadRequest, "INVALID_CREDENTIALS", err.Error())
 		default:
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 		}
 		return
 	}
@@ -340,7 +340,7 @@ func (s *Server) authLoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	user, ok, err := s.store.VerifyAdminPassword(r.Context(), req.Username, req.Password)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	if !ok {
@@ -386,7 +386,7 @@ func (s *Server) updateCredentialsHandler(w http.ResponseWriter, r *http.Request
 		case errors.Is(err, database.ErrInvalidUsername), errors.Is(err, database.ErrWeakPassword):
 			writeError(w, http.StatusBadRequest, "INVALID_CREDENTIALS", err.Error())
 		default:
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 		}
 		return
 	}
@@ -397,7 +397,7 @@ func (s *Server) listSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	principal, _ := s.currentPrincipal(r)
 	items, err := s.store.ListSessions(r.Context(), principal.RawSession)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -409,7 +409,7 @@ func (s *Server) deleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Session not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -418,7 +418,7 @@ func (s *Server) deleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listAPIKeysHandler(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListAPIKeys(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -448,7 +448,7 @@ func (s *Server) deleteAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "API key not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -459,7 +459,7 @@ func (s *Server) deleteAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) komgaClaimStatus(w http.ResponseWriter, r *http.Request) {
 	claimed, err := s.store.HasAdmin(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"isClaimed": claimed})
@@ -489,7 +489,7 @@ func (s *Server) komgaClaimCreate(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, database.ErrInvalidUsername), errors.Is(err, database.ErrWeakPassword):
 			writeError(w, http.StatusBadRequest, "INVALID_CREDENTIALS", err.Error())
 		default:
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 		}
 		return
 	}

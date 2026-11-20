@@ -160,9 +160,14 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 		items, total, err := s.querySeriesPage(ctx, q)
 		return seriesPageResult{items, total}, err
 	}
-	commonSort := strings.EqualFold(q.Sort, "lastModifiedDate,desc") ||
-		strings.EqualFold(q.Sort, "createdDate,desc") || strings.EqualFold(q.Sort, "bgmRank,asc")
-	common := commonSort && q.Page == 0 && (q.Size == 12 || q.Size == 18 || q.Size == 36) &&
+	sortNorm := strings.TrimSpace(q.Sort)
+	commonSort := sortNorm == "" ||
+		strings.EqualFold(sortNorm, "lastModifiedDate,desc") ||
+		strings.EqualFold(sortNorm, "createdDate,desc") ||
+		strings.EqualFold(sortNorm, "bgmRank,asc") ||
+		strings.EqualFold(sortNorm, "metadata.titleSort,asc")
+	commonSize := q.Size == 12 || q.Size == 18 || q.Size == 20 || q.Size == 25 || q.Size == 36 || q.Size == 50
+	common := commonSort && q.Page == 0 && commonSize &&
 		!q.IncludeHidden && q.NSFWMode == "" && q.Search == "" && !q.Empty &&
 		len(q.LibraryIDs) <= 1 && len(q.CollectionIDs)+len(q.ReadStatus)+len(q.Tags)+len(q.Genres)+len(q.Statuses)+
 		len(q.Publishers)+len(q.Authors)+len(q.Languages) == 0 && q.OneShot == nil && q.ScrapeStatus == ""

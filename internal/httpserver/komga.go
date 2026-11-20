@@ -122,7 +122,7 @@ func (s *Server) komgaCapabilities(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) komgaLibraries(w http.ResponseWriter, r *http.Request) {
 	libraries, err := s.store.LibrariesBasic(r.Context(), true)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(libraries))
@@ -178,12 +178,12 @@ func (s *Server) serveSeriesList(w http.ResponseWriter, r *http.Request, group b
 		Sort:          r.URL.Query().Get("sort"),
 	})
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out, err := s.seriesDTOs(r, items)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, makePage(out, page, size, total, false))
@@ -196,17 +196,17 @@ func (s *Server) komgaSeriesByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "NOT_FOUND", "Series not found.")
 			return
 		}
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	progress, err := s.store.SeriesReadProgress(r.Context(), item.ID)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	meta, err := s.store.SeriesMetadataByID(r.Context(), item)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, seriesDTOFull(item, progress, meta))
@@ -219,7 +219,7 @@ func (s *Server) patchKomgaSeriesMetadata(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	var patch database.SeriesMetadataPatch
@@ -228,7 +228,7 @@ func (s *Server) patchKomgaSeriesMetadata(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if _, err := s.store.PatchSeriesMetadata(r.Context(), item, patch); err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -241,7 +241,7 @@ func (s *Server) markKomgaSeriesRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.MarkSeriesCompleted(r.Context(), seriesID); err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("ReadProgressSeriesChanged", map[string]any{
@@ -258,7 +258,7 @@ func (s *Server) deleteKomgaSeriesReadProgress(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err := s.store.DeleteSeriesReadProgress(r.Context(), seriesID); err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("ReadProgressSeriesDeleted", map[string]any{
@@ -271,7 +271,7 @@ func (s *Server) deleteKomgaSeriesReadProgress(w http.ResponseWriter, r *http.Re
 func (s *Server) komgaGenres(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.Genres(r.Context(), listQuery(r, "library_id"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -280,7 +280,7 @@ func (s *Server) komgaGenres(w http.ResponseWriter, r *http.Request) {
 func (s *Server) komgaTags(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.Tags(r.Context(), listQuery(r, "library_id"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -289,7 +289,7 @@ func (s *Server) komgaTags(w http.ResponseWriter, r *http.Request) {
 func (s *Server) komgaPublishers(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.Publishers(r.Context(), listQuery(r, "library_id"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -303,7 +303,7 @@ func (s *Server) komgaAuthors(w http.ResponseWriter, r *http.Request) {
 		r.URL.Query().Get("role"),
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	if r.URL.Query().Get("unpaged") == "false" || r.URL.Query().Get("page") != "" {
@@ -322,7 +322,7 @@ func (s *Server) komgaAuthors(w http.ResponseWriter, r *http.Request) {
 func (s *Server) komgaAuthorNames(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.Authors(r.Context(), listQuery(r, "library_id"), r.URL.Query().Get("search"), "")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	seen := map[string]bool{}
@@ -343,7 +343,7 @@ func (s *Server) komgaSeriesBooks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	s.komgaBookPage(w, r, seriesID)
@@ -373,12 +373,12 @@ func (s *Server) komgaBookPage(w http.ResponseWriter, r *http.Request, seriesID 
 		Sort:        r.URL.Query().Get("sort"),
 	})
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out, err := s.bookDTOs(r, items)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, makePage(out, page, size, total, unpaged))
@@ -391,18 +391,18 @@ func (s *Server) komgaBookByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "NOT_FOUND", "Book not found.")
 			return
 		}
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	series, err := s.store.SeriesByID(r.Context(), book.SeriesID)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	seriesMeta, _ := s.store.SeriesMetadataByID(r.Context(), series)
 	progress, ok, err := s.store.BookReadProgress(r.Context(), book.ID)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, bookDTOWithProgressAndMeta(book, series, seriesMeta, progress, ok))
@@ -500,18 +500,18 @@ func (s *Server) komgaBookSibling(w http.ResponseWriter, r *http.Request, next b
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Sibling book not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	series, err := s.store.SeriesByID(r.Context(), sibling.SeriesID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	seriesMeta, _ := s.store.SeriesMetadataByID(r.Context(), series)
 	progress, ok, err := s.store.BookReadProgress(r.Context(), sibling.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, bookDTOWithProgressAndMeta(sibling, series, seriesMeta, progress, ok))
@@ -525,7 +525,7 @@ func (s *Server) komgaBookReadProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	progress, ok, err := s.store.BookReadProgress(r.Context(), book.ID)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	if !ok {
@@ -542,7 +542,7 @@ func (s *Server) deleteKomgaBookReadProgress(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := s.store.DeleteBookReadProgress(r.Context(), book.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("ReadProgressDeleted", map[string]any{
@@ -579,7 +579,7 @@ func (s *Server) patchKomgaBookReadProgress(w http.ResponseWriter, r *http.Reque
 	if err := s.store.UpdateBookReadProgress(
 		r.Context(), book, request.Completed, request.Page,
 	); err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("ReadProgressChanged", map[string]any{
@@ -651,7 +651,7 @@ func (s *Server) komgaBookPlaceholderThumbnail(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Book not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	s.writePlaceholder(w)
@@ -664,7 +664,7 @@ func (s *Server) komgaSeriesThumbnail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	data, ok, err := s.thumbs.Get(r.Context(), seriesID)
@@ -699,7 +699,7 @@ func (s *Server) getSeriesProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	progress, err := s.store.SeriesReadProgress(r.Context(), seriesID)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, progress)
@@ -725,7 +725,7 @@ func (s *Server) putSeriesProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.UpdateSeriesReadProgress(r.Context(), seriesID, request.LastBookNumberSortRead); err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("ReadProgressSeriesChanged", map[string]any{

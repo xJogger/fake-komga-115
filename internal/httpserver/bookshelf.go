@@ -16,14 +16,14 @@ func (s *Server) bookshelfVersions(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, 404, "NOT_FOUND", "Series not found.")
 		} else {
-			writeError(w, 500, "DATABASE_ERROR", "Could not load series.")
+			s.writeDBErrorMessage(w, r, err, "Could not load series.")
 		}
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("library_id"))
 	meta, err := s.store.SeriesMetadataByID(ctx, current)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", "Could not load series metadata.")
+		s.writeDBErrorMessage(w, r, err, "Could not load series metadata.")
 		return
 	}
 	if current.OneShot || (meta.BgmSubjectID == nil || *meta.BgmSubjectID <= 0) || (scope != "" && current.LibraryID != scope) {
@@ -43,7 +43,7 @@ func (s *Server) bookshelfVersions(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.store.DB().QueryContext(ctx, "SELECT s.id,s.name,l.name,l.provider_type,"+
 		"(SELECT count(*) FROM books b WHERE b.series_id=s.id)"+joins+where+" ORDER BY l.name,s.name,s.id", args...)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", "Could not load versions.")
+		s.writeDBErrorMessage(w, r, err, "Could not load versions.")
 		return
 	}
 	defer rows.Close()
@@ -58,13 +58,13 @@ func (s *Server) bookshelfVersions(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var v version
 		if err := rows.Scan(&v.ID, &v.Name, &v.Library, &v.Provider, &v.BooksCount); err != nil {
-			writeError(w, 500, "DATABASE_ERROR", "Could not read versions.")
+			s.writeDBErrorMessage(w, r, err, "Could not read versions.")
 			return
 		}
 		versions = append(versions, v)
 	}
 	if err := rows.Err(); err != nil {
-		writeError(w, 500, "DATABASE_ERROR", "Could not read versions.")
+		s.writeDBErrorMessage(w, r, err, "Could not read versions.")
 		return
 	}
 	rows.Close()

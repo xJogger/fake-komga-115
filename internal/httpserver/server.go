@@ -425,6 +425,32 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]string{"error": code, "message": message})
 }
 
+func (s *Server) writeDBError(w http.ResponseWriter, r *http.Request, err error) {
+	s.writeDBErrorMessage(w, r, err, "")
+}
+
+func (s *Server) writeDBErrorMessage(w http.ResponseWriter, r *http.Request, err error, message string) {
+	if errors.Is(err, context.Canceled) || (r != nil && errors.Is(r.Context().Err(), context.Canceled)) {
+		writeError(w, 499, "REQUEST_CANCELED", "request canceled")
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) || (r != nil && errors.Is(r.Context().Err(), context.DeadlineExceeded)) {
+		writeError(w, http.StatusGatewayTimeout, "REQUEST_TIMEOUT", "request timed out")
+		return
+	}
+	if s.logger != nil {
+		method, urlPath := "", ""
+		if r != nil {
+			method, urlPath = r.Method, r.URL.Path
+		}
+		s.logger.Error("database error", "method", method, "path", urlPath, "error", err)
+	}
+	if message == "" {
+		message = err.Error()
+	}
+	writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", message)
+}
+
 func intQuery(r *http.Request, key string, fallback int) int {
 	value, err := strconv.Atoi(r.URL.Query().Get(key))
 	if err != nil {

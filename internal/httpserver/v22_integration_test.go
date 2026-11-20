@@ -2,9 +2,11 @@ package httpserver
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -367,5 +369,97 @@ VALUES(?,?,'lib1',?,'p',?,512,'pk',1,?,?,'scan')`, s.id+"-b1", s.id, "f-"+s.id+"
 	r404.Body.Close()
 	if r404.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing collection SPA route expected 404, got %d", r404.StatusCode)
+	}
+}
+
+func TestWriteDBErrorCanceledTimeoutAndLogging(t *testing.T) {
+	tempDir := t.TempDir()
+	store, err := database.Open(filepath.Join(tempDir, "cancel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err := store.ClaimAdmin(ctx, "admin", "password123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertLibrary(ctx, database.Library{
+		ID: "lib1", Name: "Shelf", RootCID: "root1", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := oneonefive.New(store, logger)
+	webdavMgr := webdav.NewManager()
+	scanMgr := scanner.NewWithWebDAV(store, client, webdavMgr, logger)
+	defer scanMgr.Close()
+	cacheMgr, err := cache.New(store, filepath.Join(tempDir, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bgmSvc, err := bangumi.NewService(store, filepath.Join(tempDir, "bangumi"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bgmSvc.Close()
+	thumbSvc, err := thumbnail.New(store, filepath.Join(tempDir, "thumbs"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveSvc := archive.NewServiceWithWebDAV(store, client, webdavMgr, cacheMgr, logger)
+	defer archiveSvc.Close()
+	coverMgr := thumbnail.NewBatchManager(store, archiveSvc, thumbSvc, logger)
+	defer coverMgr.Close()
+	maintMgr := maintenance.New(store, archiveSvc, thumbSvc, logger)
+	defer maintMgr.Close()
+	srv := New(store, client, scanMgr, cacheMgr, archiveSvc, thumbSvc, coverMgr, maintMgr, RuntimeInfo{DataDir: tempDir}, logger).
+		WithServices(webdavMgr, bgmSvc)
+
+	// 1. Pre-canceled HTTP request through full router (including authMiddleware + komga_compat) must return 499, NOT 500
+	for _, endpoint := range []string{"/api/v1/series/list", "/api/v1/books/list"} {
+		cctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(`{"fullTextSearch":"test"}`)).WithContext(cctx)
+		req.SetBasicAuth("admin", "password123")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != 499 {
+			t.Fatalf("canceled %s: status=%d body=%s, want 499", endpoint, rec.Code, rec.Body.String())
+		}
+		var payload map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil || payload["error"] != "REQUEST_CANCELED" {
+			t.Fatalf("canceled %s: unexpected body=%s", endpoint, rec.Body.String())
+		}
+	}
+	if strings.Contains(logBuf.String(), "database error") {
+		t.Fatalf("canceled requests must not log ERROR database error, got: %s", logBuf.String())
+	}
+
+	// 2. Direct writeDBError matrix: wrapped driver interrupt with canceled ctx -> 499, deadline -> 504, real DB err -> 500 + ERROR log
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	srv.writeDBError(rec, httptest.NewRequest(http.MethodPost, "/api/v1/series/list", nil).WithContext(cctx), errors.New("SQLITE_INTERRUPT"))
+	if rec.Code != 499 {
+		t.Fatalf("driver interrupt with canceled ctx: status=%d want 499", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.writeDBError(rec, httptest.NewRequest(http.MethodGet, "/api/v1/series", nil), context.DeadlineExceeded)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("deadline exceeded: status=%d want 504", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.writeDBError(rec, httptest.NewRequest(http.MethodPost, "/api/v1/books/list", nil), errors.New("disk I/O error"))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("real DB error: status=%d want 500", rec.Code)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "database error") || !strings.Contains(logged, "/api/v1/books/list") || !strings.Contains(logged, "disk I/O error") {
+		t.Fatalf("expected structured ERROR log for real DB error, got: %s", logged)
 	}
 }

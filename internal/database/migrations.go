@@ -158,6 +158,7 @@ func ensurePerformanceIndexes(db *sql.DB) error {
 			`CREATE INDEX IF NOT EXISTS idx_series_metadata_nsfw ON series_metadata(is_nsfw)`,
 			`CREATE INDEX IF NOT EXISTS idx_series_metadata_nsfw_series ON series_metadata(is_nsfw, series_id)`,
 			`CREATE INDEX IF NOT EXISTS idx_series_metadata_fast ON series_metadata(series_id, is_nsfw, scrape_status, bgm_subject_id, bgm_rank, bgm_score)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_series_metadata_search ON series_metadata(series_id, title, title_sort, alternate_titles_json)`,
 			`CREATE INDEX IF NOT EXISTS idx_series_metadata_bgm_rank ON series_metadata(bgm_rank ASC, series_id, is_nsfw) WHERE bgm_rank > 0`,
 			`CREATE INDEX IF NOT EXISTS idx_series_metadata_bgm_sub ON series_metadata(bgm_subject_id, series_id, bgm_rank, bgm_score) WHERE bgm_subject_id > 0`,
 			`CREATE INDEX IF NOT EXISTS idx_series_metadata_pub_series ON series_metadata(publisher COLLATE NOCASE, series_id)`,

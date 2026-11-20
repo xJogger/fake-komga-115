@@ -86,7 +86,7 @@ func (s *Server) agentOverview(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	libraries, series, books, comicBytes, err := s.store.Counts(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	hiddenLibs, _ := s.store.HiddenLibraryCount(ctx)
@@ -122,7 +122,7 @@ func (s *Server) agentListLibraries(w http.ResponseWriter, r *http.Request) {
 	enabledOnly := r.URL.Query().Get("include_hidden") == "false"
 	items, err := s.store.Libraries(r.Context(), enabledOnly)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(items))
@@ -155,7 +155,7 @@ func (s *Server) agentPatchLibrary(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Library not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	wasEnabled := item.Enabled
@@ -187,7 +187,7 @@ func (s *Server) agentPatchLibrary(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.DB().QueryRowContext(r.Context(),
 			`SELECT count(*) FROM scan_runs WHERE library_id=? AND status IN ('queued','running')`,
 			item.ID).Scan(&active); err != nil {
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 			return
 		}
 		if active > 0 {
@@ -197,7 +197,7 @@ func (s *Server) agentPatchLibrary(w http.ResponseWriter, r *http.Request) {
 		item.OneShot = *req.OneShot
 	}
 	if err := s.store.UpsertLibrary(r.Context(), item); err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	if wasEnabled && !item.Enabled {
@@ -263,12 +263,12 @@ func (s *Server) agentListSeries(w http.ResponseWriter, r *http.Request) {
 		Sort:          q.Get("sort"),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	metaMap, err := s.store.SeriesMetadatas(r.Context(), items)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	compact := make([]map[string]any, 0, len(items))
@@ -325,13 +325,13 @@ func (s *Server) agentGetSeries(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	lib, _ := s.store.LibraryBasic(ctx, series.LibraryID)
 	meta, err := s.store.SeriesMetadataByID(ctx, series)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	progress, _ := s.store.SeriesReadProgress(ctx, series.ID)
@@ -652,7 +652,7 @@ func (s *Server) agentPatchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	for k, v := range converted {
 		if err := s.store.SetSetting(r.Context(), k, v); err != nil {
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 			return
 		}
 	}

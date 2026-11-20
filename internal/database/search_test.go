@@ -130,4 +130,139 @@ func TestSearchParserKohariaAndFields(t *testing.T) {
 			}
 		}
 	}
+
+	// 4. Out-of-range page (> 0) must still return exact total count on both SeriesPage & BooksPage
+	emptySeries, outTotal, err := store.SeriesPage(ctx, SeriesQuery{
+		Search: "(水星领航员) OR tag:(水星领航员)",
+		Sort:   "relevance,asc",
+		Page:   5,
+		Size:   20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emptySeries) != 0 || outTotal != 3 {
+		t.Fatalf("out-of-range SeriesPage: len=%d total=%d, want 0/3", len(emptySeries), outTotal)
+	}
+	emptyBooks, outBookTotal, err := store.BooksPage(ctx, BookQuery{
+		Search: "(水星领航员) OR tag:(水星领航员)",
+		Sort:   "relevance,asc",
+		Page:   5,
+		Size:   20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emptyBooks) != 0 || outBookTotal != 3 {
+		t.Fatalf("out-of-range BooksPage: len=%d total=%d, want 0/3", len(emptyBooks), outBookTotal)
+	}
+
+	// 5. BooksPage boolean AND NOT, standalone NOT, extra tag filter, and unpaged search
+	bNot, bNotTotal, err := store.BooksPage(ctx, BookQuery{
+		Search: "水星领航员 NOT 特别篇",
+		Sort:   "relevance,asc",
+		Size:   20,
+	})
+	if err != nil || bNotTotal != 1 || len(bNot) != 1 || bNot[0].SeriesID != "s1" {
+		t.Fatalf("BooksPage AND NOT: err=%v total=%d items=%#v", err, bNotTotal, bNot)
+	}
+	bPureNot, bPureNotTotal, err := store.BooksPage(ctx, BookQuery{
+		Search: "-特别篇",
+		Size:   20,
+	})
+	if err != nil || bPureNotTotal != 2 || len(bPureNot) != 2 {
+		t.Fatalf("BooksPage standalone NOT: err=%v total=%d len=%d", err, bPureNotTotal, len(bPureNot))
+	}
+	bFiltered, bFilteredTotal, err := store.BooksPage(ctx, BookQuery{
+		Search: "(水星领航员) OR tag:(水星领航员)",
+		Tags:   []string{"科幻"},
+		Size:   20,
+	})
+	if err != nil || bFilteredTotal != 1 || len(bFiltered) != 1 || bFiltered[0].SeriesID != "s1" {
+		t.Fatalf("BooksPage search+tag filter: err=%v total=%d items=%#v", err, bFilteredTotal, bFiltered)
+	}
+	bUnpaged, bUnpagedTotal, err := store.BooksPage(ctx, BookQuery{
+		Search:  "(水星领航员) OR tag:(水星领航员)",
+		Unpaged: true,
+	})
+	if err != nil || bUnpagedTotal != 3 || len(bUnpaged) != 3 {
+		t.Fatalf("BooksPage unpaged search: err=%v total=%d len=%d", err, bUnpagedTotal, len(bUnpaged))
+	}
+
+	// 6. NSFW exclusion + disabled library exclusion in candidate-set searches
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "lib_hidden", Name: "Hidden", RootCID: "r2", Enabled: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	insertCatalogSeries(t, store, "lib_hidden", "s_hidden", "水星领航员 Hidden", []catalogBookTime{
+		{created: "2024-01-04T00:00:00Z", modified: "2024-01-04T00:00:00Z"},
+	})
+	insertCatalogSeries(t, store, "lib1", "s_nsfw", "水星领航员 R18", []catalogBookTime{
+		{created: "2024-01-05T00:00:00Z", modified: "2024-01-05T00:00:00Z"},
+	})
+	sNSFW, _ := store.SeriesByIDAny(ctx, "s_nsfw", true)
+	if _, err := store.ApplyScrapedMetadata(ctx, sNSFW, ScrapedMetadata{
+		SubjectID: 104,
+		Title:     "水星领航员 R18",
+		TitleSort: "水星领航员 R18",
+		IsNSFW:    true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Default (ShowNSFW=false): neither hidden library nor NSFW series/book appears
+	sVis, sVisTotal, err := store.SeriesPage(ctx, SeriesQuery{
+		Search: "(水星领航员) OR tag:(水星领航员)",
+		Sort:   "relevance,asc",
+		Size:   20,
+	})
+	if err != nil || sVisTotal != 3 || len(sVis) != 3 {
+		t.Fatalf("SeriesPage visibility filter: err=%v total=%d len=%d", err, sVisTotal, len(sVis))
+	}
+	bVis, bVisTotal, err := store.BooksPage(ctx, BookQuery{
+		Search: "(水星领航员) OR tag:(水星领航员)",
+		Sort:   "relevance,asc",
+		Size:   20,
+	})
+	if err != nil || bVisTotal != 3 || len(bVis) != 3 {
+		t.Fatalf("BooksPage visibility filter: err=%v total=%d len=%d", err, bVisTotal, len(bVis))
+	}
+	// With ShowNSFW enabled, NSFW series & book appear, hidden library stays excluded
+	if err := store.SetSetting(ctx, "show_nsfw", "true"); err != nil {
+		t.Fatal(err)
+	}
+	_, sNSFWTotal, err := store.SeriesPage(ctx, SeriesQuery{
+		Search: "(水星领航员) OR tag:(水星领航员)",
+		Sort:   "relevance,asc",
+		Size:   20,
+	})
+	if err != nil || sNSFWTotal != 4 {
+		t.Fatalf("SeriesPage showNSFW=true: err=%v total=%d want 4", err, sNSFWTotal)
+	}
+	_, bNSFWTotal, err := store.BooksPage(ctx, BookQuery{
+		Search: "(水星领航员) OR tag:(水星领航员)",
+		Sort:   "relevance,asc",
+		Size:   20,
+	})
+	if err != nil || bNSFWTotal != 4 {
+		t.Fatalf("BooksPage showNSFW=true: err=%v total=%d want 4", err, bNSFWTotal)
+	}
+	if err := store.SetSetting(ctx, "show_nsfw", "false"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 7. Shelf cache covers Koharia browse sorts & sizes (metadata.titleSort,asc size=20; lastModifiedDate,desc size=25)
+	for _, q := range []SeriesQuery{
+		{Page: 0, Size: 20, Sort: "metadata.titleSort,asc"},
+		{Page: 0, Size: 25, Sort: "lastModifiedDate,desc"},
+	} {
+		first, t1, err := store.SeriesPage(ctx, q)
+		if err != nil || t1 != 3 || len(first) != 3 {
+			t.Fatalf("shelf cache cold %+v: err=%v total=%d len=%d", q, err, t1, len(first))
+		}
+		second, t2, err := store.SeriesPage(ctx, q)
+		if err != nil || t2 != t1 || len(second) != len(first) || second[0].ID != first[0].ID {
+			t.Fatalf("shelf cache warm %+v mismatch: err=%v t=%d/%d", q, err, t2, t1)
+		}
+	}
 }

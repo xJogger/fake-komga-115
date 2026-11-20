@@ -1,6 +1,8 @@
 package httpserver
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"path"
@@ -37,6 +39,10 @@ func (s *Server) renderNotFound(w http.ResponseWriter) {
 }
 
 func (s *Server) renderWebError(w http.ResponseWriter, err error) {
+	if errors.Is(err, context.Canceled) {
+		w.WriteHeader(499)
+		return
+	}
 	s.logger.Error("render web page", "error", err)
 	s.renderWeb(w, http.StatusInternalServerError, "web_error.html", nil)
 }

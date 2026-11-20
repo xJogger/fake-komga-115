@@ -444,3 +444,260 @@ func renderBookSearchExpr(expr searchExpr, args *[]any) string {
 	}
 	return ""
 }
+
+// buildSeriesSearchCandidateSQL builds a covering-index-backed set query returning
+// matching `series_id` values so SeriesPage can drive from the matched candidate set
+// in a single pass instead of scanning all series + probing metadata/tags twice.
+func buildSeriesSearchCandidateSQL(raw string, libs []string) (string, []any, bool) {
+	expr := parseSearchQuery(raw)
+	if expr == nil {
+		return "", nil, false
+	}
+	var args []any
+	sqlText, ok := renderSeriesCandidateSet(expr, libs, &args)
+	if !ok || sqlText == "" {
+		return "", nil, false
+	}
+	sqlText = wrapSeriesCandidateLibs(sqlText, libs, &args)
+	return sqlText, args, true
+}
+
+func wrapSeriesCandidateLibs(sqlText string, libs []string, args *[]any) string {
+	if len(libs) == 0 {
+		return sqlText
+	}
+	for _, id := range libs {
+		*args = append(*args, id)
+	}
+	return `SELECT _sr.series_id AS series_id FROM (` + sqlText + `) _sr CROSS JOIN series _slib ON _slib.id=_sr.series_id WHERE _slib.library_id IN ` + Placeholders(len(libs))
+}
+
+func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (string, bool) {
+	switch node := expr.(type) {
+	case searchOr:
+		parts := make([]string, 0, len(node.items))
+		for _, item := range node.items {
+			sub, ok := renderSeriesCandidateSet(item, libs, args)
+			if !ok {
+				return "", false
+			}
+			if sub != "" {
+				parts = append(parts, "SELECT series_id FROM ("+sub+")")
+			}
+		}
+		if len(parts) == 0 {
+			return "", false
+		}
+		if len(parts) == 1 {
+			return parts[0], true
+		}
+		return strings.Join(parts, " UNION "), true
+
+	case searchAnd:
+		var pos, neg []string
+		for _, item := range node.items {
+			if notNode, isNot := item.(searchNot); isNot {
+				sub, ok := renderSeriesCandidateSet(notNode.inner, libs, args)
+				if !ok {
+					return "", false
+				}
+				if sub != "" {
+					neg = append(neg, "SELECT series_id FROM ("+sub+")")
+				}
+				continue
+			}
+			sub, ok := renderSeriesCandidateSet(item, libs, args)
+			if !ok {
+				return "", false
+			}
+			if sub != "" {
+				pos = append(pos, "SELECT series_id FROM ("+sub+")")
+			}
+		}
+		if len(pos) == 0 {
+			return "", false
+		}
+		combined := strings.Join(pos, " INTERSECT ")
+		for _, n := range neg {
+			combined = "SELECT series_id FROM (" + combined + ") EXCEPT " + n
+		}
+		return combined, true
+
+	case searchNot:
+		return "", false
+
+	case searchTerm:
+		val := strings.TrimSpace(node.value)
+		if val == "" {
+			return "", false
+		}
+		like := "%" + escapeLike(val) + "%"
+		switch node.field {
+		case "tag", "series_tag", "book_tag":
+			*args = append(*args, like)
+			return `SELECT DISTINCT st.series_id AS series_id FROM series_tags st WHERE st.tag LIKE ? ESCAPE '\' COLLATE NOCASE`, true
+		case "genre":
+			*args = append(*args, like)
+			return `SELECT DISTINCT sg.series_id AS series_id FROM series_genres sg WHERE sg.genre LIKE ? ESCAPE '\' COLLATE NOCASE`, true
+		case "publisher":
+			*args = append(*args, like)
+			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.publisher LIKE ? ESCAPE '\' COLLATE NOCASE`, true
+		case "language":
+			*args = append(*args, val)
+			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.language=? COLLATE NOCASE`, true
+		case "status":
+			*args = append(*args, strings.ToUpper(val))
+			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.status=?`, true
+		case "author":
+			*args = append(*args, like)
+			return `SELECT DISTINCT sa.series_id AS series_id FROM series_authors sa WHERE sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`, true
+		case "writer", "penciller", "inker", "colorist", "letterer", "cover", "editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
+			*args = append(*args, like, node.field)
+			return `SELECT DISTINCT sa.series_id AS series_id FROM series_authors sa WHERE sa.name LIKE ? ESCAPE '\' COLLATE NOCASE AND sa.role=? COLLATE NOCASE`, true
+		default:
+			libWhereS := ""
+			if len(libs) > 0 {
+				for _, id := range libs {
+					*args = append(*args, id)
+				}
+				libWhereS = "s2.library_id IN " + Placeholders(len(libs)) + " AND "
+			}
+			*args = append(*args, like)
+			b1 := `SELECT s2.id AS series_id FROM series s2 WHERE ` + libWhereS + `s2.name LIKE ? ESCAPE '\' COLLATE NOCASE`
+			*args = append(*args, like, like)
+			b2 := `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.title LIKE ? ESCAPE '\' COLLATE NOCASE OR sm.alternate_titles_json LIKE ? ESCAPE '\' COLLATE NOCASE`
+			return b1 + " UNION " + b2, true
+		}
+	}
+	return "", false
+}
+
+// buildBookSearchCandidateSQL builds a covering-index-backed set query returning
+// matching `book_rowid` (8-byte SQLite integer rowid) values using idx_books_library_name
+// and idx_books_series_number without touching the books table during candidate collection.
+func buildBookSearchCandidateSQL(raw string, libs []string) (string, []any, bool) {
+	if len(libs) == 0 {
+		return "", nil, false
+	}
+	expr := parseSearchQuery(raw)
+	if expr == nil {
+		return "", nil, false
+	}
+	var args []any
+	sqlText, ok := renderBookCandidateSet(expr, libs, &args)
+	if !ok || sqlText == "" {
+		return "", nil, false
+	}
+	return sqlText, args, true
+}
+
+func collectBookOrParts(expr searchExpr, libs []string, args *[]any) ([]string, []string, bool) {
+	switch node := expr.(type) {
+	case searchOr:
+		var bookParts, seriesParts []string
+		for _, item := range node.items {
+			bp, sp, ok := collectBookOrParts(item, libs, args)
+			if !ok {
+				return nil, nil, false
+			}
+			bookParts = append(bookParts, bp...)
+			seriesParts = append(seriesParts, sp...)
+		}
+		return bookParts, seriesParts, len(bookParts) > 0 || len(seriesParts) > 0
+
+	case searchTerm:
+		val := strings.TrimSpace(node.value)
+		if val == "" {
+			return nil, nil, false
+		}
+		switch node.field {
+		case "tag", "series_tag", "book_tag", "genre", "publisher", "language", "status",
+			"author", "writer", "penciller", "inker", "colorist", "letterer", "cover",
+			"editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
+			seriesSQL, ok := renderSeriesCandidateSet(node, libs, args)
+			if !ok || seriesSQL == "" {
+				return nil, nil, false
+			}
+			return nil, []string{"SELECT series_id FROM (" + seriesSQL + ")"}, true
+		default:
+			like := "%" + escapeLike(val) + "%"
+			for _, id := range libs {
+				*args = append(*args, id)
+			}
+			*args = append(*args, like)
+			bookPart := `SELECT b2.rowid AS book_rowid FROM books b2 WHERE b2.library_id IN ` + Placeholders(len(libs)) + ` AND b2.name LIKE ? ESCAPE '\' COLLATE NOCASE`
+			seriesSQL, ok := renderSeriesCandidateSet(node, libs, args)
+			if !ok || seriesSQL == "" {
+				return []string{bookPart}, nil, true
+			}
+			return []string{bookPart}, []string{"SELECT series_id FROM (" + seriesSQL + ")"}, true
+		}
+
+	default:
+		sub, ok := renderBookCandidateSet(expr, libs, args)
+		if !ok || sub == "" {
+			return nil, nil, false
+		}
+		return []string{"SELECT book_rowid FROM (" + sub + ")"}, nil, true
+	}
+}
+
+func renderBookCandidateSet(expr searchExpr, libs []string, args *[]any) (string, bool) {
+	switch node := expr.(type) {
+	case searchOr, searchTerm:
+		bookParts, seriesParts, ok := collectBookOrParts(expr, libs, args)
+		if !ok {
+			return "", false
+		}
+		if len(seriesParts) > 0 {
+			sCombined := seriesParts[0]
+			if len(seriesParts) > 1 {
+				sCombined = strings.Join(seriesParts, " UNION ")
+			}
+			sFiltered := wrapSeriesCandidateLibs(sCombined, libs, args)
+			seriesBranch := `SELECT b3.rowid AS book_rowid FROM (` + sFiltered + `) _ms CROSS JOIN books b3 ON b3.series_id=_ms.series_id`
+			bookParts = append(bookParts, seriesBranch)
+		}
+		if len(bookParts) == 0 {
+			return "", false
+		}
+		if len(bookParts) == 1 {
+			return bookParts[0], true
+		}
+		return strings.Join(bookParts, " UNION "), true
+
+	case searchAnd:
+		var pos, neg []string
+		for _, item := range node.items {
+			if notNode, isNot := item.(searchNot); isNot {
+				sub, ok := renderBookCandidateSet(notNode.inner, libs, args)
+				if !ok {
+					return "", false
+				}
+				if sub != "" {
+					neg = append(neg, "SELECT book_rowid FROM ("+sub+")")
+				}
+				continue
+			}
+			sub, ok := renderBookCandidateSet(item, libs, args)
+			if !ok {
+				return "", false
+			}
+			if sub != "" {
+				pos = append(pos, "SELECT book_rowid FROM ("+sub+")")
+			}
+		}
+		if len(pos) == 0 {
+			return "", false
+		}
+		combined := strings.Join(pos, " INTERSECT ")
+		for _, n := range neg {
+			combined = "SELECT book_rowid FROM (" + combined + ") EXCEPT " + n
+		}
+		return combined, true
+
+	case searchNot:
+		return "", false
+	}
+	return "", false
+}

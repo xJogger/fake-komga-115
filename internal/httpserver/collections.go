@@ -60,7 +60,7 @@ func (s *Server) komgaCollections(w http.ResponseWriter, r *http.Request) {
 		r.URL.Query().Get("sort"),
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out := make([]any, 0, len(items))
@@ -77,7 +77,7 @@ func (s *Server) komgaCollectionByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Collection not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, collectionDTO(item))
@@ -101,7 +101,7 @@ func (s *Server) komgaCreateCollection(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, database.ErrDuplicateName):
 			writeError(w, http.StatusBadRequest, "DUPLICATE_NAME", "A collection with this name already exists.")
 		default:
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 		}
 		return
 	}
@@ -133,7 +133,7 @@ func (s *Server) komgaUpdateCollection(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, database.ErrDuplicateName):
 			writeError(w, http.StatusBadRequest, "DUPLICATE_NAME", "A collection with this name already exists.")
 		default:
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 		}
 		return
 	}
@@ -151,7 +151,7 @@ func (s *Server) komgaDeleteCollection(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Collection not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("CollectionDeleted", map[string]any{
@@ -187,12 +187,12 @@ func (s *Server) komgaCollectionSeries(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Collection not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out, err := s.seriesDTOs(r, items)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, makePage(out, page, size, total, unpaged))
@@ -205,7 +205,7 @@ func (s *Server) komgaCollectionThumbnail(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Collection not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	seriesID, err := s.store.CollectionFirstVisibleSeriesID(r.Context(), id)
@@ -223,12 +223,12 @@ func (s *Server) komgaSeriesCollections(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	items, err := s.store.CollectionsForSeries(r.Context(), seriesID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out := make([]any, 0, len(items))
@@ -251,7 +251,7 @@ func (s *Server) komgaReadLists(w http.ResponseWriter, r *http.Request) {
 		r.URL.Query().Get("sort"),
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out := make([]any, 0, len(items))
@@ -268,7 +268,7 @@ func (s *Server) komgaReadListByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "ReadList not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, readListDTO(item))
@@ -297,7 +297,7 @@ func (s *Server) komgaCreateReadList(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, database.ErrDuplicateName):
 			writeError(w, http.StatusBadRequest, "DUPLICATE_NAME", "A readlist with this name already exists.")
 		default:
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 		}
 		return
 	}
@@ -330,7 +330,7 @@ func (s *Server) komgaUpdateReadList(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, database.ErrDuplicateName):
 			writeError(w, http.StatusBadRequest, "DUPLICATE_NAME", "A readlist with this name already exists.")
 		default:
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 		}
 		return
 	}
@@ -348,7 +348,7 @@ func (s *Server) komgaDeleteReadList(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "ReadList not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	s.sse.Publish("ReadListDeleted", map[string]any{
@@ -381,12 +381,12 @@ func (s *Server) komgaReadListBooks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "ReadList not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out, err := s.bookDTOs(r, items)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, makePage(out, page, size, total, unpaged))
@@ -409,18 +409,18 @@ func (s *Server) komgaReadListBookSibling(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Sibling book not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	series, err := s.store.SeriesByID(r.Context(), sibling.SeriesID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	seriesMeta, _ := s.store.SeriesMetadataByID(r.Context(), series)
 	progress, ok, err := s.store.BookReadProgress(r.Context(), sibling.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, bookDTOWithProgressAndMeta(sibling, series, seriesMeta, progress, ok))
@@ -433,7 +433,7 @@ func (s *Server) komgaReadListThumbnail(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "ReadList not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	seriesID, err := s.store.ReadListFirstVisibleSeriesID(r.Context(), id)
@@ -451,12 +451,12 @@ func (s *Server) komgaBookReadLists(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Book not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	items, err := s.store.ReadListsForBook(r.Context(), bookID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out := make([]any, 0, len(items))
@@ -492,7 +492,7 @@ func (s *Server) komgaAuthorsV2(w http.ResponseWriter, r *http.Request) {
 		Unpaged:       unpaged,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, makePage(items, page, size, total, unpaged))

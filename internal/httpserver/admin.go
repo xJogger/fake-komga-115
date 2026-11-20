@@ -101,7 +101,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	webdavAccounts, _ := s.store.WebDAVAccounts(r.Context())
 	libraries, series, books, comicBytes, err := s.store.Counts(r.Context())
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	hiddenLibraries, _ := s.store.HiddenLibraryCount(r.Context())
@@ -109,7 +109,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	showNSFW := s.store.ShowNSFW(r.Context())
 	performance, err := s.store.GlobalPerformance(r.Context())
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	matched, unmatched, _, _ := s.store.ScrapeSummary(r.Context())
@@ -201,7 +201,7 @@ func isVirtualInterface(name string) bool {
 func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 	account, err := s.store.Account(r.Context())
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{
@@ -295,7 +295,7 @@ func (s *Server) listLocalFolders(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listWebDAVAccounts(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.WebDAVAccounts(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -335,7 +335,7 @@ func (s *Server) createWebDAVAccount(w http.ResponseWriter, r *http.Request) {
 		Password: req.Password,
 	}, false)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, item)
@@ -348,7 +348,7 @@ func (s *Server) updateWebDAVAccount(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "WebDAV account not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	var req webdavAccountRequest
@@ -376,7 +376,7 @@ func (s *Server) updateWebDAVAccount(w http.ResponseWriter, r *http.Request) {
 		Password: req.Password,
 	}, true)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
@@ -451,7 +451,7 @@ func (s *Server) listWebDAVFolders(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "WebDAV account not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	remoteDir := r.URL.Query().Get("path")
@@ -472,7 +472,7 @@ func (s *Server) listWebDAVFolders(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listLibraries(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.Libraries(r.Context(), false)
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, items)
@@ -575,7 +575,7 @@ func (s *Server) createLibrary(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			writeError(w, 409, "LIBRARY_EXISTS", "This library root is already configured.")
 		} else {
-			writeError(w, 500, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 		}
 		return
 	}
@@ -590,7 +590,7 @@ func (s *Server) updateLibrary(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "NOT_FOUND", "Library not found.")
 			return
 		}
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	wasEnabled := item.Enabled
@@ -618,7 +618,7 @@ func (s *Server) updateLibrary(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.DB().QueryRowContext(r.Context(), `
 SELECT count(*) FROM scan_runs WHERE library_id=? AND status IN ('queued','running')`,
 			item.ID).Scan(&active); err != nil {
-			writeError(w, 500, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 			return
 		}
 		if active > 0 {
@@ -629,7 +629,7 @@ SELECT count(*) FROM scan_runs WHERE library_id=? AND status IN ('queued','runni
 		item.OneShot = *request.OneShot
 	}
 	if err := s.store.UpsertLibrary(r.Context(), item); err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	if wasEnabled && !item.Enabled {
@@ -660,7 +660,7 @@ func (s *Server) deleteLibrary(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.DB().QueryRowContext(r.Context(), `
 SELECT count(*) FROM scan_runs WHERE library_id=? AND status IN ('queued','running')`,
 		libraryID).Scan(&active); err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	if active > 0 {
@@ -668,7 +668,7 @@ SELECT count(*) FROM scan_runs WHERE library_id=? AND status IN ('queued','runni
 		return
 	}
 	if err := s.store.DeleteLibrary(r.Context(), libraryID); err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -677,7 +677,7 @@ SELECT count(*) FROM scan_runs WHERE library_id=? AND status IN ('queued','runni
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.store.Settings(r.Context())
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, settings)
@@ -748,7 +748,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	for key, value := range request {
 		if err := s.store.SetSetting(r.Context(), key, value); err != nil {
-			writeError(w, 500, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 			return
 		}
 	}
@@ -773,7 +773,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
 	runs, err := s.scanner.Runs(r.Context(), intQuery(r, "limit", 50))
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, runs)
@@ -814,7 +814,7 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listCoverJobs(w http.ResponseWriter, r *http.Request) {
 	runs, err := s.covers.Runs(r.Context(), intQuery(r, "limit", 50))
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, runs)
@@ -870,7 +870,7 @@ func (s *Server) listMaintenanceJobs(w http.ResponseWriter, r *http.Request) {
 		Limit:      intQuery(r, "limit", 20),
 	})
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, runs)
@@ -943,14 +943,14 @@ func (s *Server) cancelMaintenanceJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) cacheStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := s.cache.Stats(r.Context())
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	var indexes int64
 	_ = s.store.DB().QueryRowContext(r.Context(), `SELECT count(*) FROM zip_indexes`).Scan(&indexes)
 	thumbnailStats, err := s.thumbs.Stats(r.Context())
 	if err != nil {
-		writeError(w, 500, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	bgmThumbStats, _ := s.thumbs.BangumiStats(r.Context())
@@ -968,7 +968,7 @@ func (s *Server) clearCache(w http.ResponseWriter, r *http.Request) {
 	if cacheType == "archive" || cacheType == "zip" {
 		_, err := s.store.DB().ExecContext(r.Context(), `DELETE FROM zip_indexes`)
 		if err != nil {
-			writeError(w, 500, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -1019,7 +1019,7 @@ func (s *Server) seriesRichDetail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	library, _ := s.store.LibraryBasic(r.Context(), series.LibraryID)
@@ -1027,12 +1027,12 @@ func (s *Server) seriesRichDetail(w http.ResponseWriter, r *http.Request) {
 	progress, _ := s.store.SeriesReadProgress(r.Context(), series.ID)
 	books, _, err := s.store.BooksPage(r.Context(), database.BookQuery{SeriesID: series.ID, Unpaged: true})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	bookDTOList, err := s.bookDTOs(r, books)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	pageProgresses, _ := s.store.BookPageProgressesBySeries(r.Context(), series.ID)
@@ -1096,12 +1096,12 @@ func (s *Server) bookRichDetail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Book not found.")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	series, err := s.store.SeriesByID(r.Context(), book.SeriesID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	library, _ := s.store.LibraryBasic(r.Context(), book.LibraryID)
@@ -1221,7 +1221,7 @@ func (s *Server) putBangumiConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ShowNSFW != nil {
 		if err := s.store.SetSetting(r.Context(), "show_nsfw", strconv.FormatBool(*req.ShowNSFW)); err != nil {
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 			return
 		}
 	}
@@ -1299,7 +1299,7 @@ func (s *Server) listBangumiRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	runs, err := s.bangumi.Runs(r.Context(), intQuery(r, "limit", 30))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, runs)
@@ -1429,7 +1429,7 @@ func (s *Server) clearSeriesBangumi(w http.ResponseWriter, r *http.Request) {
 	}
 	meta, err := s.store.ClearSeriesBangumiBinding(r.Context(), series)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, meta)

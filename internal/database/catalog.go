@@ -87,18 +87,45 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 			return []Series{}, 0, nil
 		}
 	}
-	where, args, empty := buildSeriesFilters(q, enabledLibs)
+	searchDriven := false
+	var searchCandSQL string
+	var searchCandArgs []any
+	source := " FROM series s"
+	var sourceArgs []any
+	if !q.GroupBangumi && strings.TrimSpace(q.Search) != "" {
+		var searchLibs []string
+		if !q.IncludeHidden {
+			var libEmpty bool
+			searchLibs, libEmpty = intersectLibraryIDs(q.LibraryIDs, enabledLibs)
+			if libEmpty {
+				return []Series{}, 0, nil
+			}
+		} else if len(q.LibraryIDs) > 0 {
+			searchLibs = cleanStringSliceCaseSensitive(q.LibraryIDs)
+		}
+		if candSQL, candArgs, ok := buildSeriesSearchCandidateSQL(q.Search, searchLibs); ok {
+			searchCandSQL = candSQL
+			searchCandArgs = candArgs
+			source = " FROM (" + candSQL + ") _drv CROSS JOIN series s ON s.id=_drv.series_id"
+			sourceArgs = candArgs
+			searchDriven = true
+		}
+	}
+	filterQ := q
+	if searchDriven {
+		filterQ.Search = ""
+	}
+	where, args, empty := buildSeriesFilters(filterQ, enabledLibs)
 	if empty {
 		return []Series{}, 0, nil
 	}
-	noExtraFilters := len(q.CollectionIDs) == 0 && strings.TrimSpace(q.Search) == "" &&
+	noExtraNonSearchFilters := len(q.CollectionIDs) == 0 &&
 		q.OneShot == nil && len(q.Statuses) == 0 && len(q.Genres) == 0 &&
 		len(q.Tags) == 0 && len(q.Publishers) == 0 && len(q.Authors) == 0 &&
 		len(q.Languages) == 0 && strings.TrimSpace(q.ScrapeStatus) == "" &&
 		len(q.ReadStatus) == 0
-	source := " FROM series s"
-	var sourceArgs []any
-	if !q.GroupBangumi {
+	noExtraFilters := noExtraNonSearchFilters && strings.TrimSpace(q.Search) == ""
+	if !q.GroupBangumi && !searchDriven {
 		if drvSQL, drvArgs := selectiveSeriesDriver(q); drvSQL != "" {
 			source = " FROM (" + drvSQL + ") _drv CROSS JOIN series s ON s.id=_drv.series_id"
 			sourceArgs = drvArgs
@@ -110,9 +137,15 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 	ties := " " + dir + ",s.id " + dir
 	groupOrder := ""
 	var orderArgs []any
+	// Search CTE path uses a single LEFT JOIN series_metadata sm instead of repeated correlated subqueries.
+	searchJoinSM := true
+	searchPrimary := `COALESCE(NULLIF(sm.title_sort,''), s.name) COLLATE NOCASE`
+	searchTies := ties
 	switch {
 	case strings.Contains(sortValue, "random"):
 		primary, ties = "RANDOM()", ""
+		searchJoinSM = false
+		searchPrimary, searchTies = primary, ties
 	case strings.HasPrefix(sortValue, "relevance") && strings.TrimSpace(q.Search) != "":
 		phrase := extractPrimarySearchPhrase(q.Search)
 		if phrase != "" {
@@ -127,24 +160,41 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
  WHEN s.name LIKE ? ESCAPE '\' COLLATE NOCASE THEN 5
  ELSE 6 END`
 			ties = ` ASC, COALESCE(NULLIF((SELECT sm.title_sort FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) COLLATE NOCASE ASC, s.id ASC`
+			searchPrimary = `CASE
+ WHEN COALESCE(NULLIF(sm.title,''), s.name) = ? COLLATE NOCASE THEN 0
+ WHEN s.name = ? COLLATE NOCASE THEN 1
+ WHEN COALESCE(NULLIF(sm.title,''), s.name) LIKE ? ESCAPE '\' COLLATE NOCASE THEN 2
+ WHEN s.name LIKE ? ESCAPE '\' COLLATE NOCASE THEN 3
+ WHEN COALESCE(NULLIF(sm.title,''), s.name) LIKE ? ESCAPE '\' COLLATE NOCASE THEN 4
+ WHEN s.name LIKE ? ESCAPE '\' COLLATE NOCASE THEN 5
+ ELSE 6 END`
+			searchTies = ` ASC, COALESCE(NULLIF(sm.title_sort,''), s.name) COLLATE NOCASE ASC, s.id ASC`
 			orderArgs = append(orderArgs, phrase, phrase, prefix, prefix, contains, contains)
 		}
 	case strings.HasPrefix(sortValue, "lastmodifieddate"):
 		primary = `s.sort_modified_at`
 		ties = " " + dir + ",s.name COLLATE NOCASE ASC,s.id ASC"
 		groupOrder = "MAX(s.sort_modified_at)"
+		searchJoinSM = false
+		searchPrimary, searchTies = primary, ties
 	case strings.HasPrefix(sortValue, "createddate"):
 		primary = `s.sort_created_at`
 		ties = " " + dir + ",s.name COLLATE NOCASE ASC,s.id ASC"
 		groupOrder = "MAX(s.sort_created_at)"
+		searchJoinSM = false
+		searchPrimary, searchTies = primary, ties
 	case strings.HasPrefix(sortValue, "bgmrank"):
 		primary = `(SELECT sm.bgm_rank FROM series_metadata sm WHERE sm.series_id=s.id AND sm.bgm_rank>0)`
 		ties = " " + dir + " NULLS LAST,s.name COLLATE NOCASE ASC,s.id ASC"
 		groupOrder = "MIN(CASE WHEN gm.bgm_rank>0 THEN gm.bgm_rank END)"
+		searchPrimary = `CASE WHEN sm.bgm_rank>0 THEN sm.bgm_rank END`
+		searchTies = ties
 	case strings.HasPrefix(sortValue, "bgmscore"):
 		primary = `COALESCE((SELECT sm.bgm_score FROM series_metadata sm WHERE sm.series_id=s.id), -1)`
 		ties = " " + dir + ",s.name COLLATE NOCASE ASC,s.id ASC"
 		groupOrder = "COALESCE(MAX(gm.bgm_score),-1)"
+		searchPrimary = `COALESCE(sm.bgm_score, -1)`
+		searchTies = ties
 	}
 
 	var total int64
@@ -168,6 +218,55 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 		source = " FROM series s JOIN (" + columns + from + ") grouped ON grouped.id=s.id"
 		sourceArgs = nil
 		where = ""
+	} else if strings.TrimSpace(q.Search) != "" {
+		// Single-pass query via MATERIALIZED candidate ID CTE: avoids executing search twice
+		// while preserving SQLite's bounded top-N heap for ORDER BY ... LIMIT (unlike COUNT(*) OVER()).
+		var candCTE string
+		var candQueryArgs []any
+		switch {
+		case searchDriven && noExtraNonSearchFilters && q.NSFWMode == "exclude":
+			candCTE = `WITH _cand(series_id) AS MATERIALIZED (SELECT series_id FROM (` + searchCandSQL + `) EXCEPT SELECT sm_n.series_id FROM series_metadata sm_n WHERE sm_n.is_nsfw=1)`
+			candQueryArgs = searchCandArgs
+		case searchDriven && noExtraNonSearchFilters && q.NSFWMode == "all":
+			candCTE = `WITH _cand(series_id) AS MATERIALIZED (` + searchCandSQL + `)`
+			candQueryArgs = searchCandArgs
+		case searchDriven:
+			candCTE = `WITH _cand(series_id) AS MATERIALIZED (SELECT s.id AS series_id` + source + where + `)`
+			candQueryArgs = append(append([]any(nil), sourceArgs...), args...)
+		default:
+			candCTE = `WITH _cand(series_id) AS MATERIALIZED (SELECT s.id AS series_id` + source + where + `)`
+			candQueryArgs = append(append([]any(nil), sourceArgs...), args...)
+		}
+		smJoin := ""
+		if searchJoinSM {
+			smJoin = ` LEFT JOIN series_metadata sm ON sm.series_id=s.id`
+		}
+		query := candCTE + `, _tot AS (SELECT COUNT(*) AS n FROM _cand)
+SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified_at,s.created_at,s.updated_at,s.books_count,
+ (SELECT n FROM _tot) AS _total
+FROM _cand _c
+CROSS JOIN series s ON s.id=_c.series_id` + smJoin + ` ORDER BY ` + searchPrimary + searchTies + ` LIMIT ? OFFSET ?`
+		queryArgs := make([]any, 0, len(candQueryArgs)+len(orderArgs)+2)
+		queryArgs = append(queryArgs, candQueryArgs...)
+		queryArgs = append(queryArgs, orderArgs...)
+		queryArgs = append(queryArgs, q.Size, q.Page*q.Size)
+		rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer rows.Close()
+		items, winTotal, err := scanSeriesRowsWithTotal(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(items) > 0 || q.Page == 0 {
+			return items, winTotal, nil
+		}
+		// Rare case: out-of-range page > 0 returned 0 rows, fetch exact total.
+		if err := s.db.QueryRowContext(ctx, candCTE+` SELECT COUNT(*) FROM _cand`, candQueryArgs...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		return []Series{}, total, nil
 	} else {
 		countDone := false
 		if noExtraFilters && !q.IncludeHidden && len(q.LibraryIDs) == 0 &&
@@ -424,11 +523,33 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 	if progMode != "" {
 		q.ReadStatus = nil
 	}
-	where, args, empty := buildBookFilters(q, enabledLibs, !s.ShowNSFW(ctx))
+	bookSearchDriven := false
+	var bookCandSQL string
+	var bookCandArgs []any
+	source := " FROM books b"
+	var sourceArgs []any
+	if progMode == "" && q.SeriesID == "" && strings.TrimSpace(q.Search) != "" {
+		searchLibs, libEmpty := intersectLibraryIDs(q.LibraryIDs, enabledLibs)
+		if libEmpty {
+			return []Book{}, 0, nil
+		}
+		if candSQL, candArgs, ok := buildBookSearchCandidateSQL(q.Search, searchLibs); ok {
+			bookCandSQL = candSQL
+			bookCandArgs = candArgs
+			source = " FROM (" + candSQL + ") _bdrv CROSS JOIN books b ON b.rowid=_bdrv.book_rowid"
+			sourceArgs = candArgs
+			bookSearchDriven = true
+		}
+	}
+	filterQ := q
+	if bookSearchDriven {
+		filterQ.Search = ""
+	}
+	excludeNSFW := !s.ShowNSFW(ctx)
+	where, args, empty := buildBookFilters(filterQ, enabledLibs, excludeNSFW)
 	if empty {
 		return []Book{}, 0, nil
 	}
-	source := " FROM books b"
 	if progMode != "" {
 		source = " FROM book_read_progress p CROSS JOIN books b ON b.id=p.book_id"
 		switch progMode {
@@ -437,13 +558,6 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 		case "read":
 			where += " AND p.completed=1"
 		}
-	}
-	var total int64
-	if err := s.db.QueryRowContext(ctx, "SELECT count(*)"+source+where, args...).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	if total == 0 {
-		return []Book{}, 0, nil
 	}
 	order := "b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC"
 	sortValue := strings.ToLower(strings.TrimSpace(q.Sort))
@@ -486,11 +600,75 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 	case strings.Contains(sortValue, ",desc"):
 		order = "b.number_sort DESC,b.name COLLATE NOCASE DESC,b.id DESC"
 	}
+
+	// For paged search queries, materialize matching 8-byte book rowids once (avoiding
+	// double execution and keeping SQLite's bounded top-N heap for ORDER BY ... LIMIT),
+	// and defer LEFT JOIN zip_indexes until AFTER LIMIT/OFFSET.
+	if strings.TrimSpace(q.Search) != "" && !q.Unpaged && progMode == "" {
+		noExtraBookFilters := q.SeriesID == "" && len(q.ReadListIDs) == 0 && len(q.ReadStatus) == 0 &&
+			len(q.Tags) == 0 && len(q.Authors) == 0 && q.OneShot == nil
+		var candCTE string
+		var candQueryArgs []any
+		switch {
+		case bookSearchDriven && noExtraBookFilters && excludeNSFW:
+			candCTE = `WITH _cand(book_rowid) AS MATERIALIZED (SELECT book_rowid FROM (` + bookCandSQL + `) EXCEPT SELECT b4.rowid FROM series_metadata sm_n CROSS JOIN books b4 ON b4.series_id=sm_n.series_id WHERE sm_n.is_nsfw=1)`
+			candQueryArgs = bookCandArgs
+		case bookSearchDriven && noExtraBookFilters:
+			candCTE = `WITH _cand(book_rowid) AS MATERIALIZED (` + bookCandSQL + `)`
+			candQueryArgs = bookCandArgs
+		default:
+			candCTE = `WITH _cand(book_rowid) AS MATERIALIZED (SELECT b.rowid AS book_rowid` + source + where + `)`
+			candQueryArgs = append(append([]any(nil), sourceArgs...), args...)
+		}
+		query := candCTE + `, _tot AS (SELECT COUNT(*) AS n FROM _cand), _page AS (
+SELECT b.id,b.series_id,b.library_id,b.file_id,b.parent_cid,b.name,b.size,b.pick_code,b.sha1,
+ b.file_created_at,b.file_modified_at,b.number_sort,b.created_at,b.updated_at
+FROM _cand _c
+CROSS JOIN books b ON b.rowid=_c.book_rowid
+ORDER BY ` + order + ` LIMIT ? OFFSET ?
+)
+SELECT p.id,p.series_id,p.library_id,p.file_id,p.parent_cid,p.name,p.size,p.pick_code,p.sha1,
+ p.file_created_at,p.file_modified_at,p.number_sort,p.created_at,p.updated_at,
+ coalesce(z.page_count,0),(SELECT n FROM _tot) AS _total
+FROM _page p
+LEFT JOIN zip_indexes z ON z.book_id=p.id`
+		queryArgs := make([]any, 0, len(candQueryArgs)+len(orderArgs)+2)
+		queryArgs = append(queryArgs, candQueryArgs...)
+		queryArgs = append(queryArgs, orderArgs...)
+		queryArgs = append(queryArgs, q.Size, q.Page*q.Size)
+		rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer rows.Close()
+		items, winTotal, err := scanBookRowsWithTotal(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(items) > 0 || q.Page == 0 {
+			return items, winTotal, nil
+		}
+		var total int64
+		if err := s.db.QueryRowContext(ctx, candCTE+` SELECT COUNT(*) FROM _cand`, candQueryArgs...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		return []Book{}, total, nil
+	}
+
+	var total int64
+	countArgs := append(append([]any(nil), sourceArgs...), args...)
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*)"+source+where, countArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if total == 0 {
+		return []Book{}, 0, nil
+	}
 	query := `
 SELECT b.id,b.series_id,b.library_id,b.file_id,b.parent_cid,b.name,b.size,b.pick_code,b.sha1,
  b.file_created_at,b.file_modified_at,b.number_sort,b.created_at,b.updated_at,
  coalesce(z.page_count,0)` + source + ` LEFT JOIN zip_indexes z ON z.book_id=b.id` + where + ` ORDER BY ` + order
-	queryArgs := make([]any, 0, len(args)+len(orderArgs)+2)
+	queryArgs := make([]any, 0, len(sourceArgs)+len(args)+len(orderArgs)+2)
+	queryArgs = append(queryArgs, sourceArgs...)
 	queryArgs = append(queryArgs, args...)
 	queryArgs = append(queryArgs, orderArgs...)
 	if !q.Unpaged {
@@ -1074,6 +1252,27 @@ func scanSeriesRows(rows *sql.Rows) ([]Series, error) {
 	return out, rows.Err()
 }
 
+func scanSeriesRowsWithTotal(rows *sql.Rows) ([]Series, int64, error) {
+	out := make([]Series, 0)
+	var total int64
+	for rows.Next() {
+		var item Series
+		var modified sql.NullString
+		var created, updated string
+		if err := rows.Scan(
+			&item.ID, &item.LibraryID, &item.CID, &item.Name, &item.RelativePath, &item.OneShot,
+			&modified, &created, &updated, &item.BooksCount, &total,
+		); err != nil {
+			return nil, 0, err
+		}
+		item.FileModifiedAt = parseNullableTime(modified)
+		item.CreatedAt = parseTime(created)
+		item.UpdatedAt = parseTime(updated)
+		out = append(out, item)
+	}
+	return out, total, rows.Err()
+}
+
 func scanBookRows(rows *sql.Rows) ([]Book, error) {
 	out := make([]Book, 0)
 	for rows.Next() {
@@ -1094,6 +1293,29 @@ func scanBookRows(rows *sql.Rows) ([]Book, error) {
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func scanBookRowsWithTotal(rows *sql.Rows) ([]Book, int64, error) {
+	out := make([]Book, 0)
+	var total int64
+	for rows.Next() {
+		var item Book
+		var fileCreated, fileModified sql.NullString
+		var created, updated string
+		if err := rows.Scan(
+			&item.ID, &item.SeriesID, &item.LibraryID, &item.FileID, &item.ParentCID,
+			&item.Name, &item.Size, &item.PickCode, &item.SHA1, &fileCreated, &fileModified,
+			&item.NumberSort, &created, &updated, &item.PageCount, &total,
+		); err != nil {
+			return nil, 0, err
+		}
+		item.FileCreatedAt = parseNullableTime(fileCreated)
+		item.FileModifiedAt = parseNullableTime(fileModified)
+		item.CreatedAt = parseTime(created)
+		item.UpdatedAt = parseTime(updated)
+		out = append(out, item)
+	}
+	return out, total, rows.Err()
 }
 
 func cleanStringSliceCaseSensitive(items []string) []string {

@@ -58,7 +58,7 @@ func (s *Server) komgaMe(w http.ResponseWriter, r *http.Request) {
 func (s *Server) komgaClientSettings(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.store.ClientSettings(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out := make(map[string]map[string]any, len(settings))
@@ -98,7 +98,7 @@ func (s *Server) patchKomgaClientSettings(w http.ResponseWriter, r *http.Request
 			)
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+			s.writeDBError(w, r, err)
 			return
 		}
 	}
@@ -151,12 +151,12 @@ func (s *Server) komgaSeriesList(w http.ResponseWriter, r *http.Request) {
 		Sort:          r.URL.Query().Get("sort"),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out, err := s.seriesDTOs(r, items)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, makePage(out, page, size, total, false))
@@ -183,12 +183,12 @@ func (s *Server) komgaBooksList(w http.ResponseWriter, r *http.Request) {
 		Sort:        r.URL.Query().Get("sort"),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	out, err := s.bookDTOs(r, items)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
+		s.writeDBError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, makePage(out, page, size, total, false))
