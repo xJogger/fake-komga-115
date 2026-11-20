@@ -199,7 +199,30 @@ func (s *Service) Get(ctx context.Context, seriesID string) (Data, bool, error) 
 	s.operationMu.RLock()
 	defer s.operationMu.RUnlock()
 
-	first, err := s.store.FirstBookInSeries(ctx, seriesID)
+	if data, ok, err := s.getOwnBookCover(ctx, seriesID, false); err != nil || ok {
+		return data, ok, err
+	}
+	// Union library fallback: reuse existing physical source series cover read-only (zero duplicate disk files).
+	if fallbackIDs, err := s.store.UnionSeriesCoverFallback(ctx, seriesID); err == nil {
+		for _, srcSeriesID := range fallbackIDs {
+			if data, ok, fErr := s.getOwnBookCover(ctx, srcSeriesID, true); fErr == nil && ok {
+				return data, true, nil
+			}
+		}
+	}
+	return Data{}, false, nil
+}
+
+func (s *Service) getOwnBookCover(ctx context.Context, seriesID string, includeHidden bool) (Data, bool, error) {
+	var (
+		first database.Book
+		err   error
+	)
+	if includeHidden {
+		first, err = s.store.FirstBookInSeriesAny(ctx, seriesID)
+	} else {
+		first, err = s.store.FirstBookInSeries(ctx, seriesID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return Data{}, false, nil
 	}
@@ -345,7 +368,29 @@ func (s *Service) HasValid(ctx context.Context, seriesID string) (bool, error) {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
 
-	first, err := s.store.FirstBookInSeries(ctx, seriesID)
+	if ok, err := s.hasValidOwnLocked(ctx, seriesID, false); err != nil || ok {
+		return ok, err
+	}
+	if fallbackIDs, err := s.store.UnionSeriesCoverFallback(ctx, seriesID); err == nil {
+		for _, srcSeriesID := range fallbackIDs {
+			if ok, fErr := s.hasValidOwnLocked(ctx, srcSeriesID, true); fErr == nil && ok {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (s *Service) hasValidOwnLocked(ctx context.Context, seriesID string, includeHidden bool) (bool, error) {
+	var (
+		first database.Book
+		err   error
+	)
+	if includeHidden {
+		first, err = s.store.FirstBookInSeriesAny(ctx, seriesID)
+	} else {
+		first, err = s.store.FirstBookInSeries(ctx, seriesID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

@@ -30,7 +30,7 @@ func (s *Server) bookshelfVersions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"versions": []any{}})
 		return
 	}
-	where := " WHERE gm.bgm_subject_id=? AND s.one_shot=0 AND l.enabled=1"
+	where := " WHERE gm.bgm_subject_id=? AND s.one_shot=0 AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)"
 	args := []any{*meta.BgmSubjectID}
 	if !s.store.ShowNSFW(ctx) {
 		where += " AND gm.is_nsfw=0"

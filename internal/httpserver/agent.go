@@ -56,7 +56,7 @@ func (s *Server) agentManifest(w http.ResponseWriter, _ *http.Request) {
 			},
 			"note": "Create an API key in /admin -> 账号与安全, then send it via Authorization: Bearer or X-API-Key.",
 		},
-		"providers":   []string{database.Provider115, database.ProviderLocal, database.ProviderWebDAV},
+		"providers":   []string{database.Provider115, database.ProviderLocal, database.ProviderWebDAV, database.ProviderUnion},
 		"scrapeModes": []string{bangumi.ScrapeModeIncremental, bangumi.ScrapeModeRetryUnmatched, bangumi.ScrapeModeForce},
 		"nsfwFilters": []string{"all", "only", "exclude"},
 		"endpoints": []map[string]string{
@@ -614,10 +614,9 @@ func (s *Server) agentPatchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	allowedBool := map[string]bool{
 		"show_nsfw": true, "volume_index_prefetch_enabled": true,
-		"auto_scan_enabled": true, "scan_on_startup": true,
 	}
 	allowedInt := map[string]bool{
-		"auto_scan_interval_minutes": true, "range_block_size": true,
+		"range_block_size":      true,
 		"range_cache_max_bytes": true, "page_cache_max_bytes": true,
 		"page_prefetch_count": true, "max_page_size": true,
 		"volume_index_prefetch_remaining_pages": true, "downurl_ttl_seconds": true,

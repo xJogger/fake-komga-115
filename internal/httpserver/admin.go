@@ -21,6 +21,8 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/id"
 	"github.com/xJogger/fake-komga-115/internal/localfs"
 	"github.com/xJogger/fake-komga-115/internal/maintenance"
+	"github.com/xJogger/fake-komga-115/internal/pipeline"
+	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
@@ -55,11 +57,17 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Post("/webdav-accounts/test", s.testWebDAVAccount)
 	r.Get("/webdav-accounts/{accountID}/folders", s.listWebDAVFolders)
 
-	// Libraries, settings, scans, covers, maintenance, cache
+	// Libraries, union refresh, schedules, pipelines, settings, scans, covers, maintenance, cache
 	r.Get("/libraries", s.listLibraries)
 	r.Post("/libraries", s.createLibrary)
 	r.Put("/libraries/{libraryID}", s.updateLibrary)
 	r.Delete("/libraries/{libraryID}", s.deleteLibrary)
+	r.Post("/libraries/{libraryID}/union-refresh", s.refreshUnionLibrary)
+	r.Get("/schedules", s.listLibrarySchedules)
+	r.Put("/libraries/{libraryID}/schedule", s.putLibrarySchedule)
+	r.Get("/pipelines", s.listPipelineRuns)
+	r.Post("/pipelines", s.startPipelineRun)
+	r.Post("/pipelines/{runID}/cancel", s.cancelPipelineRun)
 	r.Get("/settings", s.getSettings)
 	r.Put("/settings", s.putSettings)
 	r.Get("/scans", s.listScans)
@@ -80,7 +88,8 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/series/{seriesID}/detail", s.seriesRichDetail)
 	r.Get("/books/{bookID}/detail", s.bookRichDetail)
 
-	// Bangumi scraping & archive index management
+	// Bangumi scraping, archive index management & userscript
+	r.Get("/bangumi/userscript.user.js", s.downloadBangumiUserscript)
 	r.Get("/bangumi/status", s.bangumiStatus)
 	r.Put("/bangumi/config", s.putBangumiConfig)
 	r.Post("/bangumi/proxy/test", s.testBangumiProxy)
@@ -480,13 +489,14 @@ func (s *Server) listLibraries(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createLibrary(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Name            string `json:"name"`
-		ProviderType    string `json:"providerType"`
-		RootCID         string `json:"rootCid"`
-		WebDAVAccountID string `json:"webdavAccountId"`
-		RootPath        string `json:"rootPath"`
-		Enabled         *bool  `json:"enabled"`
-		OneShot         bool   `json:"oneShot"`
+		Name             string   `json:"name"`
+		ProviderType     string   `json:"providerType"`
+		RootCID          string   `json:"rootCid"`
+		WebDAVAccountID  string   `json:"webdavAccountId"`
+		RootPath         string   `json:"rootPath"`
+		Enabled          *bool    `json:"enabled"`
+		OneShot          bool     `json:"oneShot"`
+		MemberLibraryIDs []string `json:"memberLibraryIds"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -503,6 +513,22 @@ func (s *Server) createLibrary(w http.ResponseWriter, r *http.Request) {
 	enabled := true
 	if request.Enabled != nil {
 		enabled = *request.Enabled
+	}
+
+	if provider == database.ProviderUnion {
+		lib, stats, err := s.store.CreateUnionLibrary(r.Context(), request.Name, enabled, request.MemberLibraryIDs)
+		if err != nil {
+			writeError(w, 400, "INVALID_UNION_LIBRARY", err.Error())
+			return
+		}
+		if s.sse != nil {
+			s.sse.Publish("LibraryAdded", map[string]any{"libraryId": lib.ID})
+		}
+		writeJSON(w, 201, map[string]any{
+			"library": lib,
+			"stats":   stats,
+		})
+		return
 	}
 
 	var item database.Library
@@ -595,11 +621,28 @@ func (s *Server) updateLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 	wasEnabled := item.Enabled
 	var request struct {
-		Name    *string `json:"name"`
-		Enabled *bool   `json:"enabled"`
-		OneShot *bool   `json:"oneShot"`
+		Name             *string   `json:"name"`
+		Enabled          *bool     `json:"enabled"`
+		OneShot          *bool     `json:"oneShot"`
+		MemberLibraryIDs *[]string `json:"memberLibraryIds"`
 	}
 	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if item.EffectiveProvider() == database.ProviderUnion {
+		var memberIDs []string
+		if request.MemberLibraryIDs != nil {
+			memberIDs = *request.MemberLibraryIDs
+		}
+		updated, _, err := s.store.UpdateUnionLibrary(r.Context(), item.ID, request.Name, request.Enabled, memberIDs)
+		if err != nil {
+			writeError(w, 400, "INVALID_UNION_LIBRARY", err.Error())
+			return
+		}
+		if wasEnabled && !updated.Enabled {
+			s.cancelLibraryJobs(r.Context(), updated.ID)
+		}
+		writeJSON(w, 200, updated)
 		return
 	}
 	if request.Name != nil {
@@ -652,6 +695,9 @@ func (s *Server) cancelLibraryJobs(ctx context.Context, libraryID string) {
 	if s.tasks != nil {
 		s.tasks.CancelLibrary(ctx, libraryID)
 	}
+	if s.pipelines != nil {
+		s.pipelines.CancelLibrary(ctx, libraryID)
+	}
 }
 
 func (s *Server) deleteLibrary(w http.ResponseWriter, r *http.Request) {
@@ -668,7 +714,128 @@ SELECT count(*) FROM scan_runs WHERE library_id=? AND status IN ('queued','runni
 		return
 	}
 	if err := s.store.DeleteLibrary(r.Context(), libraryID); err != nil {
+		if errors.Is(err, database.ErrLibraryInUnion) {
+			writeError(w, 409, "LIBRARY_IN_UNION", err.Error())
+			return
+		}
 		s.writeDBError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) refreshUnionLibrary(w http.ResponseWriter, r *http.Request) {
+	libraryID := chi.URLParam(r, "libraryID")
+	lib, err := s.store.LibraryBasic(r.Context(), libraryID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, 404, "NOT_FOUND", "Library not found.")
+			return
+		}
+		s.writeDBError(w, r, err)
+		return
+	}
+	if lib.EffectiveProvider() != database.ProviderUnion {
+		writeError(w, 400, "NOT_UNION_LIBRARY", "Target library is not a union library.")
+		return
+	}
+	stats, err := s.store.RefreshUnionLibrary(r.Context(), libraryID)
+	if err != nil {
+		s.writeDBError(w, r, err)
+		return
+	}
+	updated, _ := s.store.Library(r.Context(), libraryID)
+	writeJSON(w, 200, map[string]any{
+		"library": updated,
+		"stats":   stats,
+	})
+}
+
+func (s *Server) listLibrarySchedules(w http.ResponseWriter, r *http.Request) {
+	schedules, err := s.store.LibrarySchedules(r.Context())
+	if err != nil {
+		s.writeDBError(w, r, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"timezone":  time.Now().Location().String(),
+		"schedules": schedules,
+	})
+}
+
+func (s *Server) putLibrarySchedule(w http.ResponseWriter, r *http.Request) {
+	libraryID := chi.URLParam(r, "libraryID")
+	var req database.LibrarySchedule
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.LibraryID = libraryID
+	saved, err := s.store.UpsertLibrarySchedule(r.Context(), req)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, 404, "NOT_FOUND", "Library not found.")
+			return
+		}
+		writeError(w, 400, "INVALID_SCHEDULE", err.Error())
+		return
+	}
+	writeJSON(w, 200, saved)
+}
+
+func (s *Server) listPipelineRuns(w http.ResponseWriter, r *http.Request) {
+	if s.pipelines == nil {
+		runs, err := s.store.PipelineRuns(r.Context(), intQuery(r, "limit", 30))
+		if err != nil {
+			s.writeDBError(w, r, err)
+			return
+		}
+		writeJSON(w, 200, runs)
+		return
+	}
+	runs, err := s.pipelines.Runs(r.Context(), intQuery(r, "limit", 30))
+	if err != nil {
+		s.writeDBError(w, r, err)
+		return
+	}
+	writeJSON(w, 200, runs)
+}
+
+func (s *Server) startPipelineRun(w http.ResponseWriter, r *http.Request) {
+	if s.pipelines == nil {
+		writeError(w, 503, "PIPELINE_UNAVAILABLE", "Pipeline service is not initialized.")
+		return
+	}
+	var req struct {
+		LibraryID string `json:"libraryId"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.LibraryID) == "" {
+		writeError(w, 400, "INVALID_REQUEST", "libraryId is required")
+		return
+	}
+	run, err := s.pipelines.Start(r.Context(), req.LibraryID, "manual")
+	if err != nil {
+		status, code := 409, "PIPELINE_START_FAILED"
+		if errors.Is(err, sql.ErrNoRows) {
+			status, code = 404, "NOT_FOUND"
+		} else if errors.Is(err, pipeline.ErrAlreadyQueued) {
+			status, code = 409, "PIPELINE_ACTIVE"
+		}
+		writeError(w, status, code, err.Error())
+		return
+	}
+	writeJSON(w, 202, run)
+}
+
+func (s *Server) cancelPipelineRun(w http.ResponseWriter, r *http.Request) {
+	if s.pipelines == nil {
+		writeError(w, 404, "NOT_FOUND", "Pipeline service unavailable.")
+		return
+	}
+	if err := s.pipelines.Cancel(r.Context(), chi.URLParam(r, "runID")); err != nil {
+		writeError(w, 404, "NOT_FOUND", err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -689,9 +856,6 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowed := map[string]bool{
-		"auto_scan_enabled":                     true,
-		"auto_scan_interval_minutes":            true,
-		"scan_on_startup":                       true,
 		"api_rate_per_second":                   true,
 		"range_block_size":                      true,
 		"range_cache_max_bytes":                 true,
@@ -720,7 +884,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "INVALID_SETTING", "Setting value cannot be empty: "+key)
 			return
 		}
-		if key == "volume_index_prefetch_enabled" || key == "auto_scan_enabled" || key == "scan_on_startup" || key == "show_nsfw" {
+		if key == "volume_index_prefetch_enabled" || key == "show_nsfw" {
 			parsed, err := strconv.ParseBool(value)
 			if err != nil {
 				writeError(w, 400, "INVALID_SETTING", key+" must be true or false")
@@ -797,6 +961,10 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := s.scanner.StartLibrary(r.Context(), request.LibraryID, "manual")
 	if err != nil {
+		if errors.Is(err, scanner.ErrUnionLibraryNotScannable) {
+			writeError(w, 400, "UNION_NOT_SCANNABLE", err.Error())
+			return
+		}
 		writeError(w, 409, "SCAN_START_FAILED", err.Error())
 		return
 	}
@@ -1039,6 +1207,12 @@ func (s *Server) seriesRichDetail(w http.ResponseWriter, r *http.Request) {
 	indexStats, _ := s.store.ArchiveIndexStatsBySeries(r.Context(), series.ID)
 	downloadStats, _ := s.store.BookDownloadStatsBySeries(r.Context(), series.ID)
 
+	var unionSeriesSources []database.UnionSeriesSource
+	var unionBookSources map[string][]database.UnionBookSource
+	if library.EffectiveProvider() == database.ProviderUnion {
+		unionSeriesSources, unionBookSources, _ = s.store.UnionSeriesSourceDetails(r.Context(), series.ID)
+	}
+
 	var totalSize int64
 	currentVersions := make(map[string]string, len(books))
 	bookExtras := make(map[string]any, len(books))
@@ -1046,11 +1220,17 @@ func (s *Server) seriesRichDetail(w http.ResponseWriter, r *http.Request) {
 		totalSize += b.Size
 		ver := archive.BookVersion(b)
 		currentVersions[b.ID] = ver
-		bookExtras[b.ID] = map[string]any{
+		extra := map[string]any{
 			"inferredProgress": pageProgressInline(pageProgresses[b.ID]),
 			"indexStatus":      indexStatusInline(indexStats[b.ID], ver),
 			"downloadStat":     downloadStatInline(downloadStats[b.ID]),
 		}
+		if len(unionBookSources) > 0 {
+			if srcs := unionBookSources[b.ID]; len(srcs) > 0 {
+				extra["unionSources"] = srcs
+			}
+		}
+		bookExtras[b.ID] = extra
 	}
 	perf, _ := s.store.SeriesPerformance(r.Context(), series.ID, currentVersions)
 	if coverStats, hasCover, _ := s.thumbs.SeriesStats(r.Context(), series.ID); hasCover && coverStats.GenerationDuration > 0 {
@@ -1068,24 +1248,30 @@ func (s *Server) seriesRichDetail(w http.ResponseWriter, r *http.Request) {
 			"updated":  latest.UpdatedAt.UTC().Format(time.RFC3339),
 		}
 	}
+	libPayload := map[string]any{
+		"id":                library.ID,
+		"name":              library.Name,
+		"providerType":      library.ProviderType,
+		"webdavAccountName": library.WebDAVAccountName,
+		"oneShot":           library.OneShot,
+	}
+	if len(library.UnionLayers) > 0 {
+		libPayload["unionLayers"] = library.UnionLayers
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"series":       seriesDTOFull(series, progress, meta),
-		"rawMeta":      meta,
-		"originalName": series.Name,
-		"relativePath": series.RelativePath,
-		"library": map[string]any{
-			"id":           library.ID,
-			"name":         library.Name,
-			"providerType": library.ProviderType,
-			"oneShot":      library.OneShot,
-		},
-		"totalSize":    formatBytes(totalSize),
-		"books":        bookDTOList,
-		"bookExtras":   bookExtras,
-		"inferred":     inferred,
-		"indexSummary": seriesIndexSummary(perf),
-		"coverSummary": seriesCoverSummary(perf),
-		"downloadStat": seriesDownloadSummary(perf),
+		"series":             seriesDTOFull(series, progress, meta),
+		"rawMeta":            meta,
+		"originalName":       series.Name,
+		"relativePath":       series.RelativePath,
+		"library":            libPayload,
+		"unionSeriesSources": unionSeriesSources,
+		"totalSize":          formatBytes(totalSize),
+		"books":              bookDTOList,
+		"bookExtras":         bookExtras,
+		"inferred":           inferred,
+		"indexSummary":       seriesIndexSummary(perf),
+		"coverSummary":       seriesCoverSummary(perf),
+		"downloadStat":       seriesDownloadSummary(perf),
 	})
 }
 
@@ -1151,24 +1337,32 @@ func (s *Server) bookRichDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var unionSources []database.UnionBookSource
+	if library.EffectiveProvider() == database.ProviderUnion {
+		_, unionSources, _ = s.store.UnionBookSourceBooks(r.Context(), book.ID)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"book":           bookDTOWithProgressAndMeta(book, series, seriesMeta, progress, hasProgress),
-		"seriesId":       series.ID,
-		"seriesTitle":    seriesMeta.Title,
-		"originalSeries": series.Name,
-		"libraryName":    library.Name,
-		"providerType":   library.ProviderType,
-		"relativePath":   webBookPath(series, book),
-		"archiveType":    webArchiveType(book.Name),
-		"previousBookId": prevBookID,
-		"nextBookId":     nextBookID,
-		"indexStatus":    indexText,
-		"indexDuration":  indexDuration,
-		"indexUpdated":   indexUpdated,
-		"downloadSpeed":  dlSpeed,
-		"downloadBytes":  dlBytes,
-		"downloadAt":     dlUpdated,
-		"inferred":       inferred,
+		"book":              bookDTOWithProgressAndMeta(book, series, seriesMeta, progress, hasProgress),
+		"seriesId":          series.ID,
+		"seriesTitle":       seriesMeta.Title,
+		"originalSeries":    series.Name,
+		"libraryId":         library.ID,
+		"libraryName":       library.Name,
+		"providerType":      library.ProviderType,
+		"webdavAccountName": library.WebDAVAccountName,
+		"unionSources":      unionSources,
+		"relativePath":      webBookPath(series, book),
+		"archiveType":       webArchiveType(book.Name),
+		"previousBookId":    prevBookID,
+		"nextBookId":        nextBookID,
+		"indexStatus":       indexText,
+		"indexDuration":     indexDuration,
+		"indexUpdated":      indexUpdated,
+		"downloadSpeed":     dlSpeed,
+		"downloadBytes":     dlBytes,
+		"downloadAt":        dlUpdated,
+		"inferred":          inferred,
 	})
 }
 

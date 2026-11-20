@@ -414,7 +414,7 @@ func (s *Store) CollectionFirstVisibleSeriesID(ctx context.Context, collectionID
 SELECT cs.series_id
 FROM collection_series cs
 JOIN series s ON s.id=cs.series_id
-JOIN libraries l ON l.id=s.library_id AND l.enabled=1
+JOIN libraries l ON l.id=s.library_id AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)
 WHERE cs.collection_id=?`
 	if !s.ShowNSFW(ctx) {
 		query += ` AND s.id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`
@@ -838,7 +838,7 @@ func (s *Store) ReadListFirstVisibleSeriesID(ctx context.Context, readListID str
 SELECT b.series_id
 FROM readlist_books rb
 JOIN books b ON b.id=rb.book_id
-JOIN libraries l ON l.id=b.library_id AND l.enabled=1
+JOIN libraries l ON l.id=b.library_id AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)
 WHERE rb.readlist_id=?`
 	if !s.ShowNSFW(ctx) {
 		query += ` AND b.series_id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`

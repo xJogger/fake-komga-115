@@ -30,6 +30,9 @@ func applyMigrations(db *sql.DB) error {
 	if err := ensureOrganizationTables(db); err != nil {
 		return err
 	}
+	if err := ensureUnionAndScheduleTables(db); err != nil {
+		return err
+	}
 	migrations := []struct {
 		table      string
 		column     string
@@ -222,6 +225,86 @@ CREATE INDEX IF NOT EXISTS idx_readlist_books_pos ON readlist_books(readlist_id,
 CREATE INDEX IF NOT EXISTS idx_readlist_books_book ON readlist_books(book_id, readlist_id);
 `)
 	return err
+}
+
+func ensureUnionAndScheduleTables(db *sql.DB) error {
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS union_layers (
+  union_library_id TEXT NOT NULL,
+  member_library_id TEXT NOT NULL UNIQUE,
+  priority INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(union_library_id, member_library_id),
+  FOREIGN KEY(union_library_id) REFERENCES libraries(id) ON DELETE CASCADE,
+  FOREIGN KEY(member_library_id) REFERENCES libraries(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_union_layers_union_prio ON union_layers(union_library_id, priority);
+
+CREATE TABLE IF NOT EXISTS union_series_sources (
+  union_series_id TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  source_series_id TEXT NOT NULL,
+  source_library_id TEXT NOT NULL,
+  PRIMARY KEY(union_series_id, priority),
+  FOREIGN KEY(union_series_id) REFERENCES series(id) ON DELETE CASCADE,
+  FOREIGN KEY(source_series_id) REFERENCES series(id) ON DELETE CASCADE,
+  FOREIGN KEY(source_library_id) REFERENCES libraries(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_union_series_sources_src ON union_series_sources(source_series_id);
+
+CREATE TABLE IF NOT EXISTS union_book_sources (
+  union_book_id TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  source_book_id TEXT NOT NULL,
+  source_library_id TEXT NOT NULL,
+  source_size INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(union_book_id, priority),
+  FOREIGN KEY(union_book_id) REFERENCES books(id) ON DELETE CASCADE,
+  FOREIGN KEY(source_book_id) REFERENCES books(id) ON DELETE CASCADE,
+  FOREIGN KEY(source_library_id) REFERENCES libraries(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_union_book_sources_src ON union_book_sources(source_book_id);
+
+CREATE TABLE IF NOT EXISTS library_schedules (
+  library_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  frequency TEXT NOT NULL DEFAULT 'daily',
+  weekday INTEGER NOT NULL DEFAULT 0,
+  time_of_day TEXT NOT NULL DEFAULT '03:00',
+  scan_member_ids_json TEXT NOT NULL DEFAULT '[]',
+  auto_bangumi INTEGER NOT NULL DEFAULT 1,
+  auto_cover_limit INTEGER NOT NULL DEFAULT 0,
+  last_run_at TEXT,
+  last_slot_key TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+  id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  trigger_type TEXT NOT NULL DEFAULT 'manual',
+  status TEXT NOT NULL,
+  stage TEXT NOT NULL DEFAULT 'queued',
+  scan_run_ids_json TEXT NOT NULL DEFAULT '[]',
+  bangumi_run_id TEXT NOT NULL DEFAULT '',
+  cover_run_id TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_created ON pipeline_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_lib ON pipeline_runs(library_id, created_at DESC);
+`); err != nil {
+		return err
+	}
+	// Clean up removed legacy global auto-scan settings.
+	_, _ = db.Exec(`DELETE FROM settings WHERE key IN ('auto_scan_enabled','auto_scan_interval_minutes','scan_on_startup')`)
+	return nil
 }
 
 func ensureSeriesRollups(db *sql.DB) error {

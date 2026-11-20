@@ -26,6 +26,7 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Post("/login/set-cookie", s.komgaSetCookie)
 
 	r.Get("/server/capabilities", s.komgaCapabilities)
+	r.Get("/bangumi/lookup", s.komgaBangumiLookup)
 	r.Get("/sse/v1/events", s.komgaSSEEvents)
 	r.Get("/libraries", s.komgaLibraries)
 	r.Get("/users/me", s.komgaMe)
@@ -115,6 +116,9 @@ func (s *Server) komgaCapabilities(w http.ResponseWriter, _ *http.Request) {
 			"readLists":              true,
 			"sse":                    true,
 			"gzip":                   true,
+			"unionLibraries":         true,
+			"libraryPipelines":       true,
+			"bangumiJump":            true,
 		},
 	})
 }
@@ -127,9 +131,10 @@ func (s *Server) komgaLibraries(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(libraries))
 	for _, library := range libraries {
-		out = append(out, map[string]any{
+		entry := map[string]any{
 			"id": library.ID, "name": library.Name, "root": "",
 			"providerType":              library.ProviderType,
+			"webdavAccountName":         library.WebDAVAccountName,
 			"importComicInfoBook":       false,
 			"importComicInfoSeries":     false,
 			"importComicInfoCollection": false,
@@ -142,7 +147,11 @@ func (s *Server) komgaLibraries(w http.ResponseWriter, r *http.Request) {
 				}
 				return nil
 			}(),
-		})
+		}
+		if len(library.UnionLayers) > 0 {
+			entry["unionLayers"] = library.UnionLayers
+		}
+		out = append(out, entry)
 	}
 	writeJSON(w, 200, out)
 }

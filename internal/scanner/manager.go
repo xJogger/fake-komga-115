@@ -38,6 +38,7 @@ type Manager struct {
 	queued      map[string]string
 	activeRunID string
 	activeStop  context.CancelFunc
+	listeners   []func(libraryID, runID, trigger, status string)
 }
 
 type job struct {
@@ -95,16 +96,26 @@ WHERE last_scan_status='running'`, now)
 		queued: make(map[string]string),
 	}
 	go m.worker()
-	go m.scheduler()
-	if store.BoolSetting(ctx, "scan_on_startup", false) {
-		go func() {
-			time.Sleep(2 * time.Second)
-			if _, err := m.StartAll(context.Background(), "startup"); err != nil {
-				logger.Error("queue startup scan", "error", err)
-			}
-		}()
-	}
 	return m
+}
+
+func (m *Manager) AddCompletionListener(fn func(libraryID, runID, trigger, status string)) {
+	if fn == nil {
+		return
+	}
+	m.mu.Lock()
+	m.listeners = append(m.listeners, fn)
+	m.mu.Unlock()
+}
+
+func (m *Manager) notifyCompleted(libraryID, runID, trigger, status string) {
+	m.mu.Lock()
+	cbs := make([]func(string, string, string, string), len(m.listeners))
+	copy(cbs, m.listeners)
+	m.mu.Unlock()
+	for _, fn := range cbs {
+		fn(libraryID, runID, trigger, status)
+	}
 }
 
 func (m *Manager) Close() {
@@ -117,12 +128,15 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) StartAll(ctx context.Context, trigger string) ([]database.ScanRun, error) {
-	libraries, err := m.store.LibrariesBasic(ctx, true)
+	libraries, err := m.store.LibrariesBasic(ctx, false)
 	if err != nil {
 		return nil, err
 	}
 	runs := make([]database.ScanRun, 0)
 	for _, library := range libraries {
+		if !library.Enabled || library.EffectiveProvider() == database.ProviderUnion {
+			continue
+		}
 		run, err := m.StartLibrary(ctx, library.ID, trigger)
 		if err != nil {
 			if errors.Is(err, ErrAlreadyQueued) {
@@ -136,8 +150,9 @@ func (m *Manager) StartAll(ctx context.Context, trigger string) ([]database.Scan
 }
 
 var (
-	ErrAlreadyQueued = errors.New("library scan is already queued or running")
-	ErrLibraryHidden = errors.New("library is hidden")
+	ErrAlreadyQueued            = errors.New("library scan is already queued or running")
+	ErrLibraryHidden            = errors.New("library is hidden")
+	ErrUnionLibraryNotScannable = errors.New("union library cannot be scanned directly; scan member libraries or refresh the union")
 )
 
 func (m *Manager) StartLibrary(ctx context.Context, libraryID, trigger string) (database.ScanRun, error) {
@@ -147,6 +162,9 @@ func (m *Manager) StartLibrary(ctx context.Context, libraryID, trigger string) (
 	}
 	if !library.Enabled {
 		return database.ScanRun{}, ErrLibraryHidden
+	}
+	if library.EffectiveProvider() == database.ProviderUnion {
+		return database.ScanRun{}, ErrUnionLibraryNotScannable
 	}
 	m.mu.Lock()
 	if _, exists := m.queued[libraryID]; exists {
@@ -520,6 +538,13 @@ func (m *Manager) scanWebDAV(ctx context.Context, item job, stage bool) (counter
 		if err != nil {
 			return counts, fmt.Errorf("list %s: %w", current.RelativePath, err)
 		}
+		if current.CID == "." && len(entries) == 0 {
+			var existingBooks int64
+			_ = m.store.DB().QueryRowContext(ctx, `SELECT count(*) FROM books WHERE library_id=?`, item.library.ID).Scan(&existingBooks)
+			if existingBooks > 0 {
+				return counts, fmt.Errorf("WebDAV library root appears empty (0 entries) while %d books exist in database; refusing to wipe catalog (check WebDAV source availability)", existingBooks)
+			}
+		}
 		counts.directories++
 		var comics []oneonefive.File
 		for _, entry := range entries {
@@ -845,54 +870,9 @@ UPDATE scan_runs SET status=?,completed_at=?,directories_seen=?,files_seen=?,ser
 	_, _ = m.store.DB().ExecContext(context.Background(), `
 UPDATE libraries SET last_scan_status=?,last_scan_completed_at=?,last_scan_error=? WHERE id=?`,
 		status, now, message, item.library.ID)
-}
-
-func (m *Manager) scheduler() {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-m.ctx.Done():
-			return
-		case <-ticker.C:
-			if !m.store.BoolSetting(m.ctx, "auto_scan_enabled", false) {
-				continue
-			}
-			interval := time.Duration(m.store.Int64Setting(m.ctx, "auto_scan_interval_minutes", 360)) * time.Minute
-			if interval < 5*time.Minute {
-				interval = 5 * time.Minute
-			}
-			m.mu.Lock()
-			busy := len(m.queued) > 0
-			m.mu.Unlock()
-			if busy {
-				continue
-			}
-			libraries, err := m.store.LibrariesBasic(m.ctx, true)
-			if err != nil {
-				m.logger.Error("check scheduled scan", "error", err)
-				continue
-			}
-			due := false
-			now := time.Now()
-			for _, library := range libraries {
-				if library.LastScanCompletedAt == nil {
-					due = true
-					break
-				}
-				last, err := time.Parse(time.RFC3339Nano, *library.LastScanCompletedAt)
-				if err != nil || now.Sub(last) >= interval {
-					due = true
-					break
-				}
-			}
-			if due {
-				if _, err := m.StartAll(context.Background(), "scheduled"); err != nil {
-					m.logger.Error("queue scheduled scan", "error", err)
-				}
-			}
-		}
-	}
+	var trigger string
+	_ = m.store.DB().QueryRowContext(context.Background(), `SELECT trigger_type FROM scan_runs WHERE id=?`, item.runID).Scan(&trigger)
+	m.notifyCompleted(item.library.ID, item.runID, trigger, status)
 }
 
 func isComic(name string) bool {

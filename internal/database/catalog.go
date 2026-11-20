@@ -425,7 +425,7 @@ func (s *Store) seriesByID(ctx context.Context, id string, includeHidden, exclud
 SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified_at,s.created_at,s.updated_at,s.books_count
 FROM series s`
 	if !includeHidden {
-		query += ` JOIN libraries l ON l.id=s.library_id AND l.enabled=1`
+		query += ` JOIN libraries l ON l.id=s.library_id AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)`
 	}
 	query += ` WHERE s.id=?`
 	if excludeNSFW {
@@ -761,10 +761,14 @@ ORDER BY b.series_id ASC, b.number_sort ASC, b.name COLLATE NOCASE ASC, b.id ASC
 }
 
 func (s *Store) BookByID(ctx context.Context, id string) (Book, error) {
-	return s.bookByID(ctx, id, !s.ShowNSFW(ctx))
+	return s.bookByID(ctx, id, false, !s.ShowNSFW(ctx))
 }
 
-func (s *Store) bookByID(ctx context.Context, id string, excludeNSFW bool) (Book, error) {
+func (s *Store) BookByIDAny(ctx context.Context, id string) (Book, error) {
+	return s.bookByID(ctx, id, true, false)
+}
+
+func (s *Store) bookByID(ctx context.Context, id string, includeHidden, excludeNSFW bool) (Book, error) {
 	var item Book
 	var fileCreated, fileModified sql.NullString
 	var created, updated string
@@ -772,8 +776,11 @@ func (s *Store) bookByID(ctx context.Context, id string, excludeNSFW bool) (Book
 SELECT b.id,b.series_id,b.library_id,b.file_id,b.parent_cid,b.name,b.size,b.pick_code,b.sha1,
  b.file_created_at,b.file_modified_at,b.number_sort,b.created_at,b.updated_at,
  coalesce(z.page_count,0)
-FROM books b
-JOIN libraries l ON l.id=b.library_id AND l.enabled=1
+FROM books b`
+	if !includeHidden {
+		query += ` JOIN libraries l ON l.id=b.library_id AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)`
+	}
+	query += `
 LEFT JOIN zip_indexes z ON z.book_id=b.id
 WHERE b.id=?`
 	if excludeNSFW {
@@ -809,7 +816,7 @@ func (s *Store) SeriesByIDs(ctx context.Context, ids []string) (map[string]Serie
 		query := `
 SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified_at,s.created_at,s.updated_at,s.books_count
 FROM series s
-JOIN libraries l ON l.id=s.library_id AND l.enabled=1
+JOIN libraries l ON l.id=s.library_id AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)
 WHERE s.id IN ` + Placeholders(len(args))
 		if excludeNSFW {
 			query += ` AND NOT EXISTS (SELECT 1 FROM series_metadata sm_nsfw WHERE sm_nsfw.series_id=s.id AND sm_nsfw.is_nsfw=1)`
@@ -838,7 +845,18 @@ ORDER BY number_sort ASC,name COLLATE NOCASE ASC,id ASC LIMIT 1`, seriesID).Scan
 	if err != nil {
 		return Book{}, err
 	}
-	return s.bookByID(ctx, id, false)
+	return s.bookByID(ctx, id, false, false)
+}
+
+func (s *Store) FirstBookInSeriesAny(ctx context.Context, seriesID string) (Book, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+SELECT id FROM books WHERE series_id=?
+ORDER BY number_sort ASC,name COLLATE NOCASE ASC,id ASC LIMIT 1`, seriesID).Scan(&id)
+	if err != nil {
+		return Book{}, err
+	}
+	return s.bookByID(ctx, id, true, false)
 }
 
 func (s *Store) NextBookInSeries(ctx context.Context, current Book) (Book, error) {

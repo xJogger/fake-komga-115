@@ -108,6 +108,11 @@ func New(
 				if err := store.DeleteArchiveIndex(ctx, book.ID); err != nil {
 					return false, err
 				}
+				if srcIDs, uErr := store.UnionBookSourceIDs(ctx, book.ID); uErr == nil {
+					for _, srcID := range srcIDs {
+						_ = store.DeleteArchiveIndex(ctx, srcID)
+					}
+				}
 			}
 			if _, err := archiveService.ListPages(ctx, book); err != nil {
 				return false, err

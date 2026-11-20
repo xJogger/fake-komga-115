@@ -132,13 +132,23 @@ func (s *Store) DeleteSeriesReadProgress(ctx context.Context, seriesID string) e
 	now := nowText()
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO book_read_progress_tombstones(book_id,series_id,deleted_at)
-SELECT book_id,series_id,? FROM book_read_progress WHERE series_id=?
+SELECT p.book_id,p.series_id,?
+FROM book_read_progress p
+WHERE p.series_id=? OR p.book_id IN (
+  SELECT ubs.source_book_id FROM union_book_sources ubs
+  JOIN books ub ON ub.id=ubs.union_book_id WHERE ub.series_id=?
+)
 ON CONFLICT(book_id) DO UPDATE SET
  series_id=excluded.series_id,
- deleted_at=excluded.deleted_at`, now, seriesID); err != nil {
+ deleted_at=excluded.deleted_at`, now, seriesID, seriesID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress WHERE series_id=?`, seriesID); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM book_read_progress
+WHERE series_id=? OR book_id IN (
+  SELECT ubs.source_book_id FROM union_book_sources ubs
+  JOIN books ub ON ub.id=ubs.union_book_id WHERE ub.series_id=?
+)`, seriesID, seriesID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE deleted_at<?`, tombstoneCutoffText()); err != nil {
@@ -157,12 +167,22 @@ func (s *Store) MarkSeriesCompleted(ctx context.Context, seriesID string) error 
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO book_read_progress(book_id,series_id,completed,read_date,completed_at,updated_at)
 SELECT id,series_id,1,?,?,? FROM books WHERE series_id=?
+UNION ALL
+SELECT sb.id,sb.series_id,1,?,?,?
+FROM union_book_sources ubs
+JOIN books ub ON ub.id=ubs.union_book_id AND ub.series_id=?
+JOIN books sb ON sb.id=ubs.source_book_id
 ON CONFLICT(book_id) DO UPDATE SET
  completed=1,read_date=excluded.read_date,completed_at=excluded.completed_at,updated_at=excluded.updated_at`,
-		now, now, now, seriesID); err != nil {
+		now, now, now, seriesID, now, now, now, seriesID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE series_id=?`, seriesID); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM book_read_progress_tombstones
+WHERE series_id=? OR book_id IN (
+  SELECT ubs.source_book_id FROM union_book_sources ubs
+  JOIN books ub ON ub.id=ubs.union_book_id WHERE ub.series_id=?
+)`, seriesID, seriesID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -184,18 +204,25 @@ func (s *Store) UpdateSeriesReadProgress(
 INSERT INTO book_read_progress_tombstones(book_id,series_id,deleted_at)
 SELECT p.book_id,p.series_id,?
 FROM book_read_progress p
-JOIN books b ON b.id=p.book_id
-WHERE p.series_id=? AND b.number_sort>?
+WHERE p.book_id IN (
+  SELECT id FROM books WHERE series_id=? AND number_sort>?
+  UNION
+  SELECT ubs.source_book_id FROM union_book_sources ubs
+  JOIN books ub ON ub.id=ubs.union_book_id WHERE ub.series_id=? AND ub.number_sort>?
+)
 ON CONFLICT(book_id) DO UPDATE SET
  series_id=excluded.series_id,
- deleted_at=excluded.deleted_at`, now, seriesID, lastBookNumberSortRead); err != nil {
+ deleted_at=excluded.deleted_at`, now, seriesID, lastBookNumberSortRead, seriesID, lastBookNumberSortRead); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM book_read_progress
-WHERE series_id=? AND book_id IN (
- SELECT id FROM books WHERE series_id=? AND number_sort>?
-)`, seriesID, seriesID, lastBookNumberSortRead); err != nil {
+WHERE book_id IN (
+  SELECT id FROM books WHERE series_id=? AND number_sort>?
+  UNION
+  SELECT ubs.source_book_id FROM union_book_sources ubs
+  JOIN books ub ON ub.id=ubs.union_book_id WHERE ub.series_id=? AND ub.number_sort>?
+)`, seriesID, lastBookNumberSortRead, seriesID, lastBookNumberSortRead); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -203,19 +230,27 @@ INSERT INTO book_read_progress(book_id,series_id,completed,read_date,completed_a
 SELECT id,series_id,1,?,?,?
 FROM books
 WHERE series_id=? AND number_sort<=?
+UNION ALL
+SELECT sb.id,sb.series_id,1,?,?,?
+FROM union_book_sources ubs
+JOIN books ub ON ub.id=ubs.union_book_id AND ub.series_id=? AND ub.number_sort<=?
+JOIN books sb ON sb.id=ubs.source_book_id
 ON CONFLICT(book_id) DO UPDATE SET
  series_id=excluded.series_id,
  completed=1,
  completed_at=excluded.completed_at,
  read_date=excluded.read_date,
- updated_at=excluded.updated_at`, now, now, now, seriesID, lastBookNumberSortRead); err != nil {
+ updated_at=excluded.updated_at`, now, now, now, seriesID, lastBookNumberSortRead, now, now, now, seriesID, lastBookNumberSortRead); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM book_read_progress_tombstones
-WHERE series_id=? AND book_id IN (
- SELECT id FROM books WHERE series_id=? AND number_sort<=?
-)`, seriesID, seriesID, lastBookNumberSortRead); err != nil {
+WHERE book_id IN (
+  SELECT id FROM books WHERE series_id=? AND number_sort<=?
+  UNION
+  SELECT ubs.source_book_id FROM union_book_sources ubs
+  JOIN books ub ON ub.id=ubs.union_book_id WHERE ub.series_id=? AND ub.number_sort<=?
+)`, seriesID, lastBookNumberSortRead, seriesID, lastBookNumberSortRead); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE deleted_at<?`, tombstoneCutoffText()); err != nil {
@@ -380,7 +415,29 @@ ON CONFLICT(book_id) DO UPDATE SET
 		book.ID, book.SeriesID, completedInt, pageValue, now, completedAt, now); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE book_id=?`, book.ID); err != nil {
+	// Mirror union book progress back to physical replica books so progress survives dissolving the union.
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO book_read_progress(
+ book_id,series_id,completed,page,read_date,completed_at,updated_at
+)
+SELECT sb.id,sb.series_id,?,?,?,?,?
+FROM union_book_sources ubs
+JOIN books sb ON sb.id=ubs.source_book_id
+WHERE ubs.union_book_id=?
+ON CONFLICT(book_id) DO UPDATE SET
+ series_id=excluded.series_id,
+ completed=excluded.completed,
+ page=coalesce(excluded.page, book_read_progress.page),
+ read_date=excluded.read_date,
+ completed_at=excluded.completed_at,
+ updated_at=excluded.updated_at`,
+		completedInt, pageValue, now, completedAt, now, book.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM book_read_progress_tombstones
+WHERE book_id=? OR book_id IN (SELECT source_book_id FROM union_book_sources WHERE union_book_id=?)`,
+		book.ID, book.ID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -395,13 +452,17 @@ func (s *Store) DeleteBookReadProgress(ctx context.Context, bookID string) error
 	now := nowText()
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO book_read_progress_tombstones(book_id,series_id,deleted_at)
-SELECT book_id,series_id,? FROM book_read_progress WHERE book_id=?
+SELECT book_id,series_id,? FROM book_read_progress
+WHERE book_id=? OR book_id IN (SELECT source_book_id FROM union_book_sources WHERE union_book_id=?)
 ON CONFLICT(book_id) DO UPDATE SET
  series_id=excluded.series_id,
- deleted_at=excluded.deleted_at`, now, bookID); err != nil {
+ deleted_at=excluded.deleted_at`, now, bookID, bookID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress WHERE book_id=?`, bookID); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM book_read_progress
+WHERE book_id=? OR book_id IN (SELECT source_book_id FROM union_book_sources WHERE union_book_id=?)`,
+		bookID, bookID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM book_read_progress_tombstones WHERE deleted_at<?`, tombstoneCutoffText()); err != nil {
@@ -421,7 +482,13 @@ func (s *Store) RecordBookPageProgress(
 	if pageNumber > pageCount {
 		pageCount = pageNumber
 	}
-	_, err := s.db.ExecContext(ctx, `
+	now := nowText()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO book_page_progress(
  book_id,series_id,last_loaded_page,max_loaded_page,page_count,updated_at
 ) VALUES(?,?,?,?,?,?)
@@ -431,8 +498,27 @@ ON CONFLICT(book_id) DO UPDATE SET
  max_loaded_page=MAX(book_page_progress.max_loaded_page, excluded.max_loaded_page),
  page_count=excluded.page_count,
  updated_at=excluded.updated_at`,
-		book.ID, book.SeriesID, pageNumber, pageNumber, pageCount, nowText())
-	return err
+		book.ID, book.SeriesID, pageNumber, pageNumber, pageCount, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO book_page_progress(
+ book_id,series_id,last_loaded_page,max_loaded_page,page_count,updated_at
+)
+SELECT sb.id,sb.series_id,?,?,?,?
+FROM union_book_sources ubs
+JOIN books sb ON sb.id=ubs.source_book_id
+WHERE ubs.union_book_id=?
+ON CONFLICT(book_id) DO UPDATE SET
+ series_id=excluded.series_id,
+ last_loaded_page=excluded.last_loaded_page,
+ max_loaded_page=MAX(book_page_progress.max_loaded_page, excluded.max_loaded_page),
+ page_count=excluded.page_count,
+ updated_at=excluded.updated_at`,
+		pageNumber, pageNumber, pageCount, now, book.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) BookPageProgress(

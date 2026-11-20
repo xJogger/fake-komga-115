@@ -21,6 +21,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/httpserver"
 	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
+	"github.com/xJogger/fake-komga-115/internal/pipeline"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
@@ -38,6 +39,7 @@ type App struct {
 	server     *http.Server
 	store      *database.Store
 	scanner    *scanner.Manager
+	pipelines  *pipeline.Manager
 	covers     *thumbnail.BatchManager
 	tasks      *maintenance.Manager
 	archive    *archive.Service
@@ -103,6 +105,30 @@ func New(_ context.Context, options Options) (*App, error) {
 	maintenanceManager := maintenance.New(
 		store, archiveService, thumbnailService, options.Logger,
 	)
+	pipelineManager := pipeline.New(
+		store, scanManager, bangumiService, coverManager, options.Logger,
+	)
+	// When a physical sub-library finishes a manual/standalone scan, silently refresh its parent union library.
+	scanManager.AddCompletionListener(func(libraryID, _ string, trigger, status string) {
+		if status != "success" || trigger == "pipeline" {
+			return
+		}
+		parentID, isSub, err := store.UnionParentLibraryID(context.Background(), libraryID)
+		if err != nil || !isSub || parentID == "" {
+			return
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			if stats, rErr := store.RefreshUnionLibrary(ctx, parentID); rErr != nil {
+				options.Logger.Error("auto-refresh union library after sub-library scan",
+					"union", parentID, "member", libraryID, "error", rErr)
+			} else {
+				options.Logger.Info("auto-refreshed union library after sub-library scan",
+					"union", parentID, "member", libraryID, "series", stats.SeriesCount, "books", stats.BooksCount)
+			}
+		}()
+	})
 	handler := httpserver.New(
 		store, client, scanManager, cacheManager, archiveService, thumbnailService,
 		coverManager, maintenanceManager, httpserver.RuntimeInfo{
@@ -110,7 +136,7 @@ func New(_ context.Context, options Options) (*App, error) {
 			Host:    options.Host,
 			Port:    options.Port,
 		}, options.Logger,
-	).WithServices(webdavManager, bangumiService)
+	).WithServices(webdavManager, bangumiService).WithPipeline(pipelineManager)
 
 	var routes http.Handler = handler.Handler()
 	if options.LoopbackToken != "" {
@@ -123,8 +149,8 @@ func New(_ context.Context, options Options) (*App, error) {
 		IdleTimeout:       2 * time.Minute,
 	}
 	return &App{
-		server: server, store: store, scanner: scanManager, covers: coverManager,
-		tasks: maintenanceManager, archive: archiveService, bangumi: bangumiService,
+		server: server, store: store, scanner: scanManager, pipelines: pipelineManager,
+		covers: coverManager, tasks: maintenanceManager, archive: archiveService, bangumi: bangumiService,
 		logger: options.Logger,
 	}, nil
 }
@@ -179,6 +205,9 @@ func (a *App) Close() error {
 	if a.warmCancel != nil {
 		a.warmCancel()
 		<-a.warmDone
+	}
+	if a.pipelines != nil {
+		a.pipelines.Close()
 	}
 	a.tasks.Close()
 	a.covers.Close()

@@ -2,9 +2,12 @@ package archive
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
@@ -37,6 +40,8 @@ type PageData struct {
 }
 
 type Service struct {
+	store          *database.Store
+	logger         *slog.Logger
 	zip            *ZIPService
 	rar            *RARService
 	volumePrefetch *VolumeIndexPrefetcher
@@ -62,8 +67,10 @@ func NewServiceWithWebDAV(
 		webdavManager = webdav.NewManager()
 	}
 	service := &Service{
-		zip: NewZIPServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
-		rar: NewRARServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
+		store:  store,
+		logger: logger,
+		zip:    NewZIPServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
+		rar:    NewRARServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
 	}
 	service.volumePrefetch = newVolumeIndexPrefetcher(
 		store, service.ListPages, logger,
@@ -71,7 +78,26 @@ func NewServiceWithWebDAV(
 	return service
 }
 
-func (s *Service) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
+func (s *Service) resolveCandidates(ctx context.Context, book database.Book) ([]database.Book, bool) {
+	if s.store != nil {
+		if sources, _, err := s.store.UnionBookSourceBooks(ctx, book.ID); err == nil && len(sources) > 0 {
+			return sources, true
+		}
+	}
+	return []database.Book{book}, false
+}
+
+func shouldFallbackReplica(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	return true
+}
+
+func (s *Service) listPagesDirect(ctx context.Context, book database.Book) ([]PageEntry, error) {
 	switch archiveFormat(book.Name) {
 	case formatZIP:
 		return s.zip.ListPages(ctx, book)
@@ -82,11 +108,7 @@ func (s *Service) ListPages(ctx context.Context, book database.Book) ([]PageEntr
 	}
 }
 
-func (s *Service) ReadPage(
-	ctx context.Context,
-	book database.Book,
-	pageNumber int,
-) (PageData, error) {
+func (s *Service) readPageDirect(ctx context.Context, book database.Book, pageNumber int) (PageData, error) {
 	switch archiveFormat(book.Name) {
 	case formatZIP:
 		return s.zip.ReadPage(ctx, book, pageNumber)
@@ -97,7 +119,87 @@ func (s *Service) ReadPage(
 	}
 }
 
+func (s *Service) syncUnionIndexSummary(ctx context.Context, unionBook database.Book, pageCount int, duration time.Duration) {
+	if s.store == nil || pageCount <= 0 {
+		return
+	}
+	_ = s.store.RecordArchiveIndexBuild(ctx, unionBook.ID, BookVersion(unionBook), "[]", pageCount, duration)
+}
+
+func (s *Service) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
+	candidates, isUnion := s.resolveCandidates(ctx, book)
+	var lastErr error
+	for idx, cand := range candidates {
+		started := time.Now()
+		pages, err := s.listPagesDirect(ctx, cand)
+		if err == nil {
+			if isUnion {
+				s.syncUnionIndexSummary(ctx, book, len(pages), time.Since(started))
+			}
+			return pages, nil
+		}
+		lastErr = err
+		if !shouldFallbackReplica(err) || idx+1 >= len(candidates) {
+			return nil, err
+		}
+		if s.logger != nil {
+			s.logger.Warn("union book listPages failed on layer, falling back",
+				"unionBook", book.ID, "failedLibrary", cand.LibraryID,
+				"nextLibrary", candidates[idx+1].LibraryID, "error", err)
+		}
+	}
+	return nil, lastErr
+}
+
+func (s *Service) ReadPage(
+	ctx context.Context,
+	book database.Book,
+	pageNumber int,
+) (PageData, error) {
+	candidates, isUnion := s.resolveCandidates(ctx, book)
+	var lastErr error
+	for idx, cand := range candidates {
+		started := time.Now()
+		page, err := s.readPageDirect(ctx, cand, pageNumber)
+		if err == nil {
+			if isUnion && page.TotalPages > 0 {
+				if ok, _ := s.store.HasArchiveIndexVersion(ctx, book.ID, BookVersion(book)); !ok {
+					s.syncUnionIndexSummary(ctx, book, page.TotalPages, time.Since(started))
+				}
+			}
+			return page, nil
+		}
+		lastErr = err
+		if !shouldFallbackReplica(err) || idx+1 >= len(candidates) {
+			return PageData{}, err
+		}
+		if s.logger != nil {
+			s.logger.Warn("union book readPage failed on layer, falling back",
+				"unionBook", book.ID, "page", pageNumber, "failedLibrary", cand.LibraryID,
+				"nextLibrary", candidates[idx+1].LibraryID, "error", err)
+		}
+	}
+	return PageData{}, lastErr
+}
+
 func (s *Service) Prefetch(book database.Book, afterPage, count int) {
+	if count <= 0 {
+		return
+	}
+	if s.store != nil {
+		if sources, _, err := s.store.UnionBookSourceBooks(context.Background(), book.ID); err == nil && len(sources) > 0 {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				defer cancel()
+				for page := afterPage + 1; page <= afterPage+count; page++ {
+					if _, err := s.ReadPage(ctx, book, page); err != nil {
+						return
+					}
+				}
+			}()
+			return
+		}
+	}
 	switch archiveFormat(book.Name) {
 	case formatZIP:
 		s.zip.Prefetch(book, afterPage, count)

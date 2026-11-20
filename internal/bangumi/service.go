@@ -351,7 +351,7 @@ func (s *Service) StartBatchWithMode(
 		if err != nil {
 			return database.BangumiScrapeRun{}, err
 		}
-		if !lib.Enabled {
+		if !lib.Enabled || lib.UnionParentID != "" {
 			return database.BangumiScrapeRun{}, ErrLibraryHidden
 		}
 	}
@@ -535,7 +535,7 @@ func (s *Service) executeBatch(item scrapeJob) {
 	if err != nil {
 		return
 	}
-	if run.CancelRequested || (item.libraryID != "" && !s.store.IsLibraryEnabled(ctx, item.libraryID)) {
+	if run.CancelRequested || (item.libraryID != "" && !s.store.IsLibraryVisible(ctx, item.libraryID)) {
 		s.finishRun(item.runID, run, "canceled")
 		return
 	}
@@ -562,7 +562,7 @@ func (s *Service) executeBatch(item scrapeJob) {
 		}
 		libOK, seenLib := libEnabledCache[target.series.LibraryID]
 		if !seenLib {
-			libOK = s.store.IsLibraryEnabled(ctx, target.series.LibraryID)
+			libOK = s.store.IsLibraryVisible(ctx, target.series.LibraryID)
 			libEnabledCache[target.series.LibraryID] = libOK
 		}
 		if !libOK {
@@ -644,10 +644,10 @@ JOIN libraries l ON l.id=s.library_id
 LEFT JOIN series_metadata sm ON sm.series_id=s.id`
 	var args []any
 	if libraryID != "" {
-		query += ` WHERE s.library_id=? AND l.enabled=1`
+		query += ` WHERE s.library_id=? AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)`
 		args = append(args, libraryID)
 	} else {
-		query += ` WHERE l.enabled=1`
+		query += ` WHERE l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)`
 	}
 	query += ` ORDER BY s.updated_at DESC,s.id ASC`
 	rows, err := s.store.DB().QueryContext(ctx, query, args...)

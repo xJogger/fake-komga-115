@@ -6,6 +6,7 @@ const (
 	Provider115    = "115"
 	ProviderLocal  = "local"
 	ProviderWebDAV = "webdav"
+	ProviderUnion  = "union"
 
 	CoverSourceAuto    = "auto"
 	CoverSourceBangumi = "bangumi"
@@ -66,30 +67,78 @@ type WebDAVAccountSecret struct {
 	Password string
 }
 
+type UnionLayer struct {
+	UnionLibraryID    string `json:"unionLibraryId"`
+	MemberLibraryID   string `json:"memberLibraryId"`
+	MemberLibraryName string `json:"memberLibraryName"`
+	ProviderType      string `json:"providerType"`
+	WebDAVAccountName string `json:"webdavAccountName,omitempty"`
+	Priority          int    `json:"priority"`
+}
+
+type UnionSeriesSource struct {
+	UnionSeriesID     string `json:"unionSeriesId"`
+	Priority          int    `json:"priority"`
+	SourceSeriesID    string `json:"sourceSeriesId"`
+	SourceLibraryID   string `json:"sourceLibraryId"`
+	SourceLibraryName string `json:"sourceLibraryName"`
+	ProviderType      string `json:"providerType"`
+	WebDAVAccountName string `json:"webdavAccountName,omitempty"`
+}
+
+type UnionBookSource struct {
+	UnionBookID       string `json:"unionBookId"`
+	Priority          int    `json:"priority"`
+	SourceBookID      string `json:"sourceBookId"`
+	SourceLibraryID   string `json:"sourceLibraryId"`
+	SourceLibraryName string `json:"sourceLibraryName"`
+	ProviderType      string `json:"providerType"`
+	WebDAVAccountName string `json:"webdavAccountName,omitempty"`
+	SourceSize        int64  `json:"sourceSize"`
+	Active            bool   `json:"active"`
+}
+
+type UnionRefreshStats struct {
+	UnionLibraryID      string `json:"unionLibraryId"`
+	MemberCount         int    `json:"memberCount"`
+	SeriesCount         int    `json:"seriesCount"`
+	BooksCount          int    `json:"booksCount"`
+	InheritedMetadata   int    `json:"inheritedMetadata"`
+	InheritedProgress   int    `json:"inheritedProgress"`
+	MigratedCollections int    `json:"migratedCollections"`
+	MigratedReadLists   int    `json:"migratedReadLists"`
+	RemovedStaleSeries  int    `json:"removedStaleSeries"`
+	RemovedStaleBooks   int    `json:"removedStaleBooks"`
+}
+
 type Library struct {
-	ID                  string  `json:"id"`
-	Name                string  `json:"name"`
-	ProviderType        string  `json:"providerType"`
-	RootCID             string  `json:"rootCid"`
-	WebDAVAccountID     string  `json:"webdavAccountId,omitempty"`
-	WebDAVAccountName   string  `json:"webdavAccountName,omitempty"`
-	RootPath            string  `json:"rootPath,omitempty"`
-	Enabled             bool    `json:"enabled"`
-	OneShot             bool    `json:"oneShot"`
-	CreatedAt           string  `json:"createdAt"`
-	UpdatedAt           string  `json:"updatedAt"`
-	LastScanStartedAt   *string `json:"lastScanStartedAt"`
-	LastScanCompletedAt *string `json:"lastScanCompletedAt"`
-	LastScanStatus      string  `json:"lastScanStatus"`
-	LastScanError       string  `json:"lastScanError"`
-	SeriesCount         int64   `json:"seriesCount"`
-	BookCount           int64   `json:"bookCount"`
-	ComicBytes          int64   `json:"comicBytes"`
+	ID                  string       `json:"id"`
+	Name                string       `json:"name"`
+	ProviderType        string       `json:"providerType"`
+	RootCID             string       `json:"rootCid"`
+	WebDAVAccountID     string       `json:"webdavAccountId,omitempty"`
+	WebDAVAccountName   string       `json:"webdavAccountName,omitempty"`
+	RootPath            string       `json:"rootPath,omitempty"`
+	Enabled             bool         `json:"enabled"`
+	OneShot             bool         `json:"oneShot"`
+	UnionParentID       string       `json:"unionParentId,omitempty"`
+	UnionParentName     string       `json:"unionParentName,omitempty"`
+	UnionPriority       int          `json:"unionPriority,omitempty"`
+	UnionLayers         []UnionLayer `json:"unionLayers,omitempty"`
+	CreatedAt           string       `json:"createdAt"`
+	UpdatedAt           string       `json:"updatedAt"`
+	LastScanStartedAt   *string      `json:"lastScanStartedAt"`
+	LastScanCompletedAt *string      `json:"lastScanCompletedAt"`
+	LastScanStatus      string       `json:"lastScanStatus"`
+	LastScanError       string       `json:"lastScanError"`
+	SeriesCount         int64        `json:"seriesCount"`
+	BookCount           int64        `json:"bookCount"`
+	ComicBytes          int64        `json:"comicBytes"`
 }
 
 func (l Library) EffectiveProvider() string {
 	switch l.ProviderType {
-	case ProviderLocal, ProviderWebDAV:
+	case ProviderLocal, ProviderWebDAV, ProviderUnion:
 		return l.ProviderType
 	default:
 		return Provider115
@@ -338,4 +387,50 @@ type CacheStats struct {
 	Type  string `json:"type"`
 	Files int64  `json:"files"`
 	Bytes int64  `json:"bytes"`
+}
+
+type LibrarySchedule struct {
+	LibraryID            string   `json:"libraryId"`
+	Enabled              bool     `json:"enabled"`
+	Frequency            string   `json:"frequency"` // "daily" | "weekly"
+	Weekday              int      `json:"weekday"`   // 0=Sunday .. 6=Saturday
+	TimeOfDay            string   `json:"timeOfDay"` // "HH:MM" in server local time
+	ScanMemberLibraryIDs []string `json:"scanMemberLibraryIds"`
+	AutoBangumi          bool     `json:"autoBangumi"`
+	AutoCoverLimit       int      `json:"autoCoverLimit"` // 0 = disabled (default), -1 = unlimited (local/SMB), >0 = cap
+	LastRunAt            *string  `json:"lastRunAt"`
+	LastSlotKey          string   `json:"lastSlotKey,omitempty"`
+	UpdatedAt            string   `json:"updatedAt"`
+}
+
+type PipelineRun struct {
+	ID              string   `json:"id"`
+	LibraryID       string   `json:"libraryId"`
+	LibraryName     string   `json:"libraryName"`
+	TriggerType     string   `json:"triggerType"`
+	Status          string   `json:"status"` // queued | running | success | partial | failed | canceled
+	Stage           string   `json:"stage"`  // queued | scan | union_refresh | bangumi | cover | done
+	ScanRunIDs      []string `json:"scanRunIds"`
+	BangumiRunID    string   `json:"bangumiRunId,omitempty"`
+	CoverRunID      string   `json:"coverRunId,omitempty"`
+	Summary         string   `json:"summary"`
+	Error           string   `json:"error"`
+	CancelRequested bool     `json:"cancelRequested"`
+	StartedAt       *string  `json:"startedAt"`
+	CompletedAt     *string  `json:"completedAt"`
+	CreatedAt       string   `json:"createdAt"`
+}
+
+type BangumiMatch struct {
+	SeriesID          string `json:"seriesId"`
+	Title             string `json:"title"`
+	OriginalName      string `json:"originalName"`
+	LibraryID         string `json:"libraryId"`
+	LibraryName       string `json:"libraryName"`
+	ProviderType      string `json:"providerType"`
+	WebDAVAccountName string `json:"webdavAccountName,omitempty"`
+	BooksCount        int    `json:"booksCount"`
+	BooksReadCount    int    `json:"booksReadCount"`
+	OneShot           bool   `json:"oneshot"`
+	URL               string `json:"url"`
 }

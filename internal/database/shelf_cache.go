@@ -38,6 +38,7 @@ INSERT OR IGNORE INTO shelf_revision VALUES(1,0,0);`); err != nil {
 		table, revision, update, condition string
 	}{
 		{"libraries", "catalog", " OF enabled,name,provider_type,one_shot", ""},
+		{"union_layers", "catalog", "", ""},
 		{"series", "catalog", "", ""},
 		{"books", "catalog", "", ""},
 		{"series_metadata", "catalog", " OF bgm_subject_id,scrape_status,bgm_score,bgm_rank,status,title,title_sort,publisher,is_nsfw,cover_source,genres_json,tags_json,authors_json,summary,alternate_titles_json,language", ""},
@@ -171,7 +172,7 @@ func (s *Store) SeriesPage(ctx context.Context, q SeriesQuery) ([]Series, int64,
 		!q.IncludeHidden && q.NSFWMode == "" && q.Search == "" && !q.Empty &&
 		len(q.LibraryIDs) <= 1 && len(q.CollectionIDs)+len(q.ReadStatus)+len(q.Tags)+len(q.Genres)+len(q.Statuses)+
 		len(q.Publishers)+len(q.Authors)+len(q.Languages) == 0 && q.OneShot == nil && q.ScrapeStatus == ""
-	if common && len(q.LibraryIDs) == 1 && !s.IsLibraryEnabled(ctx, q.LibraryIDs[0]) {
+	if common && len(q.LibraryIDs) == 1 && !s.IsLibraryVisible(ctx, q.LibraryIDs[0]) {
 		common = false
 	}
 	var r seriesPageResult

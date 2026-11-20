@@ -212,11 +212,59 @@
     return d.toLocaleString('zh-CN', { hour12: false });
   }
 
-  function providerLabel(p) {
+  function providerLabel(p, webdavAccountName = '') {
     switch ((p || '115').toLowerCase()) {
       case 'local': return '本地 / SMB';
-      case 'webdav': return 'WebDAV';
+      case 'webdav': return webdavAccountName ? `WebDAV · ${webdavAccountName}` : 'WebDAV';
+      case 'union': return '联合库';
       default: return '115 网盘';
+    }
+  }
+
+  function libraryByID(libraryID) {
+    if (!libraryID || !Array.isArray(state.libraries)) return null;
+    return state.libraries.find((l) => l.id === libraryID) || null;
+  }
+
+  function librarySourceText(libraryID) {
+    const lib = libraryByID(libraryID);
+    if (!lib) return '';
+    return `${lib.name} · ${providerLabel(lib.providerType, lib.webdavAccountName)}`;
+  }
+
+  async function ensureLibrariesLoaded() {
+    if (Array.isArray(state.libraries) && state.libraries.length > 0) return state.libraries;
+    try {
+      state.libraries = (await api('/api/v1/libraries')) || [];
+    } catch (_) {
+      state.libraries = [];
+    }
+    return state.libraries;
+  }
+
+  const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+  function formatScheduleSummary(sched) {
+    if (!sched || !sched.enabled) return '';
+    const when = sched.frequency === 'weekly'
+      ? `每${WEEKDAY_NAMES[Number(sched.weekday) || 0]} ${sched.timeOfDay || '03:00'}`
+      : `每日 ${sched.timeOfDay || '03:00'}`;
+    const parts = [when];
+    if (sched.autoBangumi) parts.push('Bangumi');
+    if (sched.autoCoverLimit === -1) parts.push('补封面不限');
+    else if (Number(sched.autoCoverLimit) > 0) parts.push(`补封面≤${sched.autoCoverLimit}`);
+    return parts.join(' · ');
+  }
+
+  function pipelineStageLabel(stage) {
+    switch (stage) {
+      case 'queued': return '排队中';
+      case 'scan': return '扫描目录';
+      case 'union_refresh': return '合并联合库';
+      case 'bangumi': return 'Bangumi 刮削';
+      case 'cover': return '补齐封面';
+      case 'done': return '已完成';
+      default: return stage || '—';
     }
   }
 
@@ -421,6 +469,7 @@
     const read = Number(s.booksReadCount || 0);
     const pct = total > 0 ? Math.min(100, Math.round((read / total) * 100)) : 0;
     const score = typeof s.bgmScore === 'number' && s.bgmScore > 0 ? s.bgmScore.toFixed(1) : '';
+    const sourceText = !libraryID ? librarySourceText(s.libraryId) : '';
     return `
       <a href="${mergedWorks() && s.bgmSubjectId && !s.oneshot ? seriesVersionURL(s.id, libraryID) : `/series/${encodeURIComponent(s.id)}`}" data-nav class="poster-card">
         <div class="poster-thumb">
@@ -432,6 +481,7 @@
         <div class="poster-body">
           <div class="poster-title" title="${esc(title)}">${esc(title)}</div>
           <div class="poster-sub" title="${esc(origDiff || `${total} 册`)}">${esc(origDiff || (s.oneshot ? '单本' : `共 ${total} 册`))}</div>
+          ${sourceText ? `<div class="poster-source" title="${esc(sourceText)}">${esc(sourceText)}</div>` : ''}
         </div>
       </a>
     `;
@@ -589,7 +639,7 @@
               ${state.libraries.map((l) => `
                 <a href="/libraries/${encodeURIComponent(l.id)}" data-nav class="lib-pill">
                   <span>${esc(l.name)}</span>
-                  <span class="badge">${esc(providerLabel(l.providerType))}</span>
+                  <span class="badge">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
                   ${l.oneshotsDirectory ? `<span class="badge badge-accent">单本</span>` : ''}
                 </a>
               `).join('')}
@@ -751,7 +801,7 @@
             ${state.libraries.map((l) => `
               <a href="${esc(buildURL({ libraryID: l.id }))}" data-nav class="lib-pill ${libraryID === l.id ? 'active' : ''}">
                 <span>${esc(l.name)}</span>
-                <span class="badge">${esc(providerLabel(l.providerType))}</span>
+                <span class="badge">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
               </a>
             `).join('')}
           </div>
@@ -990,7 +1040,8 @@
 
         <div class="detail-main">
           <div class="detail-badges">
-            <span class="badge">${esc(providerLabel(lib.providerType))}</span>
+            <span class="badge">${esc(lib.name || '书库')}</span>
+            <span class="badge">${esc(providerLabel(lib.providerType, lib.webdavAccountName))}</span>
             <span class="badge">${s.oneshot ? '单本 One-Shot' : `共 ${books.length} 册 · ${esc(detail.totalSize)}`}</span>
             <span class="badge badge-accent">${esc(meta.status || 'ONGOING')}</span>
             ${rawMeta.isNsfw ? `<span class="badge badge-danger">NSFW</span>` : ''}
@@ -1003,7 +1054,11 @@
           <h1>${esc(title)}</h1>
           <div class="detail-orig">
             ${detail.originalName !== title ? `<div>原始目录名：<strong>${esc(detail.originalName)}</strong></div>` : ''}
+            <div>所属书库：<strong>${esc(lib.name || '书库')}</strong>（${esc(providerLabel(lib.providerType, lib.webdavAccountName))}）</div>
             <div>相对路径：${esc(detail.relativePath)}</div>
+            ${Array.isArray(detail.unionSeriesSources) && detail.unionSeriesSources.length > 0
+              ? `<div>联合库来源层（按优先级）：${detail.unionSeriesSources.map((src, i) => `<strong>#${i + 1} ${esc(src.sourceLibraryName)}</strong> (${esc(providerLabel(src.providerType, src.webdavAccountName))})`).join(' → ')}</div>`
+              : ''}
             ${bgmID > 0 ? `<div style="margin-top:2px">提示：部分带受限标签的条目在未登录 <code>bgm.tv</code> 时网页会提示“没有查询您所指定的条目”，登录 Bangumi 账号后即可正常打开。</div>` : ''}
           </div>
 
@@ -1073,6 +1128,9 @@
         <div class="volume-list">
           ${books.map((b) => {
             const ex = extras[b.id] || {};
+            const unionSrcs = Array.isArray(ex.unionSources) ? ex.unionSources : [];
+            const activeSrc = unionSrcs[0] || null;
+            const backupSrcs = unionSrcs.slice(1);
             const rp = b.readProgress;
             const pgCount = (b.media && b.media.pagesCount) || 0;
             const startPg = rp && !rp.completed && rp.page > 0 ? rp.page : 1;
@@ -1087,6 +1145,8 @@
                   </div>
                   <div class="volume-meta">
                     ${stateBadge}
+                    ${activeSrc ? `<span class="badge" title="当前生效读取层">${esc(activeSrc.sourceLibraryName)} · ${esc(providerLabel(activeSrc.providerType, activeSrc.webdavAccountName))}</span>` : ''}
+                    ${backupSrcs.length > 0 ? `<span class="badge" title="备用回退副本：${esc(backupSrcs.map((x) => `${x.sourceLibraryName} (${providerLabel(x.providerType, x.webdavAccountName)}, ${fmtBytes(x.sourceSize)})`).join(' / '))}">+${backupSrcs.length} 备用副本</span>` : ''}
                     <span>${esc(b.size)}</span>
                     <span>${pgCount > 0 ? `${pgCount} 页` : '未建页数索引'}</span>
                     ${ex.indexStatus ? `<span>${esc(ex.indexStatus)}</span>` : ''}
@@ -1552,8 +1612,8 @@
 
       <section class="card">
         <div class="detail-badges">
-          <span class="badge">${esc(providerLabel(detail.providerType))}</span>
           <span class="badge">${esc(detail.libraryName)}</span>
+          <span class="badge">${esc(providerLabel(detail.providerType, detail.webdavAccountName))}</span>
           <span class="badge badge-accent">${esc(detail.archiveType)}</span>
           ${rp && rp.completed
             ? `<span class="badge badge-success">已读完</span>`
@@ -1562,7 +1622,20 @@
               : `<span class="badge">未读</span>`}
         </div>
         <h1 style="margin:6px 0 8px;font-size:22px">${esc(b.name)}</h1>
-        <div class="detail-orig">相对路径：${esc(detail.relativePath)}</div>
+        <div class="detail-orig">
+          <div>所属书库：<strong>${esc(detail.libraryName)}</strong>（${esc(providerLabel(detail.providerType, detail.webdavAccountName))}）</div>
+          <div>相对路径：${esc(detail.relativePath)}</div>
+        </div>
+        ${Array.isArray(detail.unionSources) && detail.unionSources.length > 0 ? `
+          <div class="union-source-box">
+            <div style="font-weight:600">联合库多副本来源（读取失败时按优先级自动回退）</div>
+            ${detail.unionSources.map((src, idx) => `
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
+                <span class="badge ${idx === 0 ? 'badge-success' : ''}">${idx === 0 ? '生效层 #1' : `备用层 #${idx + 1}`}</span>
+                <strong>${esc(src.sourceLibraryName)}</strong>
+                <span style="color:var(--text-muted)">${esc(providerLabel(src.providerType, src.webdavAccountName))} · ${fmtBytes(src.sourceSize)}</span>
+              </div>`).join('')}
+          </div>` : ''}
 
         <div class="detail-cta" style="margin-top:16px">
           <a href="/reader/series/${encodeURIComponent(detail.seriesId)}/book/${encodeURIComponent(bookID)}?page=${startPg}" class="btn btn-primary btn-lg">
@@ -1922,13 +1995,18 @@
   // --- Admin Libraries Tab ---
 
   async function renderAdminLibraries(body) {
-    const [libs, webdavs] = await Promise.all([
+    const [libs, webdavs, schedRes] = await Promise.all([
       api('/admin/api/libraries'),
       api('/admin/api/webdav-accounts'),
+      api('/admin/api/schedules').catch(() => ({ timezone: '', schedules: {} })),
     ]);
     const allLibs = libs || [];
-    const hiddenLibCount = allLibs.filter((l) => !l.enabled).length;
-    const activeLibCount = allLibs.length - hiddenLibCount;
+    const schedulesMap = (schedRes && schedRes.schedules) || {};
+    const serverTZ = (schedRes && schedRes.timezone) || '';
+    const hiddenLibCount = allLibs.filter((l) => !l.enabled && !l.unionParentId).length;
+    const subLibCount = allLibs.filter((l) => Boolean(l.unionParentId)).length;
+    const scannableLibCount = allLibs.filter((l) => l.enabled && l.providerType !== 'union').length;
+    const eligibleForNewUnion = allLibs.filter((l) => l.providerType !== 'union' && !l.unionParentId);
 
     body.innerHTML = `
       <div class="card">
@@ -1940,11 +2018,12 @@
               <option value="115">115 网盘目录</option>
               <option value="local">服务器本地 / SMB 挂载目录</option>
               <option value="webdav">WebDAV 远程目录（CloudDrive2 / OpenList / NAS）</option>
+              <option value="union">联合库（多物理库按优先级分层叠加）</option>
             </select>
           </div>
           <div class="field">
             <label>书库显示名称</label>
-            <input type="text" id="nl-name" placeholder="例如：日漫连载 / 本地珍藏">
+            <input type="text" id="nl-name" placeholder="例如：日漫连载 / 本地珍藏 / 漫画联合库">
           </div>
         </div>
 
@@ -1977,10 +2056,22 @@
           </div>
         </div>
 
+        <div id="nl-union-box" style="display:none;margin-bottom:12px">
+          <div class="field" style="margin-bottom:6px">
+            <label>选择要纳入的物理书库并调整层优先级（#1 优先级最高，同名文件上层覆盖下层，读取失败自动回退下层）</label>
+            <p style="margin:4px 0 8px;font-size:12px;color:var(--text-muted)">
+              物理库纳入联合库后自动成为子库（对前台书架与 Komga 隐藏，保留后台独立扫描）；所选子库的 One-Shots 模式必须一致。
+            </p>
+            ${eligibleForNewUnion.length === 0
+              ? `<div class="empty-box" style="padding:12px">暂无可纳入联合库的空闲物理书库，请先添加物理书库。</div>`
+              : `<div id="nl-union-picker" class="union-layer-list"></div>`}
+          </div>
+        </div>
+
         <div id="nl-browser-drawer" style="display:none;margin-bottom:14px"></div>
 
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
-          <label class="check-row">
+          <label class="check-row" id="nl-oneshot-wrap">
             <input type="checkbox" id="nl-oneshot">
             <span>单本漫画库（One-Shots 模式：每个压缩包独立成为一部作品）</span>
           </label>
@@ -1990,46 +2081,143 @@
 
       <div class="card">
         <div class="section-head">
-          <h3>已配置书库（${allLibs.length}${hiddenLibCount > 0 ? ` · 已隐藏 ${hiddenLibCount}` : ''}）</h3>
-          <button type="button" class="btn btn-sm" id="lib-scan-all" ${activeLibCount === 0 ? 'disabled' : ''}>扫描全部未隐藏书库</button>
+          <h3>已配置书库（${allLibs.length}${subLibCount > 0 ? ` · 含 ${subLibCount} 个联合子库` : ''}${hiddenLibCount > 0 ? ` · 已隐藏 ${hiddenLibCount}` : ''}）</h3>
+          <button type="button" class="btn btn-sm" id="lib-scan-all" ${scannableLibCount === 0 ? 'disabled' : ''}>扫描全部物理书库</button>
         </div>
         ${allLibs.length === 0
           ? `<div class="empty-box">暂无书库。</div>`
           : `<div style="display:grid;gap:12px">
-              ${allLibs.map((l) => `
-                <div style="padding:14px;border-radius:10px;background:var(--bg-elevated);border:1px ${l.enabled ? 'solid' : 'dashed'} var(--border);${l.enabled ? '' : 'opacity:0.74;'}">
+              ${allLibs.map((l) => {
+                const isUnion = l.providerType === 'union';
+                const isSub = Boolean(l.unionParentId);
+                const sched = schedulesMap[l.id];
+                const schedText = formatScheduleSummary(sched);
+                return `
+                <div style="padding:14px;border-radius:10px;background:var(--bg-elevated);border:1px ${l.enabled && !isSub ? 'solid' : 'dashed'} var(--border);${!l.enabled ? 'opacity:0.72;' : ''}">
                   <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-                    <div>
+                    <div style="min-width:0;flex:1">
                       <strong style="font-size:15.5px">${esc(l.name)}</strong>
-                      <span class="badge" style="margin-left:6px">${esc(providerLabel(l.providerType))}</span>
+                      <span class="badge ${isUnion ? 'badge-accent' : ''}" style="margin-left:6px">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
                       ${l.oneShot ? `<span class="badge badge-accent">单本 One-Shots</span>` : ''}
+                      ${isSub ? `<span class="badge">子库 · 归属：${esc(l.unionParentName)} (#${Number(l.unionPriority || 0) + 1})</span>` : ''}
                       ${!l.enabled ? `<span class="badge badge-warn">已隐藏</span>` : ''}
+                      ${schedText ? `<span class="badge badge-success" title="服务器本机时区：${esc(serverTZ || 'Local')}">⏰ ${esc(schedText)}</span>` : ''}
                       <div style="font-size:12px;color:var(--text-muted);margin-top:4px">
-                        定位标识：<code>${esc(l.providerType === '115' ? `CID:${l.rootCid}` : l.rootPath || l.rootCid)}</code>
+                        ${isUnion
+                          ? `叠加层级：${(l.unionLayers || []).map((ly, idx) => `#${idx + 1} ${esc(ly.memberLibraryName)} (${esc(providerLabel(ly.providerType, ly.webdavAccountName))})`).join(' → ') || '无'}`
+                          : `定位标识：<code>${esc(l.providerType === '115' ? `CID:${l.rootCid}` : l.rootPath || l.rootCid)}</code>`}
                         · ${Number(l.seriesCount || 0).toLocaleString()} 系列 · ${Number(l.bookCount ?? l.booksCount ?? 0).toLocaleString()} 册 · ${fmtBytes(l.comicBytes)}
                       </div>
                       <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
-                        ${!l.enabled ? `<span>已隐藏：保留全部数据与缓存，不参与前台书架、客户端与扫描/刮削等其余操作 · </span>` : ''}最近扫描：${esc(l.lastScanStatus || '从未')} ${l.lastScanCompletedAt ? `(${fmtTime(l.lastScanCompletedAt)})` : ''}
+                        ${isSub ? `<span>已自动作为联合库子库：不对前台书架与 Komga 单独暴露，扫库完成后自动刷新所属联合库 · </span>` : ''}
+                        ${!l.enabled ? `<span>已隐藏：保留全部数据与缓存，不参与前台书架、客户端与定时任务 · </span>` : ''}
+                        ${isUnion ? '最近合并' : '最近扫描'}：${esc(l.lastScanStatus || '从未')} ${l.lastScanCompletedAt ? `(${fmtTime(l.lastScanCompletedAt)})` : ''}
                         ${l.lastScanError ? `<span style="color:var(--danger)"> · ${esc(l.lastScanError)}</span>` : ''}
                       </div>
                     </div>
                     <div style="display:flex;flex-wrap:wrap;gap:6px">
-                      ${l.enabled ? `
-                        <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">扫描</button>
-                        <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
-                        <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="${esc(l.providerType)}">补齐首卷封面…</button>
-                        <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
+                      ${isUnion ? `
+                        ${l.enabled ? `
+                          <button type="button" class="btn btn-primary btn-sm" data-lib-union-refresh="${esc(l.id)}">刷新合并</button>
+                          <button type="button" class="btn btn-sm" data-lib-pipeline="${esc(l.id)}">跑流水线</button>
+                          <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
+                          <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
+                          <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="union">补封面…</button>
+                          <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
+                        ` : `
+                          <button type="button" class="btn btn-primary btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="true">取消隐藏</button>
+                        `}
+                        <button type="button" class="btn btn-sm" data-lib-edit-union="${esc(l.id)}">编辑层级</button>
+                        <button type="button" class="btn btn-sm btn-danger" data-lib-del="${esc(l.id)}">删除</button>
+                      ` : isSub ? `
+                        ${l.enabled ? `
+                          <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">独立扫描</button>
+                          <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
+                        ` : ''}
+                        <button type="button" class="btn btn-sm" data-lib-edit='${esc(JSON.stringify(l))}'>编辑</button>
+                        <button type="button" class="btn btn-sm btn-danger" disabled title="请先从所属联合库中移出后再删除">删除</button>
                       ` : `
-                        <button type="button" class="btn btn-primary btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="true">取消隐藏</button>
+                        ${l.enabled ? `
+                          <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">扫描</button>
+                          <button type="button" class="btn btn-sm" data-lib-pipeline="${esc(l.id)}">跑流水线</button>
+                          <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
+                          <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
+                          <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="${esc(l.providerType)}">补齐首卷封面…</button>
+                          <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
+                        ` : `
+                          <button type="button" class="btn btn-primary btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="true">取消隐藏</button>
+                        `}
+                        <button type="button" class="btn btn-sm" data-lib-edit='${esc(JSON.stringify(l))}'>编辑</button>
+                        <button type="button" class="btn btn-sm btn-danger" data-lib-del="${esc(l.id)}">删除</button>
                       `}
-                      <button type="button" class="btn btn-sm" data-lib-edit='${esc(JSON.stringify(l))}'>编辑</button>
-                      <button type="button" class="btn btn-sm btn-danger" data-lib-del="${esc(l.id)}">删除</button>
                     </div>
                   </div>
-                </div>`).join('')}
+                </div>`;
+              }).join('')}
             </div>`}
       </div>
     `;
+
+    // Interactive union layer picker for new union library
+    let newUnionSelected = [];
+    const renderUnionPicker = (containerEl, candidates, selectedIDs, onChange) => {
+      if (!containerEl) return;
+      const byID = new Map(candidates.map((c) => [c.id, c]));
+      const ordered = [
+        ...selectedIDs.filter((id) => byID.has(id)).map((id) => ({ lib: byID.get(id), checked: true })),
+        ...candidates.filter((c) => !selectedIDs.includes(c.id)).map((c) => ({ lib: c, checked: false })),
+      ];
+      const activeIdx = (id) => selectedIDs.indexOf(id);
+      containerEl.innerHTML = ordered.map(({ lib, checked }) => {
+        const idx = activeIdx(lib.id);
+        return `
+          <div class="union-layer-item">
+            <label class="check-row" style="margin:0;flex:1;min-width:0">
+              <input type="checkbox" data-upick-id="${esc(lib.id)}" ${checked ? 'checked' : ''}>
+              <span>${checked ? `<strong>#${idx + 1}</strong> ` : ''}${esc(lib.name)}</span>
+              <span class="badge">${esc(providerLabel(lib.providerType, lib.webdavAccountName))}</span>
+              ${lib.oneShot ? `<span class="badge badge-accent">单本</span>` : ''}
+            </label>
+            ${checked ? `
+              <div style="display:flex;gap:4px">
+                <button type="button" class="btn btn-sm" data-upick-move="${esc(lib.id)}" data-dir="-1" ${idx === 0 ? 'disabled' : ''}>↑</button>
+                <button type="button" class="btn btn-sm" data-upick-move="${esc(lib.id)}" data-dir="1" ${idx === selectedIDs.length - 1 ? 'disabled' : ''}>↓</button>
+              </div>` : ''}
+          </div>`;
+      }).join('');
+      containerEl.querySelectorAll('input[data-upick-id]').forEach((cb) => {
+        cb.onchange = () => {
+          const id = cb.getAttribute('data-upick-id');
+          let next = selectedIDs.slice();
+          if (cb.checked) {
+            if (!next.includes(id)) next.push(id);
+          } else {
+            next = next.filter((x) => x !== id);
+          }
+          onChange(next);
+        };
+      });
+      containerEl.querySelectorAll('button[data-upick-move]').forEach((btn) => {
+        btn.onclick = () => {
+          const id = btn.getAttribute('data-upick-move');
+          const dir = Number(btn.getAttribute('data-dir'));
+          const idx = selectedIDs.indexOf(id);
+          const swap = idx + dir;
+          if (idx < 0 || swap < 0 || swap >= selectedIDs.length) return;
+          const next = selectedIDs.slice();
+          [next[idx], next[swap]] = [next[swap], next[idx]];
+          onChange(next);
+        };
+      });
+    };
+
+    const refreshNewUnionPicker = () => {
+      renderUnionPicker(document.getElementById('nl-union-picker'), eligibleForNewUnion, newUnionSelected, (next) => {
+        newUnionSelected = next;
+        refreshNewUnionPicker();
+      });
+    };
+    refreshNewUnionPicker();
 
     const provSel = document.getElementById('nl-provider');
     provSel.onchange = () => {
@@ -2037,6 +2225,8 @@
       document.getElementById('nl-115-box').style.display = v === '115' ? '' : 'none';
       document.getElementById('nl-local-box').style.display = v === 'local' ? '' : 'none';
       document.getElementById('nl-webdav-box').style.display = v === 'webdav' ? '' : 'none';
+      document.getElementById('nl-union-box').style.display = v === 'union' ? '' : 'none';
+      document.getElementById('nl-oneshot-wrap').style.display = v === 'union' ? 'none' : '';
       document.getElementById('nl-browser-drawer').style.display = 'none';
     };
 
@@ -2072,10 +2262,18 @@
       else if (providerType === 'webdav') {
         payload.webdavAccountId = document.getElementById('nl-wd-account').value;
         payload.rootPath = document.getElementById('nl-wd-path').value.trim() || '/';
+      } else if (providerType === 'union') {
+        if (newUnionSelected.length === 0) { toast('请至少选择一个物理书库加入联合库', 'error'); return; }
+        payload.memberLibraryIds = newUnionSelected;
       }
       try {
-        await api('/admin/api/libraries', { method: 'POST', body: payload });
-        toast('书库已创建');
+        const res = await api('/admin/api/libraries', { method: 'POST', body: payload });
+        state.libraries = [];
+        if (providerType === 'union' && res && res.stats) {
+          toast(`联合库已创建并完成合并（${res.stats.seriesCount} 部 / ${res.stats.booksCount} 册）`);
+        } else {
+          toast('书库已创建');
+        }
         renderAdminLibraries(body);
       } catch (err) { toast(err.message, 'error'); }
     };
@@ -2083,10 +2281,199 @@
     document.getElementById('lib-scan-all').onclick = async () => {
       try {
         await api('/admin/api/scans', { method: 'POST', body: {} });
-        toast('已启动全部未隐藏书库扫描');
+        toast('已启动全部物理书库扫描');
         navigate('/admin?tab=jobs');
       } catch (err) { toast(err.message, 'error'); }
     };
+
+    body.querySelectorAll('button[data-lib-union-refresh]').forEach((btn) => {
+      btn.onclick = async () => {
+        const libID = btn.getAttribute('data-lib-union-refresh');
+        btn.disabled = true;
+        try {
+          const res = await api(`/admin/api/libraries/${encodeURIComponent(libID)}/union-refresh`, { method: 'POST' });
+          state.libraries = [];
+          const st = (res && res.stats) || {};
+          toast(`联合库合并完成：${st.seriesCount || 0} 部 / ${st.booksCount || 0} 册`);
+          renderAdminLibraries(body);
+        } catch (err) {
+          btn.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    });
+
+    body.querySelectorAll('button[data-lib-pipeline]').forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          await api('/admin/api/pipelines', { method: 'POST', body: { libraryId: btn.getAttribute('data-lib-pipeline') } });
+          toast('自动化流水线已启动');
+          navigate('/admin?tab=jobs');
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    });
+
+    body.querySelectorAll('button[data-lib-schedule]').forEach((btn) => {
+      btn.onclick = () => {
+        const libID = btn.getAttribute('data-lib-schedule');
+        const lib = allLibs.find((x) => x.id === libID);
+        if (!lib) return;
+        const existing = schedulesMap[libID] || {
+          libraryId: libID,
+          enabled: false,
+          frequency: 'daily',
+          weekday: 0,
+          timeOfDay: '03:00',
+          scanMemberLibraryIds: lib.providerType === 'union'
+            ? (lib.unionLayers || []).filter((ly) => ly.providerType === 'local').map((ly) => ly.memberLibraryId)
+            : [],
+          autoBangumi: true,
+          autoCoverLimit: 0,
+        };
+        const isUnion = lib.providerType === 'union';
+        const isSub = Boolean(lib.unionParentId);
+        const allowUnlimitedCover = lib.providerType === 'local' || isUnion;
+        openModal({
+          title: `定时自动化流水线 · ${lib.name}`,
+          maxWidth: '520px',
+          bodyHTML: `
+            <p style="margin:0 0 12px;font-size:12.5px;color:var(--text-muted)">
+              按服务器本机时区（${esc(serverTZ || 'Local')}）触发。${isSub ? '该库为联合库子库：定时扫库成功后自动刷新所属联合库。' : '若未准备 Bangumi 离线库，将自动跳过 Bangumi 刮削与补封面；任一扫库失败则中止后续步骤。'}
+            </p>
+            <div class="field">
+              <label class="check-row"><input type="checkbox" id="sch-enabled" ${existing.enabled ? 'checked' : ''}><span>启用定时自动化流水线</span></label>
+            </div>
+            <div class="grid-2">
+              <div class="field">
+                <label>执行频率</label>
+                <select id="sch-freq">
+                  <option value="daily" ${existing.frequency !== 'weekly' ? 'selected' : ''}>每日固定时间</option>
+                  <option value="weekly" ${existing.frequency === 'weekly' ? 'selected' : ''}>每周固定时间</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>触发时间（24 小时制）</label>
+                <input type="time" id="sch-time" value="${esc(existing.timeOfDay || '03:00')}" required>
+              </div>
+            </div>
+            <div class="field" id="sch-weekday-wrap" style="${existing.frequency === 'weekly' ? '' : 'display:none'}">
+              <label>每周触发星期</label>
+              <select id="sch-weekday">
+                ${WEEKDAY_NAMES.map((name, idx) => `<option value="${idx}" ${Number(existing.weekday) === idx ? 'selected' : ''}>${name}</option>`).join('')}
+              </select>
+            </div>
+            ${isUnion ? `
+              <div class="field">
+                <label>定时触发前需要扫描的子库（可只勾选最上层本地/SMB 库）</label>
+                <div class="union-layer-list">
+                  ${(lib.unionLayers || []).map((ly, idx) => `
+                    <label class="union-layer-item" style="cursor:pointer;justify-content:flex-start">
+                      <input type="checkbox" class="sch-member-cb" value="${esc(ly.memberLibraryId)}" ${(existing.scanMemberLibraryIds || []).includes(ly.memberLibraryId) ? 'checked' : ''}>
+                      <span><strong>#${idx + 1}</strong> ${esc(ly.memberLibraryName)}</span>
+                      <span class="badge">${esc(providerLabel(ly.providerType, ly.webdavAccountName))}</span>
+                    </label>`).join('')}
+                </div>
+              </div>` : ''}
+            ${!isSub ? `
+              <div class="field">
+                <label class="check-row"><input type="checkbox" id="sch-bgm" ${existing.autoBangumi !== false ? 'checked' : ''}><span>扫库/合并完成后执行 Bangumi 增量刮削</span></label>
+              </div>
+              <div class="field">
+                <label>未匹配 Bangumi 且缺封面作品的自动补封面上限（默认 0 = 不自动补封面）</label>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                  <input type="number" id="sch-cover-limit" min="0" max="10000" value="${existing.autoCoverLimit < 0 ? 0 : Number(existing.autoCoverLimit || 0)}" style="max-width:140px" ${existing.autoCoverLimit === -1 ? 'disabled' : ''}>
+                  ${allowUnlimitedCover ? `<label class="check-row" style="margin:0"><input type="checkbox" id="sch-cover-unlimited" ${existing.autoCoverLimit === -1 ? 'checked' : ''}><span>不限数量</span></label>` : ''}
+                </div>
+              </div>` : ''}
+          `,
+          footHTML: `<button type="button" class="btn btn-primary" id="sch-save">保存定时配置</button>`,
+          onMount: () => {
+            const freqSel = document.getElementById('sch-freq');
+            const wdWrap = document.getElementById('sch-weekday-wrap');
+            freqSel.onchange = () => { wdWrap.style.display = freqSel.value === 'weekly' ? '' : 'none'; };
+            const unlim = document.getElementById('sch-cover-unlimited');
+            const limInput = document.getElementById('sch-cover-limit');
+            if (unlim && limInput) {
+              unlim.onchange = () => { limInput.disabled = unlim.checked; };
+            }
+            document.getElementById('sch-save').onclick = async () => {
+              let coverLimit = 0;
+              if (!isSub) {
+                if (unlim && unlim.checked) coverLimit = -1;
+                else coverLimit = Math.max(0, Number(limInput ? limInput.value : 0) || 0);
+              }
+              const memberIDs = isUnion
+                ? Array.from(document.querySelectorAll('.sch-member-cb:checked')).map((el) => el.value)
+                : [];
+              try {
+                await api(`/admin/api/libraries/${encodeURIComponent(libID)}/schedule`, {
+                  method: 'PUT',
+                  body: {
+                    enabled: document.getElementById('sch-enabled').checked,
+                    frequency: freqSel.value,
+                    weekday: Number(document.getElementById('sch-weekday').value || 0),
+                    timeOfDay: document.getElementById('sch-time').value || '03:00',
+                    scanMemberLibraryIds: memberIDs,
+                    autoBangumi: isSub ? false : document.getElementById('sch-bgm').checked,
+                    autoCoverLimit: coverLimit,
+                  },
+                });
+                toast('定时流水线配置已保存');
+                closeModal();
+                renderAdminLibraries(body);
+              } catch (err) { toast(err.message, 'error'); }
+            };
+          },
+        });
+      };
+    });
+
+    body.querySelectorAll('button[data-lib-edit-union]').forEach((btn) => {
+      btn.onclick = () => {
+        const libID = btn.getAttribute('data-lib-edit-union');
+        const lib = allLibs.find((x) => x.id === libID);
+        if (!lib) return;
+        const candidates = allLibs.filter((x) => x.providerType !== 'union' && (!x.unionParentId || x.unionParentId === libID));
+        let selected = (lib.unionLayers || []).map((ly) => ly.memberLibraryId);
+        openModal({
+          title: `编辑联合库 · ${lib.name}`,
+          maxWidth: '520px',
+          bodyHTML: `
+            <div class="field"><label>联合库名称</label><input type="text" id="eu-name" value="${esc(lib.name)}"></div>
+            <div class="field"><label class="check-row"><input type="checkbox" id="eu-hidden" ${!lib.enabled ? 'checked' : ''}><span>隐藏此联合库</span></label></div>
+            <div class="field">
+              <label>成员物理库与层优先级（#1 最高；移出后原物理库自动恢复独立显示）</label>
+              <div id="eu-picker" class="union-layer-list"></div>
+            </div>
+          `,
+          footHTML: `<button type="button" class="btn btn-primary" id="eu-save">保存并重新合并</button>`,
+          onMount: () => {
+            const paint = () => renderUnionPicker(document.getElementById('eu-picker'), candidates, selected, (next) => {
+              selected = next;
+              paint();
+            });
+            paint();
+            document.getElementById('eu-save').onclick = async () => {
+              if (selected.length === 0) { toast('联合库至少需要保留一个物理子库', 'error'); return; }
+              try {
+                await api(`/admin/api/libraries/${encodeURIComponent(libID)}`, {
+                  method: 'PUT',
+                  body: {
+                    name: document.getElementById('eu-name').value.trim(),
+                    enabled: !document.getElementById('eu-hidden').checked,
+                    memberLibraryIds: selected,
+                  },
+                });
+                state.libraries = [];
+                toast('联合库已更新并完成重新合并');
+                closeModal();
+                renderAdminLibraries(body);
+              } catch (err) { toast(err.message, 'error'); }
+            };
+          },
+        });
+      };
+    });
 
     body.querySelectorAll('button[data-lib-toggle-hide]').forEach((btn) => {
       btn.onclick = async () => {
@@ -2099,6 +2486,7 @@
             method: 'PUT',
             body: { enabled: nextEnabled },
           });
+          state.libraries = [];
           toast(nextEnabled
             ? `已恢复显示书库「${libName}」`
             : `已隐藏书库「${libName}」（数据完整保留，相关运行中任务已自动中止）`);
@@ -2177,7 +2565,7 @@
           bodyHTML: `
             <div class="field"><label>书库名称</label><input type="text" id="el-name" value="${esc(l.name)}"></div>
             <div class="field"><label class="check-row"><input type="checkbox" id="el-hidden" ${!l.enabled ? 'checked' : ''}><span>隐藏此书库（保留全部数据，不参与展示、客户端、扫描与刮削等其余操作）</span></label></div>
-            <div class="field"><label class="check-row"><input type="checkbox" id="el-oneshot" ${l.oneShot ? 'checked' : ''}><span>One-Shots 单本漫画库模式（修改后需重扫）</span></label></div>
+            <div class="field"><label class="check-row"><input type="checkbox" id="el-oneshot" ${l.oneShot ? 'checked' : ''} ${l.unionParentId ? 'disabled' : ''}><span>One-Shots 单本漫画库模式（修改后需重扫${l.unionParentId ? '；联合子库需先移出联合库再改' : ''}）</span></label></div>
           `,
           footHTML: `<button type="button" class="btn btn-primary" id="el-save">保存</button>`,
           onMount: () => {
@@ -2191,6 +2579,7 @@
                     oneShot: document.getElementById('el-oneshot').checked,
                   },
                 });
+                state.libraries = [];
                 toast('书库配置已更新');
                 closeModal();
                 renderAdminLibraries(body);
@@ -2202,9 +2591,10 @@
     });
     body.querySelectorAll('button[data-lib-del]').forEach((btn) => {
       btn.onclick = async () => {
-        if (!confirm('确认删除该书库及其索引记录？（不会删除网盘或磁盘上的原始文件）')) return;
+        if (!confirm('确认删除该书库及其索引记录？（不会删除网盘或磁盘上的原始文件；若删除联合库，其物理子库会自动恢复独立显示）')) return;
         try {
           await api(`/admin/api/libraries/${encodeURIComponent(btn.getAttribute('data-lib-del'))}`, { method: 'DELETE' });
+          state.libraries = [];
           toast('书库已删除');
           renderAdminLibraries(body);
         } catch (err) { toast(err.message, 'error'); }
@@ -2428,7 +2818,7 @@
             <label>选择目标书库</label>
             <select id="bgm-batch-lib">
               <option value="">全部未隐藏书库</option>
-              ${(libs || []).filter((l) => l.enabled !== false).map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('')}
+              ${(libs || []).filter((l) => l.enabled !== false && !l.unionParentId).map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('')}
             </select>
           </div>
           <div class="field">
@@ -2440,6 +2830,21 @@
             </select>
           </div>
           <button type="button" class="btn btn-bgm" id="bgm-batch-start">开始批量刮削</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>油猴脚本（Bangumi 条目页一键跳转本库）</h3>
+        <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary);line-height:1.6">
+          支持在 <code>bgm.tv</code> / <code>bangumi.tv</code> / <code>chii.in</code> 条目页自动探测本库收录状态并一键直达作品（多版本时自动展开版本切换栏）。
+          无需安装浏览器扩展，使用 Tampermonkey / Violentmonkey 导入即可。
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <button type="button" class="btn btn-primary btn-sm" id="bgm-us-download-key">一键生成专用 API Key 并下载已配置脚本（推荐）</button>
+          <a class="btn btn-sm" href="/admin/api/bangumi/userscript.user.js" target="_blank" rel="noopener noreferrer">安装 / 下载基础脚本（手动配置 Key）</a>
+        </div>
+        <div id="bgm-us-status" style="margin-top:8px;font-size:12px;color:var(--text-muted)">
+          直达跳转地址格式：<code>${esc(location.origin)}/bgm/&lt;subjectId&gt;</code> · 自动探测接口：<code>/api/v1/bangumi/lookup?subject_id=&lt;id&gt;</code>
         </div>
       </div>
 
@@ -2570,6 +2975,46 @@
         renderAdminBangumi(body);
       } catch (err) { toast(err.message, 'error'); }
     };
+    const usKeyBtn = document.getElementById('bgm-us-download-key');
+    if (usKeyBtn) {
+      usKeyBtn.onclick = async () => {
+        usKeyBtn.disabled = true;
+        try {
+          const [keyRes, scriptResp] = await Promise.all([
+            api('/admin/api/auth/api-keys', { method: 'POST', body: { name: `Bangumi 油猴脚本 (${new Date().toISOString().slice(0, 10)})` } }),
+            fetch('/admin/api/bangumi/userscript.user.js', { credentials: 'same-origin' }),
+          ]);
+          if (!scriptResp.ok) throw new Error('拉取油猴脚本模板失败');
+          const rawKey = String((keyRes && (keyRes.key || keyRes.apiKey)) || '').trim();
+          if (!rawKey) throw new Error('生成 API Key 失败');
+          const safeKey = rawKey.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+          const template = await scriptResp.text();
+          const finalScript = template.replace(
+            /const DEFAULT_API_KEY = '[^']*';/,
+            `const DEFAULT_API_KEY = '${safeKey}';`,
+          );
+          const blob = new Blob([finalScript], { type: 'text/javascript;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'mangaalpha-bangumi.user.js';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 4000);
+          const st = document.getElementById('bgm-us-status');
+          if (st) {
+            st.innerHTML = `<span style="color:var(--success)">✅ 已生成专用 API Key 并下载 <code>mangaalpha-bangumi.user.js</code>（已自动填入当前服务器地址与 Key，拖入油猴扩展即可使用；密钥可在「安全」页随时吊销）。</span>`;
+          }
+          toast('已下载预配置油猴脚本');
+        } catch (err) {
+          toast(err.message, 'error');
+        } finally {
+          usKeyBtn.disabled = false;
+        }
+      };
+    }
+
     document.getElementById('bgm-refresh-btn').onclick = () => renderAdminBangumi(body);
     body.querySelectorAll('button[data-cancel-bgm-run]').forEach((btn) => {
       btn.onclick = async () => {
@@ -2594,17 +3039,18 @@
   // --- Admin Jobs Tab (Adaptive Polling ONLY when active!) ---
 
   async function renderAdminJobs(body) {
-    const [scans, covers, maints] = await Promise.all([
+    const [pipelines, scans, covers, maints] = await Promise.all([
+      api('/admin/api/pipelines?limit=20').catch(() => []),
       api('/admin/api/scans?limit=25'),
       api('/admin/api/cover-jobs?limit=20'),
       api('/admin/api/maintenance-jobs?limit=20'),
     ]);
-    paintAdminJobs(body, scans || [], covers || [], maints || []);
+    paintAdminJobs(body, pipelines || [], scans || [], covers || [], maints || []);
   }
 
-  function paintAdminJobs(body, scans, covers, maints) {
+  function paintAdminJobs(body, pipelines, scans, covers, maints) {
     const isActive = (r) => r.status === 'queued' || r.status === 'running';
-    const anyActive = scans.some(isActive) || covers.some(isActive) || maints.some(isActive);
+    const anyActive = pipelines.some(isActive) || scans.some(isActive) || covers.some(isActive) || maints.some(isActive);
 
     body.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
@@ -2612,6 +3058,29 @@
           ${anyActive ? '⚡ 检测到运行中任务，正在自动同步进度…' : '当前无运行中任务（空闲时不会后台轮询刷屏）'}
         </span>
         <button type="button" class="btn btn-sm" id="jobs-refresh-btn">手动刷新</button>
+      </div>
+
+      <div class="card">
+        <h3>自动化流水线任务（定时 / 手动）</h3>
+        ${pipelines.length === 0 ? `<div class="empty-box">暂无流水线运行记录。</div>` : `
+          <div class="table-wrap"><table class="data-table">
+            <thead><tr><th>书库</th><th>触发</th><th>阶段</th><th>状态</th><th>摘要 / 错误</th><th>开始时间</th><th>操作</th></tr></thead>
+            <tbody>
+              ${pipelines.map((p) => `
+                <tr>
+                  <td><strong>${esc(p.libraryName || p.libraryId)}</strong></td>
+                  <td><span class="badge">${esc(p.triggerType === 'scheduled' ? '定时' : '手动')}</span></td>
+                  <td><span class="badge">${esc(pipelineStageLabel(p.stage))}</span></td>
+                  <td><span class="badge ${p.status === 'success' ? 'badge-success' : p.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(p.status)}</span></td>
+                  <td style="font-size:12px">
+                    ${p.summary ? `<div>${esc(p.summary)}</div>` : ''}
+                    ${p.error ? `<div style="color:var(--danger)">${esc(p.error)}</div>` : ''}
+                  </td>
+                  <td>${fmtTime(p.startedAt || p.createdAt)}</td>
+                  <td>${isActive(p) ? `<button type="button" class="btn btn-sm btn-danger" data-cancel-pipeline="${esc(p.id)}">取消</button>` : ''}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table></div>`}
       </div>
 
       <div class="card">
@@ -2659,6 +3128,12 @@
     `;
 
     document.getElementById('jobs-refresh-btn').onclick = () => renderAdminJobs(body);
+    body.querySelectorAll('button[data-cancel-pipeline]').forEach((btn) => {
+      btn.onclick = async () => {
+        try { await api(`/admin/api/pipelines/${encodeURIComponent(btn.getAttribute('data-cancel-pipeline'))}/cancel`, { method: 'POST' }); renderAdminJobs(body); }
+        catch (err) { toast(err.message, 'error'); }
+      };
+    });
     body.querySelectorAll('button[data-cancel-scan]').forEach((btn) => {
       btn.onclick = async () => {
         try { await api(`/admin/api/scans/${encodeURIComponent(btn.getAttribute('data-cancel-scan'))}/cancel`, { method: 'POST' }); renderAdminJobs(body); }
@@ -2742,14 +3217,12 @@
           <div class="field"><label>向后预读页数 (page_prefetch_count)</label><input type="number" name="page_prefetch_count" value="${esc(settings.page_prefetch_count || '2')}"></div>
           <div class="field"><label>单页最大允许体积 (MiB)</label><input type="number" step="1" min="1" name="max_page_size_mib" value="${esc(bytesToMiBInput(settings.max_page_size, 50))}"></div>
           <div class="field"><label>下一卷索引预热阈值（剩余页数 1-100）</label><input type="number" name="volume_index_prefetch_remaining_pages" value="${esc(settings.volume_index_prefetch_remaining_pages || '10')}"></div>
-          <div class="field"><label>定时自动扫描间隔（分钟）</label><input type="number" name="auto_scan_interval_minutes" value="${esc(settings.auto_scan_interval_minutes || '360')}"></div>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:18px;margin:10px 0 16px">
           <label class="check-row"><input type="checkbox" name="show_nsfw" ${settings.show_nsfw === 'true' ? 'checked' : ''}><span>显示 NSFW 作品（默认隐藏）</span></label>
           <label class="check-row"><input type="checkbox" name="volume_index_prefetch_enabled" ${settings.volume_index_prefetch_enabled === 'true' ? 'checked' : ''}><span>启用下一卷目录索引自动预热</span></label>
-          <label class="check-row"><input type="checkbox" name="auto_scan_enabled" ${settings.auto_scan_enabled === 'true' ? 'checked' : ''}><span>启用定时自动扫描</span></label>
-          <label class="check-row"><input type="checkbox" name="scan_on_startup" ${settings.scan_on_startup === 'true' ? 'checked' : ''}><span>进程启动时自动扫描</span></label>
         </div>
+        <p style="margin:0 0 14px;font-size:12px;color:var(--text-muted)">定时扫库、Bangumi 刮削与自动补封面已迁移至「书库管理」中的单库/联合库「定时…」流水线配置。</p>
         <button type="submit" class="btn btn-primary">保存系统设置</button>
       </form>
     `;
@@ -2771,7 +3244,7 @@
       e.preventDefault();
       const fd = new FormData(e.target);
       const payload = {};
-      ['api_rate_per_second', 'downurl_ttl_seconds', 'page_prefetch_count', 'volume_index_prefetch_remaining_pages', 'auto_scan_interval_minutes']
+      ['api_rate_per_second', 'downurl_ttl_seconds', 'page_prefetch_count', 'volume_index_prefetch_remaining_pages']
         .forEach((k) => { payload[k] = String(fd.get(k) || '').trim(); });
       const mibPairs = [
         ['range_block_size', 'range_block_size_mib', 'Range 分块大小'],
@@ -2787,7 +3260,7 @@
         }
         payload[byteKey] = converted;
       }
-      ['show_nsfw', 'volume_index_prefetch_enabled', 'auto_scan_enabled', 'scan_on_startup']
+      ['show_nsfw', 'volume_index_prefetch_enabled']
         .forEach((k) => { payload[k] = e.target.elements[k].checked ? 'true' : 'false'; });
       try {
         await api('/admin/api/settings', { method: 'PUT', body: payload });
@@ -3348,6 +3821,7 @@
       const [col, seriesPage] = await Promise.all([
         api(`/api/v1/collections/${encodeURIComponent(collectionID)}`),
         api(`/api/v1/collections/${encodeURIComponent(collectionID)}/series?unpaged=true`),
+        ensureLibrariesLoaded(),
       ]);
       if (seq !== routeSeq) return;
       const items = (seriesPage && seriesPage.content) || [];
@@ -3400,6 +3874,7 @@
                       <div class="poster-body">
                         <div class="poster-title" title="${esc(title)}">${esc(title)}</div>
                         <div class="poster-sub">${s.oneshot ? '单本' : `共 ${total} 册`}</div>
+                        ${librarySourceText(s.libraryId) ? `<div class="poster-source" title="${esc(librarySourceText(s.libraryId))}">${esc(librarySourceText(s.libraryId))}</div>` : ''}
                       </div>
                     </a>
                     <div class="org-card-actions">
@@ -3532,6 +4007,7 @@
       const [rl, booksPage] = await Promise.all([
         api(`/api/v1/readlists/${encodeURIComponent(readListID)}`),
         api(`/api/v1/readlists/${encodeURIComponent(readListID)}/books?unpaged=true`),
+        ensureLibrariesLoaded(),
       ]);
       if (seq !== routeSeq) return;
       const books = (booksPage && booksPage.content) || [];
@@ -3585,6 +4061,7 @@
                       </div>
                       <div class="volume-meta">
                         ${stateBadge}
+                        ${librarySourceText(b.libraryId) ? `<span class="badge">${esc(librarySourceText(b.libraryId))}</span>` : ''}
                         <a href="/series/${encodeURIComponent(b.seriesId)}" data-nav style="color:var(--accent)">${esc(b.seriesTitle || '查看系列')}</a>
                         <span>${esc(b.size || '')}</span>
                       </div>

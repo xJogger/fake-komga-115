@@ -29,30 +29,32 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
+	"github.com/xJogger/fake-komga-115/internal/pipeline"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
-//go:embed static/web_*.html static/web.css static/ui static/reader_dist
+//go:embed static/web_*.html static/web.css static/ui static/reader_dist static/mangaalpha-bangumi.user.js
 var staticFiles embed.FS
 
 type Server struct {
-	store   *database.Store
-	client  *oneonefive.Client
-	webdav  *webdav.Manager
-	bangumi *bangumi.Service
-	scanner *scanner.Manager
-	cache   *cache.Manager
-	archive *archive.Service
-	thumbs  *thumbnail.Service
-	covers  *thumbnail.BatchManager
-	tasks   *maintenance.Manager
-	logger  *slog.Logger
-	router  chi.Router
-	web     *template.Template
-	runtime RuntimeInfo
-	sse     *sseHub
+	store     *database.Store
+	client    *oneonefive.Client
+	webdav    *webdav.Manager
+	bangumi   *bangumi.Service
+	scanner   *scanner.Manager
+	pipelines *pipeline.Manager
+	cache     *cache.Manager
+	archive   *archive.Service
+	thumbs    *thumbnail.Service
+	covers    *thumbnail.BatchManager
+	tasks     *maintenance.Manager
+	logger    *slog.Logger
+	router    chi.Router
+	web       *template.Template
+	runtime   RuntimeInfo
+	sse       *sseHub
 
 	placeholder []byte
 }
@@ -97,6 +99,13 @@ func (s *Server) WithServices(webdavManager *webdav.Manager, bangumiService *ban
 	return s
 }
 
+func (s *Server) WithPipeline(pipelineManager *pipeline.Manager) *Server {
+	if pipelineManager != nil {
+		s.pipelines = pipelineManager
+	}
+	return s
+}
+
 func (s *Server) Handler() http.Handler { return s.router }
 
 func (s *Server) routes() chi.Router {
@@ -124,6 +133,7 @@ func (s *Server) routes() chi.Router {
 	r.Get("/series/{seriesID}", s.serveSeriesPageOrSPA)
 	r.Get("/book/{bookID}", s.serveBookPageOrSPA)
 	r.Get("/books/{bookID}", s.serveBookPageOrSPA)
+	r.Get("/bgm/{subjectID}", s.serveBangumiJump)
 	r.Get("/admin", s.serveSPA)
 	r.Get("/admin/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin", http.StatusTemporaryRedirect)
@@ -178,7 +188,7 @@ func (s *Server) serveLibraryPageOrSPA(w http.ResponseWriter, r *http.Request) {
 		s.renderWebError(w, err)
 		return
 	}
-	if !lib.Enabled {
+	if !lib.Enabled || lib.UnionParentID != "" {
 		s.renderNotFound(w)
 		return
 	}

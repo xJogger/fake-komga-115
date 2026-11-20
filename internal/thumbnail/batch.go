@@ -160,7 +160,7 @@ func (m *BatchManager) start(ctx context.Context, libraryID string, all bool, li
 	if err != nil {
 		return BatchRun{}, err
 	}
-	if !lib.Enabled {
+	if !lib.Enabled || lib.UnionParentID != "" {
 		return BatchRun{}, ErrLibraryHidden
 	}
 	if all {
@@ -354,7 +354,7 @@ func (m *BatchManager) execute(item batchJob) {
 	if err != nil {
 		return
 	}
-	if run.CancelRequested || !m.store.IsLibraryEnabled(ctx, item.libraryID) {
+	if run.CancelRequested || !m.store.IsLibraryVisible(ctx, item.libraryID) {
 		m.finish(item, run, "canceled")
 		return
 	}

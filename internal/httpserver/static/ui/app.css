@@ -1436,3 +1436,41 @@ table.data-table th {
     justify-content: flex-end;
   }
 }
+
+.poster-source {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.union-source-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  display: grid;
+  gap: 6px;
+}
+
+.union-layer-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.union-layer-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
