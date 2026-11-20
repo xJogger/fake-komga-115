@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 func applyMigrations(db *sql.DB) error {
@@ -58,6 +59,9 @@ func applyMigrations(db *sql.DB) error {
 		}
 	}
 	if err := ensurePerformanceIndexes(db); err != nil {
+		return err
+	}
+	if err := ensureShelfRevisionTable(db); err != nil {
 		return err
 	}
 	if err := ensureSeriesRollups(db); err != nil {
@@ -141,6 +145,13 @@ func ensurePerformanceIndexes(db *sql.DB) error {
 		return err
 	} else if exists {
 		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_books_library_size ON books(library_id, size)`); err != nil {
+			return err
+		}
+	}
+	if exists, err := tableExists(db, "series_thumbnails"); err != nil {
+		return err
+	} else if exists {
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_thumbnails_source_book ON series_thumbnails(source_book_id)`); err != nil {
 			return err
 		}
 	}
@@ -247,9 +258,8 @@ CREATE TABLE IF NOT EXISTS union_series_sources (
   source_library_id TEXT NOT NULL,
   PRIMARY KEY(union_series_id, priority),
   FOREIGN KEY(union_series_id) REFERENCES series(id) ON DELETE CASCADE,
-  FOREIGN KEY(source_series_id) REFERENCES series(id) ON DELETE CASCADE,
-  FOREIGN KEY(source_library_id) REFERENCES libraries(id) ON DELETE CASCADE
-);
+  FOREIGN KEY(source_series_id) REFERENCES series(id) ON DELETE CASCADE
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_union_series_sources_src ON union_series_sources(source_series_id);
 
 CREATE TABLE IF NOT EXISTS union_book_sources (
@@ -260,9 +270,8 @@ CREATE TABLE IF NOT EXISTS union_book_sources (
   source_size INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(union_book_id, priority),
   FOREIGN KEY(union_book_id) REFERENCES books(id) ON DELETE CASCADE,
-  FOREIGN KEY(source_book_id) REFERENCES books(id) ON DELETE CASCADE,
-  FOREIGN KEY(source_library_id) REFERENCES libraries(id) ON DELETE CASCADE
-);
+  FOREIGN KEY(source_book_id) REFERENCES books(id) ON DELETE CASCADE
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_union_book_sources_src ON union_book_sources(source_book_id);
 
 CREATE TABLE IF NOT EXISTS library_schedules (
@@ -307,11 +316,32 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_runs_lib ON pipeline_runs(library_id, cr
 	return nil
 }
 
+func triggerHasBulkGuard(db *sql.DB, name string) bool {
+	var def string
+	if err := db.QueryRow(`SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='trigger' AND name=?`, name).Scan(&def); err != nil {
+		return false
+	}
+	return strings.Contains(def, "bulk_mode")
+}
+
 func ensureSeriesRollups(db *sql.DB) error {
+	if !triggerHasBulkGuard(db, "fk115_books_rollup_upd") {
+		for _, name := range []string{
+			"fk115_series_rollup_ins",
+			"fk115_series_rollup_upd",
+			"fk115_books_rollup_ins",
+			"fk115_books_rollup_del",
+			"fk115_books_rollup_upd",
+		} {
+			if _, err := db.Exec("DROP TRIGGER IF EXISTS " + name); err != nil {
+				return err
+			}
+		}
+	}
 	triggers := []string{
 		`CREATE TRIGGER IF NOT EXISTS fk115_series_rollup_ins
 AFTER INSERT ON series
-WHEN NEW.sort_modified_at='' OR NEW.sort_created_at=''
+WHEN (NEW.sort_modified_at='' OR NEW.sort_created_at='') AND (SELECT bulk_mode FROM shelf_revision WHERE id=1)=0
 BEGIN
   UPDATE series
   SET sort_modified_at=COALESCE(NULLIF(latest_book_modified_at,''), NULLIF(file_modified_at,''), updated_at),
@@ -320,6 +350,8 @@ BEGIN
 END`,
 		`CREATE TRIGGER IF NOT EXISTS fk115_series_rollup_upd
 AFTER UPDATE OF file_modified_at, updated_at, created_at ON series
+WHEN (OLD.file_modified_at IS NOT NEW.file_modified_at OR OLD.updated_at IS NOT NEW.updated_at OR OLD.created_at IS NOT NEW.created_at)
+ AND (SELECT bulk_mode FROM shelf_revision WHERE id=1)=0
 BEGIN
   UPDATE series
   SET sort_modified_at=COALESCE(NULLIF(latest_book_modified_at,''), NULLIF(NEW.file_modified_at,''), NEW.updated_at),
@@ -328,6 +360,7 @@ BEGIN
 END`,
 		`CREATE TRIGGER IF NOT EXISTS fk115_books_rollup_ins
 AFTER INSERT ON books
+WHEN (SELECT bulk_mode FROM shelf_revision WHERE id=1)=0
 BEGIN
   UPDATE series
   SET books_count=books_count+1,
@@ -362,6 +395,7 @@ BEGIN
 END`,
 		`CREATE TRIGGER IF NOT EXISTS fk115_books_rollup_del
 AFTER DELETE ON books
+WHEN (SELECT bulk_mode FROM shelf_revision WHERE id=1)=0 AND EXISTS(SELECT 1 FROM series WHERE id=OLD.series_id)
 BEGIN
   UPDATE series
   SET books_count=(SELECT count(*) FROM books b WHERE b.series_id=OLD.series_id),
@@ -373,6 +407,8 @@ BEGIN
 END`,
 		`CREATE TRIGGER IF NOT EXISTS fk115_books_rollup_upd
 AFTER UPDATE OF series_id, file_modified_at, file_created_at ON books
+WHEN (OLD.series_id IS NOT NEW.series_id OR OLD.file_modified_at IS NOT NEW.file_modified_at OR OLD.file_created_at IS NOT NEW.file_created_at)
+ AND (SELECT bulk_mode FROM shelf_revision WHERE id=1)=0
 BEGIN
   UPDATE series
   SET books_count=(SELECT count(*) FROM books b WHERE b.series_id=NEW.series_id),
@@ -615,6 +651,8 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_created ON maintenance_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_target ON maintenance_runs(target_type,target_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_maintenance_runs_series ON maintenance_runs(series_id) WHERE series_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_maintenance_runs_book ON maintenance_runs(book_id) WHERE book_id IS NOT NULL;
 `)
 	return err
 }

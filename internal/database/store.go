@@ -447,8 +447,54 @@ func (s *Store) DeleteLibrary(ctx context.Context, id string) error {
 	if inUnion > 0 {
 		return ErrLibraryInUnion
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM libraries WHERE id=?`, id)
-	return err
+
+	var bookCount int64
+	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM books WHERE library_id=?`, id).Scan(&bookCount)
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if bookCount > 5000 {
+		_, _ = conn.ExecContext(ctx, `PRAGMA cache_size = -131072`)
+		defer conn.ExecContext(context.Background(), `PRAGMA cache_size = -16384`)
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE shelf_revision SET bulk_mode=1 WHERE id=1`); err != nil {
+		return err
+	}
+	// Delete bottom-up so large libraries bypass per-row rollup/shelf trigger storms.
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM union_book_sources
+WHERE union_book_id IN (SELECT id FROM books WHERE library_id=?)`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM union_series_sources
+WHERE union_series_id IN (SELECT id FROM series WHERE library_id=?)`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM books WHERE library_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM series WHERE library_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM libraries WHERE id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE shelf_revision SET bulk_mode=0, catalog=catalog+1, progress=progress+1 WHERE id=1`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) HiddenLibraryCount(ctx context.Context) (int64, error) {

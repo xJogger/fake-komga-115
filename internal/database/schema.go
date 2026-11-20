@@ -338,6 +338,7 @@ CREATE TABLE IF NOT EXISTS series_thumbnails (
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE,
   FOREIGN KEY(source_book_id) REFERENCES books(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_series_thumbnails_source_book ON series_thumbnails(source_book_id);
 
 CREATE TABLE IF NOT EXISTS book_download_stats (
   book_id TEXT PRIMARY KEY,
@@ -398,6 +399,8 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_created ON maintenance_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_target ON maintenance_runs(target_type,target_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_maintenance_runs_series ON maintenance_runs(series_id) WHERE series_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_maintenance_runs_book ON maintenance_runs(book_id) WHERE book_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS downurl_cache (
   cache_key TEXT PRIMARY KEY,
@@ -486,9 +489,8 @@ CREATE TABLE IF NOT EXISTS union_series_sources (
   source_library_id TEXT NOT NULL,
   PRIMARY KEY(union_series_id, priority),
   FOREIGN KEY(union_series_id) REFERENCES series(id) ON DELETE CASCADE,
-  FOREIGN KEY(source_series_id) REFERENCES series(id) ON DELETE CASCADE,
-  FOREIGN KEY(source_library_id) REFERENCES libraries(id) ON DELETE CASCADE
-);
+  FOREIGN KEY(source_series_id) REFERENCES series(id) ON DELETE CASCADE
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_union_series_sources_src ON union_series_sources(source_series_id);
 
 CREATE TABLE IF NOT EXISTS union_book_sources (
@@ -499,9 +501,8 @@ CREATE TABLE IF NOT EXISTS union_book_sources (
   source_size INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(union_book_id, priority),
   FOREIGN KEY(union_book_id) REFERENCES books(id) ON DELETE CASCADE,
-  FOREIGN KEY(source_book_id) REFERENCES books(id) ON DELETE CASCADE,
-  FOREIGN KEY(source_library_id) REFERENCES libraries(id) ON DELETE CASCADE
-);
+  FOREIGN KEY(source_book_id) REFERENCES books(id) ON DELETE CASCADE
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_union_book_sources_src ON union_book_sources(source_book_id);
 
 CREATE TABLE IF NOT EXISTS library_schedules (

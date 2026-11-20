@@ -28,12 +28,32 @@ type shelfCache struct {
 	hotLibraries []string
 }
 
-func createShelfRevisions(db *sql.DB) error {
+func ensureShelfRevisionTable(db *sql.DB) error {
 	if _, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS shelf_revision (id INTEGER PRIMARY KEY CHECK(id=1), catalog INTEGER NOT NULL, progress INTEGER NOT NULL);
-INSERT OR IGNORE INTO shelf_revision VALUES(1,0,0);`); err != nil {
+CREATE TABLE IF NOT EXISTS shelf_revision (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  catalog INTEGER NOT NULL,
+  progress INTEGER NOT NULL,
+  bulk_mode INTEGER NOT NULL DEFAULT 0
+);`); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(db, "shelf_revision", "bulk_mode", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+INSERT OR IGNORE INTO shelf_revision(id,catalog,progress,bulk_mode) VALUES(1,0,0,0);
+UPDATE shelf_revision SET bulk_mode=0 WHERE id=1;`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func createShelfRevisions(db *sql.DB) error {
+	if err := ensureShelfRevisionTable(db); err != nil {
+		return err
+	}
+	needsRecreate := !triggerHasBulkGuard(db, "fk115_shelf_books_insert")
 	targets := []struct {
 		table, revision, update, condition string
 	}{
@@ -52,20 +72,27 @@ INSERT OR IGNORE INTO shelf_revision VALUES(1,0,0);`); err != nil {
 	}
 	for _, t := range targets {
 		for _, op := range []string{"INSERT", "UPDATE", "DELETE"} {
-			suffix, condition := "", ""
+			trigName := fmt.Sprintf("fk115_shelf_%s_%s", t.table, strings.ToLower(op))
+			if needsRecreate {
+				if _, err := db.Exec("DROP TRIGGER IF EXISTS " + trigName); err != nil {
+					return err
+				}
+			}
+			suffix := ""
 			if op == "UPDATE" {
 				suffix = t.update
 			}
+			cond := " WHEN (SELECT bulk_mode FROM shelf_revision WHERE id=1)=0"
 			if t.condition != "" {
 				record := "NEW"
 				if op == "DELETE" {
 					record = "OLD"
 				}
-				condition = fmt.Sprintf(" WHEN %s.key='%s'", record, t.condition)
+				cond += fmt.Sprintf(" AND %s.key='%s'", record, t.condition)
 			}
 			if _, err := db.Exec(fmt.Sprintf(
-				"CREATE TRIGGER IF NOT EXISTS fk115_shelf_%s_%s AFTER %s%s ON %s%s BEGIN UPDATE shelf_revision SET %s=%s+1 WHERE id=1; END",
-				t.table, strings.ToLower(op), op, suffix, t.table, condition, t.revision, t.revision)); err != nil {
+				"CREATE TRIGGER IF NOT EXISTS %s AFTER %s%s ON %s%s BEGIN UPDATE shelf_revision SET %s=%s+1 WHERE id=1; END",
+				trigName, op, suffix, t.table, cond, t.revision, t.revision)); err != nil {
 				return err
 			}
 		}

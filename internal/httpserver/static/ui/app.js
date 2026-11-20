@@ -2251,7 +2251,8 @@
       browseWebDAVDrawer(acc, document.getElementById('nl-wd-path').value.trim() || '/');
     };
 
-    document.getElementById('nl-create-btn').onclick = async () => {
+    document.getElementById('nl-create-btn').onclick = async (ev) => {
+      const btn = ev.currentTarget;
       const providerType = provSel.value;
       const name = document.getElementById('nl-name').value.trim();
       const oneShot = document.getElementById('nl-oneshot').checked;
@@ -2266,6 +2267,9 @@
         if (newUnionSelected.length === 0) { toast('请至少选择一个物理书库加入联合库', 'error'); return; }
         payload.memberLibraryIds = newUnionSelected;
       }
+      const origText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = providerType === 'union' ? '创建并合并中…' : '创建中…';
       try {
         const res = await api('/admin/api/libraries', { method: 'POST', body: payload });
         state.libraries = [];
@@ -2275,7 +2279,11 @@
           toast('书库已创建');
         }
         renderAdminLibraries(body);
-      } catch (err) { toast(err.message, 'error'); }
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = origText;
+        toast(err.message, 'error');
+      }
     };
 
     document.getElementById('lib-scan-all').onclick = async () => {
@@ -2289,7 +2297,9 @@
     body.querySelectorAll('button[data-lib-union-refresh]').forEach((btn) => {
       btn.onclick = async () => {
         const libID = btn.getAttribute('data-lib-union-refresh');
+        const origText = btn.textContent;
         btn.disabled = true;
+        btn.textContent = '合并中…';
         try {
           const res = await api(`/admin/api/libraries/${encodeURIComponent(libID)}/union-refresh`, { method: 'POST' });
           state.libraries = [];
@@ -2298,6 +2308,7 @@
           renderAdminLibraries(body);
         } catch (err) {
           btn.disabled = false;
+          btn.textContent = origText;
           toast(err.message, 'error');
         }
       };
@@ -2453,8 +2464,12 @@
               paint();
             });
             paint();
-            document.getElementById('eu-save').onclick = async () => {
+            document.getElementById('eu-save').onclick = async (ev) => {
               if (selected.length === 0) { toast('联合库至少需要保留一个物理子库', 'error'); return; }
+              const saveBtn = ev.currentTarget;
+              const origText = saveBtn.textContent;
+              saveBtn.disabled = true;
+              saveBtn.textContent = '保存并合并中…';
               try {
                 await api(`/admin/api/libraries/${encodeURIComponent(libID)}`, {
                   method: 'PUT',
@@ -2468,7 +2483,11 @@
                 toast('联合库已更新并完成重新合并');
                 closeModal();
                 renderAdminLibraries(body);
-              } catch (err) { toast(err.message, 'error'); }
+              } catch (err) {
+                saveBtn.disabled = false;
+                saveBtn.textContent = origText;
+                toast(err.message, 'error');
+              }
             };
           },
         });
@@ -2592,12 +2611,19 @@
     body.querySelectorAll('button[data-lib-del]').forEach((btn) => {
       btn.onclick = async () => {
         if (!confirm('确认删除该书库及其索引记录？（不会删除网盘或磁盘上的原始文件；若删除联合库，其物理子库会自动恢复独立显示）')) return;
+        const origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '删除中…';
         try {
           await api(`/admin/api/libraries/${encodeURIComponent(btn.getAttribute('data-lib-del'))}`, { method: 'DELETE' });
           state.libraries = [];
           toast('书库已删除');
           renderAdminLibraries(body);
-        } catch (err) { toast(err.message, 'error'); }
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = origText;
+          toast(err.message, 'error');
+        }
       };
     });
   }

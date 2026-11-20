@@ -2,9 +2,11 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestNormalizeUnionSeriesPath(t *testing.T) {
@@ -226,5 +228,171 @@ INSERT INTO books(id,series_id,library_id,file_id,parent_cid,name,size,pick_code
 	}
 	if p, ok, err := store.BookReadProgress(ctx, "b_loc_1"); err != nil || !ok || p.Page == nil || *p.Page != 7 {
 		t.Fatalf("expected b_loc_1 progress preserved after dissolving union, got ok=%v p=%+v", ok, p)
+	}
+}
+
+func TestUnionRefreshDiffZeroMutationAndWinningSourceZipInvalidation(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "union_diff.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "lib_a", Name: "上层本地", ProviderType: ProviderLocal,
+		RootCID: "local:/a", RootPath: "/a", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertLibrary(ctx, Library{
+		ID: "lib_b", Name: "下层网盘", ProviderType: Provider115,
+		RootCID: "cid_b", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	t1 := "2026-01-01T00:00:00Z"
+	t2 := "2026-01-02T00:00:00Z"
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,file_modified_at,created_at,updated_at,seen_scan_id) VALUES
+('sa','lib_a','Cat/S1','S1','RootA/Cat/S1',0,?,?,?,'s1'),
+('sb','lib_b','900','S1','RootB/Cat/S1',0,?,?,?,'s2')`, t1, t1, t1, t1, t1, t1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO books(id,series_id,library_id,file_id,parent_cid,name,size,pick_code,file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id) VALUES
+('ba1','sa','lib_a','Cat/S1/01.cbz','Cat/S1','01.cbz',1000,'',?,?,1,?,?,'s1'),
+('bb1','sb','lib_b','f1','900','01.cbz',2000,'pk1',?,?,1,?,?,'s2')`,
+		t1, t1, t1, t1, t1, t1, t1, t1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO zip_indexes(book_id,version,page_count,index_json,index_duration_ns,created_at,updated_at) VALUES
+('ba1','v_a',18,'[]',10,?,?),
+('bb1','v_b',24,'[]',10,?,?)`, t1, t1, t1, t1); err != nil {
+		t.Fatal(err)
+	}
+
+	unionLib, _, err := store.CreateUnionLibrary(ctx, "DiffUnion", true, []string{"lib_a", "lib_b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture updated_at and shelf_revision right after create.
+	var uSeriesID, uBookID, updatedBefore string
+	if err := store.DB().QueryRowContext(ctx, `SELECT id, updated_at FROM series WHERE library_id=?`, unionLib.ID).Scan(&uSeriesID, &updatedBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT id FROM books WHERE library_id=?`, unionLib.ID).Scan(&uBookID); err != nil {
+		t.Fatal(err)
+	}
+	var pageCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT page_count FROM zip_indexes WHERE book_id=?`, uBookID).Scan(&pageCount); err != nil || pageCount != 18 {
+		t.Fatalf("expected inherited page_count=18 from lib_a, got %d err=%v", pageCount, err)
+	}
+
+	revBefore, err := store.shelfRevision(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	// Warm 0-change refresh MUST NOT touch series.updated_at or shelf_revision.
+	if _, err := store.RefreshUnionLibrary(ctx, unionLib.ID); err != nil {
+		t.Fatal(err)
+	}
+	revAfter, err := store.shelfRevision(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revAfter != revBefore {
+		t.Fatalf("warm no-op refresh mutated shelf_revision: before=%+v after=%+v", revBefore, revAfter)
+	}
+	var updatedAfter string
+	if err := store.DB().QueryRowContext(ctx, `SELECT updated_at FROM series WHERE id=?`, uSeriesID).Scan(&updatedAfter); err != nil {
+		t.Fatal(err)
+	}
+	if updatedAfter != updatedBefore {
+		t.Fatalf("warm no-op refresh mutated series.updated_at: %q -> %q", updatedBefore, updatedAfter)
+	}
+
+	// Reverse layer order [lib_b, lib_a]: winning source switches from ba1 (18p) to bb1 (24p),
+	// so union zip_indexes must refresh to 24p and book size must update to 2000.
+	if _, _, err := store.UpdateUnionLibrary(ctx, unionLib.ID, nil, nil, []string{"lib_b", "lib_a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT page_count FROM zip_indexes WHERE book_id=?`, uBookID).Scan(&pageCount); err != nil || pageCount != 24 {
+		t.Fatalf("expected zip_indexes page_count updated to 24 after layer switch, got %d err=%v", pageCount, err)
+	}
+	var uSize int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT size FROM books WHERE id=?`, uBookID).Scan(&uSize); err != nil || uSize != 2000 {
+		t.Fatalf("expected union book size=2000 after layer switch, got %d err=%v", uSize, err)
+	}
+
+	// Incremental book addition updates rollup columns accurately.
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO books(id,series_id,library_id,file_id,parent_cid,name,size,pick_code,file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id)
+VALUES('bb2','sb','lib_b','f2','900','02.cbz',3000,'pk2',?,?,2,?,?,'s2')`, t2, t2, t2, t2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RefreshUnionLibrary(ctx, unionLib.ID); err != nil {
+		t.Fatal(err)
+	}
+	var booksCnt int
+	var sortMod string
+	if err := store.DB().QueryRowContext(ctx, `SELECT books_count, sort_modified_at FROM series WHERE id=?`, uSeriesID).Scan(&booksCnt, &sortMod); err != nil {
+		t.Fatal(err)
+	}
+	if booksCnt != 2 || sortMod != t2 {
+		t.Fatalf("expected rollup books_count=2 sort_modified_at=%s, got count=%d sort_modified_at=%s", t2, booksCnt, sortMod)
+	}
+
+	// DeleteLibrary must reset bulk_mode=0 and bump shelf_revision.
+	revPreDel, _ := store.shelfRevision(ctx, true)
+	if err := store.DeleteLibrary(ctx, unionLib.ID); err != nil {
+		t.Fatal(err)
+	}
+	var bulkMode int
+	if err := store.DB().QueryRowContext(ctx, `SELECT bulk_mode FROM shelf_revision WHERE id=1`).Scan(&bulkMode); err != nil || bulkMode != 0 {
+		t.Fatalf("expected bulk_mode=0 after DeleteLibrary, got %d err=%v", bulkMode, err)
+	}
+	revPostDel, _ := store.shelfRevision(ctx, true)
+	if revPostDel.catalog <= revPreDel.catalog {
+		t.Fatalf("expected shelf_revision.catalog bumped on DeleteLibrary: %+v -> %+v", revPreDel, revPostDel)
+	}
+}
+
+func TestMigrateLegacyShelfRevisionWithoutBulkMode(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy_v22.db")
+	// Simulate an existing v2.2 DB whose shelf_revision has only (id, catalog, progress).
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+CREATE TABLE shelf_revision (id INTEGER PRIMARY KEY CHECK(id=1), catalog INTEGER NOT NULL, progress INTEGER NOT NULL);
+INSERT INTO shelf_revision VALUES(1, 42, 7);
+`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open legacy DB failed: %v", err)
+	}
+	defer store.Close()
+
+	var cat, prog, bulk int
+	if err := store.DB().QueryRow(`SELECT catalog, progress, bulk_mode FROM shelf_revision WHERE id=1`).Scan(&cat, &prog, &bulk); err != nil {
+		t.Fatal(err)
+	}
+	if cat < 42 || prog != 7 || bulk != 0 {
+		t.Fatalf("unexpected shelf_revision after migration: cat=%d prog=%d bulk=%d", cat, prog, bulk)
+	}
+	if !triggerHasBulkGuard(store.DB(), "fk115_books_rollup_upd") || !triggerHasBulkGuard(store.DB(), "fk115_shelf_books_insert") {
+		t.Fatalf("expected rollup and shelf triggers upgraded with bulk_mode guard")
 	}
 }
