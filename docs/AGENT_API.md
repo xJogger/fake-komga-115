@@ -48,7 +48,7 @@ curl -fsS -H "Authorization: Bearer $FK115_API_KEY" \
 - `POST /api/agent/v1/libraries`：创建书库：
   - 115 网盘：`{"name": "日漫连载", "providerType": "115", "rootCid": "123456", "oneShot": false}`
   - 本地 / SMB 挂载目录：`{"name": "NAS 漫画", "providerType": "local", "rootPath": "/share/manga", "oneShot": false}`
-  - WebDAV（CloudDrive2 / OpenList / NAS）：`{"name": "CD2 书库", "providerType": "webdav", "webdavAccountId": "<id>", "rootPath": "/comics"}`
+  - WebDAV（CloudDrive2 / OpenList / NAS）：`{"name": "CloudDrive2 书库", "providerType": "webdav", "webdavAccountId": "<id>", "rootPath": "/comics"}`
 - `PATCH /api/agent/v1/libraries/{libraryID}`：局部更新书库名称、隐藏状态或单本模式：
   ```json
   { "name": "日漫归档", "hidden": true }

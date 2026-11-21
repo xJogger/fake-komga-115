@@ -9,8 +9,8 @@ android {
         applicationId 'io.github.xjogger.mangaalpha'
         minSdk 26
         targetSdk 35
-        versionCode((System.getenv("MANGAALPHA_VERSION_CODE") ?: "2010002").toInteger())
-        versionName(System.getenv("MANGAALPHA_VERSION_NAME") ?: "2.1.0-preview.3")
+        versionCode((System.getenv("MANGAALPHA_VERSION_CODE") ?: "2040099").toInteger())
+        versionName(System.getenv("MANGAALPHA_VERSION_NAME") ?: "2.4.0")
         ndk { abiFilters 'arm64-v8a' }
     }
     compileOptions {
