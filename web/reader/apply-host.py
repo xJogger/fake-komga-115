@@ -30,6 +30,7 @@ def main() -> None:
     target_host_dir = root / "src" / "host"
     target_host_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(host_dir / "host" / "KomgaHostBridge.ts", target_host_dir / "KomgaHostBridge.ts")
+    shutil.copy2(host_dir / "host" / "StreamingLoadStatus.tsx", target_host_dir / "StreamingLoadStatus.tsx")
     shutil.copy2(host_dir / "host" / "KomgaReaderApp.tsx", root / "src" / "App.tsx")
 
     # 2. Relax Node engine constraint & simplify build script in package.json
@@ -342,6 +343,31 @@ export class SubpathUtil {
             window.location.assign(seriesId ? `/series/${encodeURIComponent(seriesId)}` : '/');
         }, []);
     }""",
+    )
+
+    # 10. Streaming loading progress indicators for remote archive indexing & page loading
+    chapter_viewer = root / "src" / "features" / "reader" / "viewer" / "ReaderChapterViewer.tsx"
+    replace_exact(
+        chapter_viewer,
+        "import { LoadingPlaceholder } from '@/base/components/feedback/LoadingPlaceholder.tsx';",
+        "import { KomgaHostBridge } from '@/host/KomgaHostBridge.ts';\nimport { BookIndexProgress } from '@/host/StreamingLoadStatus.tsx';",
+    )
+    replace_exact(
+        chapter_viewer,
+        "                <LoadingPlaceholder />",
+        "                <BookIndexProgress bookId={KomgaHostBridge.getBookIdForChapter(chapterId)} />",
+    )
+
+    spinner_img = root / "src" / "base" / "components" / "SpinnerImage.tsx"
+    replace_exact(
+        spinner_img,
+        "import CircularProgress from '@mui/material/CircularProgress';",
+        "import { PageLoadProgress } from '@/host/StreamingLoadStatus.tsx';",
+    )
+    replace_exact(
+        spinner_img,
+        "{isVisible && !!isLoading && <CircularProgress thickness={5} />}",
+        "{isVisible && !!isLoading && <PageLoadProgress src={src} small={small} />}",
     )
 
 

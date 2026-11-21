@@ -123,7 +123,11 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 			DataOffset:       offset,
 			CRC32:            file.CRC32,
 		})
+		if len(pages)%10 == 0 {
+			reportLoadPagesFound(ctx, len(pages))
+		}
 	}
+	reportLoadPagesFound(ctx, len(pages))
 	slices.SortFunc(pages, func(a, b PageEntry) int {
 		if natsort.Less(a.Name, b.Name) {
 			return -1
@@ -212,6 +216,7 @@ func (z *ZIPService) readEntry(
 	maxPageSize int64,
 ) ([]byte, error) {
 	compressed := make([]byte, int(entry.CompressedSize))
+	reportLoadBytes(ctx, 0, int64(entry.CompressedSize))
 	blockSize := z.store.Int64Setting(ctx, "range_block_size", 1<<20)
 	readerAt, err := openBookReaderAt(ctx, book, z.store, z.client, z.webdav, z.cache, z.logger, blockSize)
 	if err != nil {
@@ -221,6 +226,7 @@ func (z *ZIPService) readEntry(
 	if _, err := readerAt.ReadAt(compressed, entry.DataOffset); err != nil {
 		return nil, err
 	}
+	reportLoadStage(ctx, "decompressing", "正在解压页面图像…")
 	var data []byte
 	switch entry.Method {
 	case zip.Store:

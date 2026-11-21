@@ -27,6 +27,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/pipeline"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
+	"github.com/xJogger/fake-komga-115/internal/updater"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
@@ -50,6 +51,7 @@ type App struct {
 	tasks      *maintenance.Manager
 	archive    *archive.Service
 	bangumi    *bangumi.Service
+	updater    *updater.Service
 	diag       *diagnostics.Recorder
 	logger     *slog.Logger
 	listenAddr atomic.Value
@@ -161,6 +163,7 @@ func New(_ context.Context, options Options) (*App, error) {
 			}
 		}()
 	})
+	updaterService := updater.NewService(store, options.Logger)
 	handler := httpserver.New(
 		store, client, scanManager, cacheManager, archiveService, thumbnailService,
 		coverManager, maintenanceManager, httpserver.RuntimeInfo{
@@ -168,7 +171,7 @@ func New(_ context.Context, options Options) (*App, error) {
 			Host:    options.Host,
 			Port:    options.Port,
 		}, options.Logger,
-	).WithServices(webdavManager, bangumiService).WithPipeline(pipelineManager).WithDiagnostics(diagRecorder)
+	).WithServices(webdavManager, bangumiService).WithPipeline(pipelineManager).WithDiagnostics(diagRecorder).WithUpdater(updaterService)
 
 	rawHandler := handler.Handler()
 	var routes http.Handler = rawHandler
@@ -184,11 +187,12 @@ func New(_ context.Context, options Options) (*App, error) {
 	return &App{
 		server: server, rawHandler: rawHandler, store: store, scanner: scanManager, pipelines: pipelineManager,
 		covers: coverManager, tasks: maintenanceManager, archive: archiveService, bangumi: bangumiService,
-		diag: diagRecorder, logger: options.Logger,
+		updater: updaterService, diag: diagRecorder, logger: options.Logger,
 	}, nil
 }
 
 func (a *App) Diagnostics() *diagnostics.Recorder { return a.diag }
+func (a *App) Updater() *updater.Service          { return a.updater }
 
 func (a *App) HasAdmin(ctx context.Context) (bool, error) {
 	return a.store.HasAdmin(ctx)
@@ -429,6 +433,9 @@ func (a *App) Close() error {
 	a.covers.Close()
 	a.scanner.Close()
 	a.archive.Close()
+	if a.updater != nil {
+		a.updater.Close()
+	}
 	if a.bangumi != nil {
 		_ = a.bangumi.Close()
 	}

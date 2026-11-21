@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -19,6 +20,10 @@ import (
 type DocumentBackend interface {
 	List(root, rel string) (string, error)
 	Open(root, rel string) (int32, error)
+}
+
+type UpdateProgressCallback interface {
+	OnProgress(downloaded int64, total int64)
 }
 
 type Instance struct {
@@ -200,6 +205,56 @@ func ExportDiagnosticsFromDir(dataDir string) string {
 		return "# MangaAlpha Diagnostic Report\n(unable to open diagnostics directory)\n"
 	}
 	return rec.ExportText(500)
+}
+
+func (i *Instance) SetAppVersion(version string) {
+	i.mu.Lock()
+	srv := i.app
+	i.mu.Unlock()
+	if srv != nil && srv.Updater() != nil {
+		srv.Updater().SetCurrentVersion(version)
+	}
+}
+
+func (i *Instance) CheckUpdateJSON(force bool) (string, error) {
+	i.mu.Lock()
+	srv := i.app
+	i.mu.Unlock()
+	if srv == nil || srv.Updater() == nil {
+		return "", errors.New("embedded server is not running")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var st any
+	if force {
+		res, _ := srv.Updater().CheckNow(ctx)
+		st = res
+	} else {
+		st = srv.Updater().Status(ctx)
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func (i *Instance) DownloadVerifiedUpdate(destDir string, cb UpdateProgressCallback) (string, error) {
+	i.mu.Lock()
+	srv := i.app
+	i.mu.Unlock()
+	if srv == nil || srv.Updater() == nil {
+		return "", errors.New("embedded server is not running")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	var progressFn func(int64, int64)
+	if cb != nil {
+		progressFn = func(done, total int64) {
+			cb.OnProgress(done, total)
+		}
+	}
+	return srv.Updater().DownloadVerifiedAsset(ctx, destDir, progressFn)
 }
 
 func (i *Instance) Stop() {

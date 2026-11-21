@@ -49,6 +49,7 @@ type Service struct {
 	zip            *ZIPService
 	rar            *RARService
 	volumePrefetch *VolumeIndexPrefetcher
+	loadTracker    *LoadTracker
 }
 
 func NewService(
@@ -71,10 +72,11 @@ func NewServiceWithWebDAV(
 		webdavManager = webdav.NewManager()
 	}
 	service := &Service{
-		store:  store,
-		logger: logger,
-		zip:    NewZIPServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
-		rar:    NewRARServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
+		store:       store,
+		logger:      logger,
+		zip:         NewZIPServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
+		rar:         NewRARServiceWithWebDAV(store, client, webdavManager, cacheManager, logger),
+		loadTracker: newLoadTracker(),
 	}
 	service.volumePrefetch = newVolumeIndexPrefetcher(
 		store, service.ListPages, logger,
@@ -263,8 +265,18 @@ func (s *Service) syncUnionIndexSummary(ctx context.Context, unionBook database.
 	_ = s.store.RecordArchiveIndexBuild(ctx, unionBook.ID, BookVersion(unionBook), "[]", pageCount, duration)
 }
 
+// LoadStatus returns live server-side indexing/streaming progress for a book or specific page.
+func (s *Service) LoadStatus(bookID string, pageNumber int) LoadProgress {
+	if s == nil || s.loadTracker == nil {
+		return LoadProgress{BookID: bookID, Stage: "idle"}
+	}
+	return s.loadTracker.Status(bookID, pageNumber)
+}
+
 func (s *Service) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
 	candidates, isUnion := s.resolveCandidates(ctx, book)
+	ctx, finish := s.loadTracker.begin(ctx, book.ID, 0, "indexing", "正在读取归档目录索引…", book.Size)
+	defer finish()
 	var lastErr error
 	for idx, cand := range candidates {
 		started := time.Now()
@@ -279,6 +291,7 @@ func (s *Service) ListPages(ctx context.Context, book database.Book) ([]PageEntr
 		if !shouldFallbackReplica(err) || idx+1 >= len(candidates) {
 			return nil, err
 		}
+		reportLoadStage(ctx, "indexing", "当前存储层读取失败，正在自动切换备用层…")
 		if s.logger != nil {
 			s.logger.Warn("union book listPages failed on layer, falling back",
 				"unionBook", book.ID, "failedLibrary", cand.LibraryID,
@@ -294,6 +307,8 @@ func (s *Service) ReadPage(
 	pageNumber int,
 ) (PageData, error) {
 	candidates, isUnion := s.resolveCandidates(ctx, book)
+	ctx, finish := s.loadTracker.begin(ctx, book.ID, pageNumber, "downloading", "正在准备远程页面数据…", 0)
+	defer finish()
 	var lastErr error
 	for idx, cand := range candidates {
 		started := time.Now()
@@ -310,6 +325,7 @@ func (s *Service) ReadPage(
 		if !shouldFallbackReplica(err) || idx+1 >= len(candidates) {
 			return PageData{}, err
 		}
+		reportLoadStage(ctx, "downloading", "当前存储层读取失败，正在切换备用层重试…")
 		if s.logger != nil {
 			s.logger.Warn("union book readPage failed on layer, falling back",
 				"unionBook", book.ID, "page", pageNumber, "failedLibrary", cand.LibraryID,

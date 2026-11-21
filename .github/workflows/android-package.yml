@@ -63,6 +63,8 @@ jobs:
           corepack enable
           bash scripts/build-reader.sh
       - name: Bind Go runtime
+        env:
+          MANGAALPHA_VERSION_NAME: ${{ inputs.version-name }}
         run: |
           export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${NDK_VERSION}"
           go install "golang.org/x/mobile/cmd/gomobile@${GOMOBILE_VERSION}"
@@ -72,7 +74,10 @@ jobs:
           # checkout only: server builds do not need gomobile or its module.
           go get "golang.org/x/mobile/bind@${GOMOBILE_VERSION}"
           mkdir -p android/app/libs
-          gomobile bind -target=android/arm64 -androidapi 26 -o android/app/libs/fk115.aar ./mobile
+          ver_tag="v${MANGAALPHA_VERSION_NAME#v}"
+          gomobile bind -target=android/arm64 -androidapi 26 \
+            -ldflags "-X github.com/xJogger/fake-komga-115/internal/buildinfo.Version=${ver_tag}" \
+            -o android/app/libs/fk115.aar ./mobile
       - name: Assemble unsigned APK and verify alignment
         shell: bash
         env:

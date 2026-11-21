@@ -138,6 +138,8 @@ curl -fsS -X POST \
 - `POST /api/agent/v1/bangumi/archive/update`：后台检查并更新官方 `bangumi/Archive` 本地离线索引包（默认比对快照名称/摘要，未更新自动跳过下载；可选传 `{"force": true}` 强制重下；导入新版后自动本地增量同步已匹配作品的未锁定元数据）。
 - `GET /api/agent/v1/bangumi/archive/schedule` / `PUT /api/agent/v1/bangumi/archive/schedule`：读取或设置 Bangumi 离线库定时更新（支持 `weekly` / `monthly`，按服务器本机时区执行）。
 - `GET /api/agent/v1/diagnostics` / `PUT /api/agent/v1/diagnostics/config` / `GET /api/agent/v1/diagnostics/export` / `DELETE /api/agent/v1/diagnostics`：查看、切换详细模式、导出或清空全平台脱敏诊断日志。
+- `GET /api/agent/v1/bangumi/archive/source` / `PUT /api/agent/v1/bangumi/archive/source`：查询或切换 Bangumi 离线索引库数据源（支持 `zh_cn` 中文简介增强镜像 [默认]、`official` 官方原版或 `custom` 自定义 `aux/latest.json` URL）。
+- `GET /api/agent/v1/update` / `POST /api/agent/v1/update/check` / `PUT /api/agent/v1/update/config`：查询软件版本与更新检测状态、触发手动检查或调整 24 小时后台自动检查/版本忽略配置。
 - `GET /api/agent/v1/jobs?limit=20`：汇总查看扫描任务、Bangumi 刮削任务、离线库更新状态、封面任务与维护任务。
 - `POST /api/agent/v1/jobs/{jobType}/{runID}/cancel`：取消任务（`jobType` 支持 `scan`、`bangumi`、`cover`）。
 - `GET /api/agent/v1/settings` / `PATCH /api/agent/v1/settings`：读取或修改系统参数（例如 `{"showNsfw": false}` 或 `{"show_nsfw": true}`）。

@@ -99,6 +99,7 @@ func (r *RARService) ListPages(ctx context.Context, book database.Book) ([]PageE
 		})
 		return nil, err
 	}
+	reportLoadPagesFound(ctx, len(pages))
 	if err := r.saveIndex(ctx, book, pages, time.Since(started)); err != nil {
 		return nil, err
 	}

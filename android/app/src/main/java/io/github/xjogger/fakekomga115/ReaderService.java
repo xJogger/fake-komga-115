@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Handler;
@@ -20,6 +21,7 @@ import java.util.concurrent.Executors;
 
 import mobile.Instance;
 import mobile.Mobile;
+import mobile.UpdateProgressCallback;
 
 public final class ReaderService extends Service {
     static final String STOP = "io.github.xjogger.fakekomga115.STOP";
@@ -31,6 +33,7 @@ public final class ReaderService extends Service {
 
     private static final String CHANNEL = "embedded-reader";
     private static final ExecutorService ENGINE = Executors.newSingleThreadExecutor();
+    private static final ExecutorService UPDATE_IO = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final LocalBinder binder = new LocalBinder();
     private final CopyOnWriteArrayList<Observer> observers = new CopyOnWriteArrayList<>();
@@ -42,6 +45,9 @@ public final class ReaderService extends Service {
     private volatile String lanError = "";
 
     interface Observer { void changed(Instance instance, String message); }
+    interface UpdateStatusCallback { void onResult(String statusJson, String error); }
+    interface UpdateProgressListener { void onProgress(long downloaded, long total); }
+    interface UpdateDownloadCallback { void onResult(File apkFile, String error); }
 
     final class LocalBinder extends Binder {
         void watch(Observer value) {
@@ -146,6 +152,74 @@ public final class ReaderService extends Service {
         void stopNow() {
             stopEngine("本机书库已停止");
         }
+
+        String getAppVersionName() {
+            return resolveAppVersionTag();
+        }
+
+        void checkUpdate(boolean force, UpdateStatusCallback callback) {
+            if (callback == null) return;
+            UPDATE_IO.execute(() -> {
+                Instance s = server;
+                if (s == null || stopping) {
+                    main.post(() -> callback.onResult(null, "本机书库尚未启动"));
+                    return;
+                }
+                try {
+                    String json = s.checkUpdateJSON(force);
+                    main.post(() -> callback.onResult(json, null));
+                } catch (Throwable t) {
+                    String err = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+                    main.post(() -> callback.onResult(null, err));
+                }
+            });
+        }
+
+        void downloadVerifiedUpdate(UpdateProgressListener onProgress, UpdateDownloadCallback callback) {
+            if (callback == null) return;
+            UPDATE_IO.execute(() -> {
+                Instance s = server;
+                if (s == null || stopping) {
+                    main.post(() -> callback.onResult(null, "本机书库尚未启动"));
+                    return;
+                }
+                try {
+                    File dir = new File(getCacheDir(), "updates");
+                    final long[] lastEmit = {0L};
+                    UpdateProgressCallback bridgeCb = (done, total) -> {
+                        if (onProgress == null) return;
+                        long now = System.currentTimeMillis();
+                        if (now - lastEmit[0] >= 120 || (total > 0 && done >= total)) {
+                            lastEmit[0] = now;
+                            main.post(() -> onProgress.onProgress(done, total));
+                        }
+                    };
+                    String path = s.downloadVerifiedUpdate(dir.getAbsolutePath(), bridgeCb);
+                    File apk = (path != null && !path.isEmpty()) ? new File(path) : null;
+                    if (apk == null || !apk.isFile()) {
+                        main.post(() -> callback.onResult(null, "更新包文件不存在"));
+                        return;
+                    }
+                    main.post(() -> callback.onResult(apk, null));
+                } catch (Throwable t) {
+                    String err = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+                    DiagnosticsLog.append(ReaderService.this, "error", "android_update", "download",
+                            t.getClass().getSimpleName(), err);
+                    main.post(() -> callback.onResult(null, err));
+                }
+            });
+        }
+    }
+
+    private String resolveAppVersionTag() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            String name = info != null && info.versionName != null ? info.versionName.trim() : "";
+            if (!name.isEmpty()) {
+                return (name.startsWith("v") || name.startsWith("V")) ? name : "v" + name;
+            }
+        } catch (Throwable ignored) {}
+        return "";
     }
 
     private SharedPreferences prefs() {
@@ -187,6 +261,10 @@ public final class ReaderService extends Service {
                     server = Mobile.start(dataDir, cacheDir, documents, 0);
                 }
                 prefs().edit().putInt(KEY_PORT, Uri.parse(server.origin()).getPort()).apply();
+                String appVersion = resolveAppVersionTag();
+                if (!appVersion.isEmpty()) {
+                    try { server.setAppVersion(appVersion); } catch (Throwable ignored) {}
+                }
                 DiagnosticsLog.append(this, "info", "android_service", "ready", "OK", "embedded loopback server ready");
 
                 // Restore remembered LAN server setting without ever blocking loopback startup.

@@ -59,6 +59,7 @@ func openBookReaderAtWithSize(
 	actualSize := book.Size
 	switch library.EffectiveProvider() {
 	case database.ProviderLocal:
+		reportLoadProvider(ctx, database.ProviderLocal)
 		file, err := localfs.OpenBook(library.RootPath, book.FileID)
 		if err != nil {
 			return nil, 0, err
@@ -85,6 +86,7 @@ func openBookReaderAtWithSize(
 		return file, actualSize, nil
 
 	case database.ProviderWebDAV:
+		reportLoadProvider(ctx, database.ProviderWebDAV)
 		if webdavMgr == nil {
 			webdavMgr = webdav.NewManager()
 		}
@@ -117,6 +119,7 @@ func openBookReaderAtWithSize(
 		)}, actualSize, nil
 
 	default:
+		reportLoadProvider(ctx, database.Provider115)
 		return noopCloseReaderAt{NewRemoteReaderAtWithBlockSize(
 			ctx, book, store, client115, cacheManager, logger, blockSize,
 		)}, actualSize, nil
@@ -246,6 +249,8 @@ func (r *WebDAVReaderAt) fetchBlock(ctx context.Context, index int64) ([]byte, e
 	end := min(start+r.blockSize-1, r.book.Size-1)
 	expected := end - start + 1
 	started := time.Now()
+	reportLoadProvider(ctx, database.ProviderWebDAV)
+	reportLoadStage(ctx, "", "正在从 WebDAV 流式拉取数据分块…")
 	data, err := r.webdav.FetchRange(ctx, r.account, r.library.RootPath, r.book.FileID, start, end)
 	if err != nil {
 		if errors.Is(err, webdav.ErrRangeNotSupported) {
@@ -253,6 +258,7 @@ func (r *WebDAVReaderAt) fetchBlock(ctx context.Context, index int64) ([]byte, e
 		}
 		return nil, err
 	}
+	reportLoadBytes(ctx, int64(len(data)), 0)
 	if err := r.store.RecordBookDownload(ctx, r.book, expected, time.Since(started)); err != nil && r.logger != nil {
 		r.logger.Warn("record WebDAV range download stats", "book", r.book.ID, "error", err)
 	}

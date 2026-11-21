@@ -45,7 +45,8 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1
    - 扩充繁简、台湾异体字与日文新字体归一映射表；
    - 支持 `[标题][作者]` 与 `[作者][标题]` 双序多方括号提取、小写 `x` 合著切分、括号内外双标题提取、中英边界切分、扫图组噪音黑名单以及通用子目录（`台版`、`特别篇`、`单行本` 等）向父目录回溯并追加显示后缀（如 `水星领航员（台版）`）。
    - `+` / `&` 拆出的标题只用于检索，不单独展示或评分；候选条目必须有完整标题或同时覆盖各部分的正式标题/别名。手动输入关键词与直接按条目 ID 绑定不受目录名限制。
-2. **引擎一：官方 `bangumi/Archive` 本地离线 SQLite 索引（批量主力）**：
+2. **引擎一：Bangumi 离线 SQLite 索引（批量主力，支持多源切换）**：
+   - 默认指向中文简介增强镜像（`zh_cn`：`xJogger/bangumi-archive-zh`，将上游全站非 NSFW 外文条目简介翻译为简体中文且保持 100% 同构），同时支持在后台随时切回 `official`（`bangumi/Archive` 官方原版）或 `custom` 自定义兼容源。
    - 流式解析 `subject.jsonlines` 与 `subject-relations.jsonlines`，导入全量 `type=1` 书籍主条目（记录官方布尔 `is_nsfw`，剔除 `relation_type=1003` 单行本分卷），写入 `data/bangumi/bangumi-archive.db`。
    - 启动时若检测到本地 `terms_schema_version` 落后，从 `bgm_subjects` 在事务内重建 `bgm_terms` 词表，无需重新下载快照或重刮书库。
    - 批量刮削支持 `incremental`（仅新增）、`retry_unmatched`（重试未命中 + 新增）与 `force`（全量）三档模式。
@@ -58,7 +59,8 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1
 ## 5. 内置书架、简体中文阅读器与 Agent 接口
 
 - **内置书架与后台 SPA（`internal/httpserver/static/ui/`）**：支持系统自动深浅色切换、日夜双套小鱼图标（含 `/reader/*` 标签页同步）、收藏夹（`/collections`）与阅读列表（`/readlists`）管理、移动端防横向溢出栅格、缓存页全 `MiB` 单位展示与输入、NSFW 开关与自适应空闲零轮询。
-- **内置简体中文阅读器（`/reader/*`，`web/reader/` + `scripts/build-reader.sh`）**：基于上游 `Suwayomi/Suwayomi-WebUI`（`MPL-2.0`）构建，默认加载 `zh-Hans` 简体中文语言包并在首屏渲染前完成激活，通过 `KomgaHostBridge` 内存桥接至 `/api/v1/*` Komga REST 接口。
+- **内置简体中文阅读器（`/reader/*`，`web/reader/` + `scripts/build-reader.sh`）**：基于上游 `Suwayomi/Suwayomi-WebUI`（`MPL-2.0`）构建，默认加载 `zh-Hans` 简体中文语言包并在首屏渲染前完成激活，通过 `KomgaHostBridge` 内存桥接至 `/api/v1/*` Komga REST 接口，并结合 `GET /api/v1/books/{bookID}/load-status` 实时展示网络串流章节索引构建与单页拉取/解压进度（零改动标准 Komga `/pages` 契约，后续原生移动端阅读器可直接复用）。
+- **跨平台版本更新检测与 Android 校验安装（`internal/updater`）**：服务端/桌面端/Docker/Android 共用更新检测引擎，每 24 小时后台静默检测 GitHub Releases 并自动复用 Bangumi 网络代理（未配置则直连）；管理后台提供可忽略版本提醒、变更日志与对应平台下载链接或 Docker `docker pull` 命令；Android 端通过 Go 桥接下载并强制校验 `SHA256SUMS` 后经系统 `PackageInstaller` 拉起安装。
 - **Koharia 深度兼容与大书库性能**：
   - `series` 表通过轻量 SQLite 触发器与一次性升级回填维护 `books_count`、`sort_modified_at`、`sort_created_at`，配合复合覆盖索引与分块 `IN` 批查，消除大库关联扫描与 `too many SQL variables` 错误；
   - 递归下降检索解析器（`internal/database/search.go`）支持 Koharia 的 `(<q>) OR tag:(<q>)` 联合检索、Komga 字段语法、`AND`/`OR`/`NOT` 与 `sort=relevance`；

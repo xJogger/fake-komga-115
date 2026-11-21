@@ -15,6 +15,7 @@
     coverVer: Date.now(),
     adminTab: 'overview',
     bgmProxyProbeHTML: '',
+    updateStatus: null,
   };
 
   function resolveEffectiveTheme(mode) {
@@ -1781,11 +1782,14 @@
     ];
 
     renderShell('admin', `
+      <div id="admin-update-banner"></div>
       <div class="admin-tabs">
         ${tabs.map(([id, label]) => `<button type="button" data-admin-tab="${id}" class="${tab === id ? 'active' : ''}">${esc(label)}</button>`).join('')}
       </div>
       <div id="admin-tab-body"><div class="boot-splash" style="min-height:35vh"><div class="spinner"></div></div></div>
     `);
+
+    refreshAdminUpdateBanner();
 
     document.querySelectorAll('button[data-admin-tab]').forEach((btn) => {
       btn.onclick = () => {
@@ -1807,6 +1811,59 @@
       case 'security': await renderAdminSecurity(body); break;
       default: await renderAdminOverview(body); break;
     }
+  }
+
+  function paintAdminUpdateBanner(st) {
+    const slot = document.getElementById('admin-update-banner');
+    if (!slot) return;
+    if (!st || !st.hasUpdate || st.dismissed || !st.latestVersion) {
+      slot.innerHTML = '';
+      return;
+    }
+    const isAndroid = navigator.userAgent.includes('FK115Android/');
+    slot.innerHTML = `
+      <div class="update-banner">
+        <div class="update-banner-main">
+          <span class="badge badge-accent">新版本</span>
+          <span>发现 MangaAlpha <strong>${esc(st.latestVersion)}</strong>（当前 ${esc(st.currentVersion || '-')}）</span>
+          ${st.inDocker && st.dockerCommand ? `<code>${esc(st.dockerCommand)}</code>` : ''}
+        </div>
+        <div class="update-banner-actions">
+          ${isAndroid
+            ? `<a class="btn btn-sm btn-primary" href="/__android/settings">手机端下载并安装</a>`
+            : `<button type="button" class="btn btn-sm btn-primary" id="upd-banner-detail">查看更新与下载</button>`}
+          <button type="button" class="btn btn-sm" id="upd-banner-dismiss">忽略此版本</button>
+        </div>
+      </div>
+    `;
+    const detailBtn = document.getElementById('upd-banner-detail');
+    if (detailBtn) {
+      detailBtn.onclick = () => {
+        state.adminTab = 'settings';
+        navigate('/admin?tab=settings', true);
+      };
+    }
+    const dismissBtn = document.getElementById('upd-banner-dismiss');
+    if (dismissBtn) {
+      dismissBtn.onclick = async () => {
+        try {
+          state.updateStatus = await api('/admin/api/update/config', {
+            method: 'PUT',
+            body: { dismissVersion: st.latestVersion },
+          });
+          paintAdminUpdateBanner(state.updateStatus);
+          toast(`已忽略 ${st.latestVersion} 的更新提示`);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
+  }
+
+  async function refreshAdminUpdateBanner() {
+    try {
+      const st = await api('/admin/api/update');
+      state.updateStatus = st;
+      paintAdminUpdateBanner(st);
+    } catch (_) {}
   }
 
   async function renderAdminOverview(body) {
@@ -2874,6 +2931,7 @@
 
   function paintAdminBangumi(body, st, runs, libs) {
     const arch = st.archive || {};
+    const archSrc = st.archiveSource || { source: 'zh_cn', customUrl: '', metaUrl: '' };
     const sched = st.archiveSchedule || { enabled: false, frequency: 'weekly', dayOfWeek: 3, dayOfMonth: 1, timeOfDay: '06:00' };
     const dlPct = arch.totalBytes > 0 ? Math.min(100, Math.round((arch.downloadedBytes / arch.totalBytes) * 100)) : 0;
     const prevInput = document.getElementById('bgm-proxy-url');
@@ -2881,6 +2939,15 @@
     const proxyInputVal = editingProxy ? prevInput.value : (st.proxyUrl || '');
     const selStart = editingProxy ? prevInput.selectionStart : null;
     const selEnd = editingProxy ? prevInput.selectionEnd : null;
+    const srcForm = document.getElementById('bgm-arch-source-form');
+    const editingSrc = srcForm && srcForm.contains(document.activeElement);
+    const srcState = editingSrc ? {
+      source: document.getElementById('bgm-arch-source')?.value || archSrc.source || 'zh_cn',
+      customUrl: document.getElementById('bgm-arch-custom-url')?.value ?? (archSrc.customUrl || ''),
+    } : {
+      source: archSrc.source || 'zh_cn',
+      customUrl: archSrc.customUrl || '',
+    };
     const schedForm = document.getElementById('bgm-arch-sched-form');
     const editingSched = schedForm && schedForm.contains(document.activeElement);
     const schedState = editingSched ? {
@@ -2933,7 +3000,7 @@
           <span class="badge ${st.proxyUrl ? 'badge-success' : ''}">${st.proxyUrl ? '已启用代理' : '当前为直连'}</span>
         </div>
         <p style="font-size:12.5px;color:var(--text-secondary);margin:0 0 12px">
-          统一加速 <code>bangumi/Archive</code> GitHub 离线快照下载、<code>api.bgm.tv</code> 检索与 <code>lain.bgm.tv</code> 封面抓取（含手动匹配弹窗预览图）。<strong>仅作用于 Bangumi 相关请求，绝不影响 115 网盘与 WebDAV 流量。</strong>
+          统一加速 GitHub 离线快照下载（中文简介增强版 / <code>bangumi/Archive</code>）、软件版本更新检测与下载、<code>api.bgm.tv</code> 检索与 <code>lain.bgm.tv</code> 封面抓取。<strong>仅作用于 Bangumi 与 GitHub 相关请求，绝不影响 115 网盘与 WebDAV 流量。</strong>
         </p>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <input type="text" id="bgm-proxy-url" value="${esc(proxyInputVal)}" placeholder="留空直连；支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" style="flex:1;min-width:260px;height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
@@ -2946,10 +3013,25 @@
 
       <div class="grid-2">
         <div class="card">
-          <h3>引擎一：Bangumi 官方离线索引库（推荐大规模书库使用）</h3>
+          <h3>引擎一：Bangumi 离线索引库（推荐大规模书库使用）</h3>
           <p style="font-size:12.5px;color:var(--text-secondary)">
-            自动从 <code>bangumi/Archive</code> 拉取最新公开数据快照并校验 SHA256，流式导入全量书籍主条目（含 <code>nsfw: true</code> 分级标记）并剔除单行本分卷子条目。几万部漫画可在本地 SQLite 毫秒级完成繁简/异体归一与作者交叉匹配，零 API 限流风险。
+            支持默认<strong>中文简介增强镜像</strong>（全站非 NSFW 外文简介 AI 翻译为简体中文，与官方 100% 同构）或切换回 <code>bangumi/Archive</code> 官方原版 / 自定义源。拉取快照并校验 SHA256 后流式导入全量书籍主条目，几万部漫画可在本地 SQLite 毫秒级完成匹配，零 API 限流风险。
           </p>
+          <form id="bgm-arch-source-form" style="margin:10px 0 12px;padding:10px 12px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
+            <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">离线快照数据源</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <select id="bgm-arch-source" style="flex:1;min-width:220px;height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+                <option value="zh_cn" ${srcState.source === 'zh_cn' ? 'selected' : ''}>中文简介增强镜像（默认 · xJogger/bangumi-archive-zh）</option>
+                <option value="official" ${srcState.source === 'official' ? 'selected' : ''}>Bangumi 官方原版（bangumi/Archive）</option>
+                <option value="custom" ${srcState.source === 'custom' ? 'selected' : ''}>自定义兼容源（aux/latest.json）</option>
+              </select>
+              <button type="submit" class="btn btn-sm btn-primary" ${arch.updating ? 'disabled' : ''}>保存源</button>
+            </div>
+            <div id="bgm-arch-custom-wrap" style="margin-top:8px;display:${srcState.source === 'custom' ? '' : 'none'}">
+              <input type="url" id="bgm-arch-custom-url" value="${esc(srcState.customUrl)}" placeholder="https://raw.githubusercontent.com/.../aux/latest.json" style="width:100%;height:34px;padding:0 10px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+            </div>
+            ${archSrc.metaUrl ? `<div style="margin-top:6px;font-size:11.5px;color:var(--text-muted);word-break:break-all">当前元数据地址：<code>${esc(archSrc.metaUrl)}</code></div>` : ''}
+          </form>
           <div style="font-size:13px;margin:12px 0;display:grid;gap:4px">
             <div>状态：${arch.ready ? `<span class="badge badge-success">已就绪 · ${Number(arch.subjectCount || 0).toLocaleString()} 条书籍条目</span>` : `<span class="badge badge-warn">尚未建立离线索引</span>`}</div>
             ${arch.dumpName ? `<div style="color:var(--text-muted);font-size:12px">快照版本：${esc(arch.dumpName)} · 导入于 ${fmtTime(arch.importedAt)}</div>` : ''}
@@ -3132,6 +3214,30 @@
         btn.disabled = false;
       }
     };
+
+    const archSrcSel = document.getElementById('bgm-arch-source');
+    if (archSrcSel) {
+      archSrcSel.onchange = () => {
+        const wrap = document.getElementById('bgm-arch-custom-wrap');
+        if (wrap) wrap.style.display = archSrcSel.value === 'custom' ? '' : 'none';
+      };
+    }
+    const archSrcFormEl = document.getElementById('bgm-arch-source-form');
+    if (archSrcFormEl) {
+      archSrcFormEl.onsubmit = async (e) => {
+        e.preventDefault();
+        const source = document.getElementById('bgm-arch-source')?.value || 'zh_cn';
+        const customUrl = (document.getElementById('bgm-arch-custom-url')?.value || '').trim();
+        try {
+          await api('/admin/api/bangumi/archive/source', {
+            method: 'PUT',
+            body: { source, customUrl },
+          });
+          toast('离线索引数据源已保存；点击「检查并更新离线索引库」即可拉取对应源');
+          renderAdminBangumi(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
 
     document.getElementById('bgm-arch-update').onclick = async () => {
       try {
@@ -3378,11 +3484,18 @@
   // --- Admin Cache & Settings Tab ---
 
   async function renderAdminSettings(body) {
-    const [cache, settings, diagData] = await Promise.all([
+    const [cache, settings, diagData, updStatus] = await Promise.all([
       api('/admin/api/cache'),
       api('/admin/api/settings'),
       api('/admin/api/diagnostics?limit=80').catch(() => ({ status: {}, events: [] })),
+      api('/admin/api/update').catch(() => null),
     ]);
+    if (updStatus) {
+      state.updateStatus = updStatus;
+      paintAdminUpdateBanner(updStatus);
+    }
+    const upd = updStatus || {};
+    const isAndroidUA = navigator.userAgent.includes('FK115Android/');
     const entries = cache.entries || {};
     const rangeStat = entries.range || {};
     const pageStat = entries.page || {};
@@ -3406,6 +3519,46 @@
     };
 
     body.innerHTML = `
+      <div class="card">
+        <div class="section-head" style="flex-wrap:wrap;gap:10px">
+          <div>
+            <h3 style="margin:0 0 4px">软件版本与更新检测</h3>
+            <div style="font-size:12.5px;color:var(--text-secondary)">
+              默认每 24 小时后台静默检查一次 GitHub Releases（自动复用「Bangumi 刮削中心」配置的网络代理；未配置则直连）。服务端/桌面端提供更新提示、变更日志与对应平台下载/Docker 更新命令，不强行原地替换程序；Android 客户端可在「手机端设置」中校验 SHA256 后直接安装。
+            </div>
+          </div>
+          <label class="check-row" style="font-weight:600;color:var(--text)">
+            <input type="checkbox" id="upd-auto-check" ${upd.autoCheckEnabled !== false ? 'checked' : ''}>
+            <span>每 24 小时自动检查更新</span>
+          </label>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0;font-size:13px">
+          <span>当前版本：<code>${esc(upd.currentVersion || '-')}</code></span>
+          <span class="badge">${esc(upd.platform || '-')}</span>
+          ${upd.inDocker ? `<span class="badge badge-accent">Docker 容器</span>` : ''}
+          ${isAndroidUA ? `<span class="badge badge-accent">Android 客户端</span>` : ''}
+          ${upd.hasUpdate
+            ? `<span class="badge badge-accent">发现新版本：${esc(upd.latestVersion)}</span>`
+            : (upd.latestVersion ? `<span class="badge badge-success">已是最新版本 (${esc(upd.latestVersion)})</span>` : `<span class="badge">尚未检查</span>`)}
+          ${upd.checkedAt ? `<span style="font-size:12px;color:var(--text-muted)">最近检查：${fmtTime(upd.checkedAt)}</span>` : ''}
+        </div>
+        ${upd.lastError ? `<div style="font-size:12.5px;color:var(--danger);margin-bottom:10px">最近检查失败：${esc(upd.lastError)}（若无法直连 GitHub，可在「Bangumi 刮削中心」配置网络代理）</div>` : ''}
+        ${upd.inDocker && upd.dockerCommand ? `
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+            <div class="code-box" style="flex:1;min-width:240px">${esc(upd.dockerCommand)}</div>
+            <button type="button" class="btn btn-sm btn-primary" id="upd-copy-docker">复制拉取命令</button>
+          </div>` : ''}
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <button type="button" class="btn btn-sm btn-primary" id="upd-check-now" ${upd.checking ? 'disabled' : ''}>${upd.checking ? '检查中…' : '立即检查更新'}</button>
+          ${isAndroidUA && upd.hasUpdate ? `<a class="btn btn-sm btn-primary" href="/__android/settings">打开手机端下载并校验安装</a>` : ''}
+          ${!isAndroidUA && !upd.inDocker && upd.hasUpdate && upd.assetUrl ? `<a class="btn btn-sm btn-primary" href="${esc(upd.assetUrl)}" target="_blank" rel="noopener noreferrer">下载 ${esc(upd.assetName)}${upd.assetSize ? ` (${fmtBytes(upd.assetSize)})` : ''}</a>` : ''}
+          ${upd.releaseUrl ? `<a class="btn btn-sm" href="${esc(upd.releaseUrl)}" target="_blank" rel="noopener noreferrer">查看 GitHub Release 页面</a>` : ''}
+          ${upd.hasUpdate && !upd.dismissed ? `<button type="button" class="btn btn-sm" id="upd-dismiss-ver">忽略 ${esc(upd.latestVersion)}</button>` : ''}
+          ${upd.hasUpdate && upd.dismissed ? `<button type="button" class="btn btn-sm" id="upd-undismiss-ver">恢复顶部提示</button>` : ''}
+        </div>
+        ${upd.releaseNotes ? `<details style="margin-top:10px" ${upd.hasUpdate ? 'open' : ''}><summary style="cursor:pointer;font-size:12.5px;color:var(--text-secondary)">查看 ${esc(upd.latestVersion || '最新')} 更新日志</summary><pre class="diag-log-view" style="max-height:220px">${esc(upd.releaseNotes)}</pre></details>` : ''}
+      </div>
+
       <div class="card">
         <div class="section-head">
           <h3>磁盘与数据库缓存统计</h3>
@@ -3484,6 +3637,72 @@
         <pre class="diag-log-view" id="diag-log-preview">${esc(formatDiagLines(diagEvents))}</pre>
       </div>
     `;
+
+    const updCheckBtn = document.getElementById('upd-check-now');
+    if (updCheckBtn) {
+      updCheckBtn.onclick = async () => {
+        updCheckBtn.disabled = true;
+        updCheckBtn.textContent = '检查中…';
+        try {
+          const st = await api('/admin/api/update/check', { method: 'POST' });
+          state.updateStatus = st;
+          paintAdminUpdateBanner(st);
+          if (st && st.lastError) toast(`检查失败：${st.lastError}`, 'error');
+          else if (st && st.hasUpdate) toast(`发现新版本 ${st.latestVersion}`);
+          else toast('当前已是最新版本');
+          renderAdminSettings(body);
+        } catch (err) {
+          toast(err.message, 'error');
+          updCheckBtn.disabled = false;
+          updCheckBtn.textContent = '立即检查更新';
+        }
+      };
+    }
+    const updAutoToggle = document.getElementById('upd-auto-check');
+    if (updAutoToggle) {
+      updAutoToggle.onchange = async (e) => {
+        const autoCheckEnabled = e.target.checked;
+        try {
+          state.updateStatus = await api('/admin/api/update/config', { method: 'PUT', body: { autoCheckEnabled } });
+          toast(autoCheckEnabled ? '已开启每 24 小时自动检查更新' : '已关闭后台自动检查更新');
+        } catch (err) {
+          e.target.checked = !autoCheckEnabled;
+          toast(err.message, 'error');
+        }
+      };
+    }
+    const updCopyDocker = document.getElementById('upd-copy-docker');
+    if (updCopyDocker && upd.dockerCommand) {
+      updCopyDocker.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(upd.dockerCommand);
+          toast('已复制 Docker 拉取命令');
+        } catch (_) {
+          toast(upd.dockerCommand);
+        }
+      };
+    }
+    const updDismissBtn = document.getElementById('upd-dismiss-ver');
+    if (updDismissBtn && upd.latestVersion) {
+      updDismissBtn.onclick = async () => {
+        try {
+          state.updateStatus = await api('/admin/api/update/config', { method: 'PUT', body: { dismissVersion: upd.latestVersion } });
+          paintAdminUpdateBanner(state.updateStatus);
+          toast(`已忽略 ${upd.latestVersion} 的顶部提醒`);
+          renderAdminSettings(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
+    const updUndismissBtn = document.getElementById('upd-undismiss-ver');
+    if (updUndismissBtn) {
+      updUndismissBtn.onclick = async () => {
+        try {
+          state.updateStatus = await api('/admin/api/update/config', { method: 'PUT', body: { dismissVersion: '' } });
+          paintAdminUpdateBanner(state.updateStatus);
+          renderAdminSettings(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
 
     body.querySelectorAll('button[data-clear-cache]').forEach((btn) => {
       btn.onclick = async () => {

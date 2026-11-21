@@ -91,6 +91,12 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/diagnostics/export", s.exportDiagnostics)
 	r.Delete("/diagnostics", s.clearDiagnostics)
 
+	// Cross-platform release update detection
+	r.Get("/update", s.getUpdateStatus)
+	r.Get("/update/status", s.getUpdateStatus)
+	r.Post("/update/check", s.postUpdateCheck)
+	r.Put("/update/config", s.putUpdateConfig)
+
 	// Rich detail endpoints for built-in Bookshelf & WebView
 	r.Get("/series/{seriesID}/detail", s.seriesRichDetail)
 	r.Get("/books/{bookID}/detail", s.bookRichDetail)
@@ -101,6 +107,8 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Put("/bangumi/config", s.putBangumiConfig)
 	r.Post("/bangumi/proxy/test", s.testBangumiProxy)
 	r.Get("/bangumi/subjects/{subjectID}/cover", s.bangumiSubjectCover)
+	r.Get("/bangumi/archive/source", s.getBangumiArchiveSource)
+	r.Put("/bangumi/archive/source", s.putBangumiArchiveSource)
 	r.Get("/bangumi/archive/schedule", s.getBangumiArchiveSchedule)
 	r.Put("/bangumi/archive/schedule", s.putBangumiArchiveSchedule)
 	r.Post("/bangumi/archive/update", s.startBangumiArchiveUpdate)
@@ -1381,17 +1389,21 @@ func (s *Server) bangumiStatus(w http.ResponseWriter, r *http.Request) {
 	showNSFW := s.store.ShowNSFW(r.Context())
 	var arch bangumi.ArchiveStatus
 	var archSched bangumi.ArchiveSchedule
+	var archSource bangumi.ArchiveSourceConfig
 	proxyURL := ""
 	if s.bangumi != nil {
 		arch = s.bangumi.ArchiveStatus()
 		archSched = s.bangumi.ArchiveSchedule(r.Context())
+		archSource = s.bangumi.ArchiveSource(r.Context())
 		proxyURL = s.bangumi.RedactedProxyURL(r.Context())
 	} else {
 		archSched = bangumi.DefaultArchiveSchedule()
+		archSource, _ = bangumi.ResolveArchiveSource(bangumi.ArchiveSourceZH, "")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"archive":         arch,
 		"archiveSchedule": archSched,
+		"archiveSource":   archSource,
 		"proxyUrl":        proxyURL,
 		"showNsfw":        showNSFW,
 		"nsfwCount":       nsfwCount,
@@ -1408,8 +1420,10 @@ func (s *Server) putBangumiConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ProxyURL *string `json:"proxyUrl"`
-		ShowNSFW *bool   `json:"showNsfw"`
+		ProxyURL         *string `json:"proxyUrl"`
+		ShowNSFW         *bool   `json:"showNsfw"`
+		ArchiveSource    *string `json:"archiveSource"`
+		ArchiveCustomURL *string `json:"archiveCustomUrl"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -1427,6 +1441,16 @@ func (s *Server) putBangumiConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.ArchiveSource != nil {
+		customURL := ""
+		if req.ArchiveCustomURL != nil {
+			customURL = *req.ArchiveCustomURL
+		}
+		if _, err := s.bangumi.SetArchiveSource(r.Context(), *req.ArchiveSource, customURL); err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_ARCHIVE_SOURCE", err.Error())
+			return
+		}
+	}
 	if req.ShowNSFW != nil {
 		if err := s.store.SetSetting(r.Context(), "show_nsfw", strconv.FormatBool(*req.ShowNSFW)); err != nil {
 			s.writeDBError(w, r, err)
@@ -1434,8 +1458,9 @@ func (s *Server) putBangumiConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"proxyUrl": redacted,
-		"showNsfw": s.store.ShowNSFW(r.Context()),
+		"proxyUrl":      redacted,
+		"showNsfw":      s.store.ShowNSFW(r.Context()),
+		"archiveSource": s.bangumi.ArchiveSource(r.Context()),
 	})
 }
 

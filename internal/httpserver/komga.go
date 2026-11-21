@@ -53,6 +53,7 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Patch("/books/{bookID}/read-progress", s.patchKomgaBookReadProgress)
 	r.Delete("/books/{bookID}/read-progress", s.deleteKomgaBookReadProgress)
 	r.Get("/books/{bookID}/pages", s.komgaPages)
+	r.Get("/books/{bookID}/load-status", s.komgaBookLoadStatus)
 	r.Get("/books/{bookID}/pages/{pageNumber}", s.komgaPageImage)
 	r.Get("/books/{bookID}/pages/{pageNumber}/raw", s.komgaPageImage)
 	r.Get("/books/{bookID}/pages/{pageNumber}/thumbnail", s.komgaBookPlaceholderThumbnail)
@@ -618,6 +619,24 @@ func (s *Server) komgaPages(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, 200, out)
+}
+
+func (s *Server) komgaBookLoadStatus(w http.ResponseWriter, r *http.Request) {
+	book, err := s.store.BookByID(r.Context(), chi.URLParam(r, "bookID"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Book not found.")
+		return
+	}
+	pageNum := intQuery(r, "page", 0)
+	if pageNum < 0 {
+		pageNum = 0
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if s.archive == nil {
+		writeJSON(w, http.StatusOK, archive.LoadProgress{BookID: book.ID, Stage: "idle"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.archive.LoadStatus(book.ID, pageNum))
 }
 
 func (s *Server) komgaPageImage(w http.ResponseWriter, r *http.Request) {

@@ -23,11 +23,15 @@ import android.view.WindowInsetsController;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
+import java.io.File;
 import java.io.OutputStream;
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -60,6 +64,12 @@ public final class SettingsActivity extends Activity {
     private Button copyLanBtn;
     private Switch verboseSwitch;
     private TextView diagPreviewView;
+    private TextView updateStatusView;
+    private TextView updateNotesView;
+    private ProgressBar updateProgressBar;
+    private TextView updateProgressText;
+    private Button checkUpdateBtn;
+    private Button installUpdateBtn;
 
     private final ExecutorService diagExecutor = Executors.newSingleThreadExecutor();
     private final AtomicInteger diagSeq = new AtomicInteger();
@@ -69,12 +79,23 @@ public final class SettingsActivity extends Activity {
     private boolean updatingUi;
     private String pendingExportText;
     private String primaryLanUrl = "";
+    private boolean updateBusy;
+    private boolean updateCheckedOnConnect;
+    private boolean updateHasNew;
+    private String updateLatestVersion = "";
+    private String updateAssetUrl = "";
+    private File pendingInstallApk;
+    private boolean pendingDownloadAfterPerm;
 
     private final ReaderService.Observer observer = (instance, message) -> runOnUiThread(this::refreshUi);
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
             service = (ReaderService.LocalBinder) binder;
             service.watch(observer);
+            if (!updateCheckedOnConnect) {
+                updateCheckedOnConnect = true;
+                requestUpdateStatus(false);
+            }
         }
         @Override public void onServiceDisconnected(ComponentName name) {
             service = null;
@@ -166,6 +187,54 @@ public final class SettingsActivity extends Activity {
         serviceActions.addView(stopBtn);
         serviceCard.addView(serviceActions);
         container.addView(serviceCard);
+
+        // Card 1.5: App Update (verified SHA256SUMS + PackageInstaller)
+        LinearLayout updateCard = makeCard(cardColor);
+        updateCard.addView(makeSectionTitle("应用版本与更新", textColor));
+        updateStatusView = new TextView(this);
+        updateStatusView.setTextSize(13f);
+        updateStatusView.setTextColor(mutedColor);
+        updateStatusView.setPadding(0, dp(6), 0, dp(6));
+        updateStatusView.setText("正在读取版本信息…");
+        updateCard.addView(updateStatusView);
+
+        updateNotesView = new TextView(this);
+        updateNotesView.setTextSize(12f);
+        updateNotesView.setTextColor(mutedColor);
+        updateNotesView.setBackgroundColor(dark ? 0xFF131720 : 0xFFF8F9FC);
+        updateNotesView.setPadding(dp(10), dp(8), dp(10), dp(8));
+        updateNotesView.setMaxLines(8);
+        updateNotesView.setVisibility(View.GONE);
+        LinearLayout.LayoutParams notesLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        notesLp.bottomMargin = dp(8);
+        updateNotesView.setLayoutParams(notesLp);
+        updateCard.addView(updateNotesView);
+
+        updateProgressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        updateProgressBar.setMax(100);
+        updateProgressBar.setVisibility(View.GONE);
+        updateCard.addView(updateProgressBar);
+
+        updateProgressText = new TextView(this);
+        updateProgressText.setTextSize(12f);
+        updateProgressText.setTextColor(mutedColor);
+        updateProgressText.setPadding(0, dp(4), 0, dp(8));
+        updateProgressText.setVisibility(View.GONE);
+        updateCard.addView(updateProgressText);
+
+        LinearLayout updateActions = makeButtonRow();
+        checkUpdateBtn = new Button(this);
+        checkUpdateBtn.setText("检查更新");
+        checkUpdateBtn.setOnClickListener(v -> requestUpdateStatus(true));
+        installUpdateBtn = new Button(this);
+        installUpdateBtn.setText("下载并安装更新");
+        installUpdateBtn.setVisibility(View.GONE);
+        installUpdateBtn.setOnClickListener(v -> startDownloadAndInstallUpdate());
+        updateActions.addView(checkUpdateBtn);
+        updateActions.addView(installUpdateBtn);
+        updateCard.addView(updateActions);
+        container.addView(updateCard);
 
         // Card 2: LAN Server
         LinearLayout lanCard = makeCard(cardColor);
@@ -563,6 +632,170 @@ public final class SettingsActivity extends Activity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (pendingInstallApk != null && UpdateInstaller.canInstallPackages(this)) {
+            File apk = pendingInstallApk;
+            pendingInstallApk = null;
+            launchApkInstaller(apk);
+        } else if (pendingDownloadAfterPerm && UpdateInstaller.canInstallPackages(this)) {
+            pendingDownloadAfterPerm = false;
+            startDownloadAndInstallUpdate();
+        }
+    }
+
+    private void requestUpdateStatus(boolean force) {
+        if (updateBusy) return;
+        if (service == null || !service.isRunning()) {
+            String cur = service != null ? service.getAppVersionName() : "";
+            updateStatusView.setText((cur.isEmpty() ? "" : "当前版本：" + cur + " · ") + "本机服务启动后可检查更新");
+            return;
+        }
+        updateBusy = true;
+        checkUpdateBtn.setEnabled(false);
+        installUpdateBtn.setEnabled(false);
+        if (force) {
+            updateStatusView.setText("正在检查 GitHub 最新版本（自动复用 Bangumi 网络代理配置）…");
+        }
+        service.checkUpdate(force, (json, error) -> {
+            if (isFinishing() || isDestroyed()) return;
+            updateBusy = false;
+            checkUpdateBtn.setEnabled(true);
+            installUpdateBtn.setEnabled(true);
+            if (error != null || json == null) {
+                updateStatusView.setText("检查更新失败：" + (error != null ? error : "未知错误"));
+                return;
+            }
+            applyUpdateStatusJson(json, force);
+        });
+    }
+
+    private void applyUpdateStatusJson(String json, boolean manual) {
+        try {
+            JSONObject obj = new JSONObject(json);
+            String cur = obj.optString("currentVersion", "");
+            if (cur.isEmpty() && service != null) cur = service.getAppVersionName();
+            String latest = obj.optString("latestVersion", "");
+            boolean hasUpdate = obj.optBoolean("hasUpdate", false);
+            String assetUrl = obj.optString("assetUrl", "");
+            long assetSize = obj.optLong("assetSize", 0L);
+            String notes = obj.optString("releaseNotes", "").trim();
+            String lastErr = obj.optString("lastError", "").trim();
+            String checkedAt = obj.optString("checkedAt", "").trim();
+
+            updateHasNew = hasUpdate;
+            updateLatestVersion = latest;
+            updateAssetUrl = assetUrl;
+
+            if (!lastErr.isEmpty() && manual) {
+                updateStatusView.setText("当前版本：" + cur + "\n检查失败：" + lastErr);
+            } else if (hasUpdate && !latest.isEmpty()) {
+                String sizeHint = assetSize > 0 ? (" · 安装包约 " + formatMiB(assetSize)) : "";
+                updateStatusView.setText("当前版本：" + cur + " → 发现新版本：" + latest + sizeHint + "\n下载时自动校验 SHA256SUMS 完整性。");
+            } else if (!latest.isEmpty()) {
+                updateStatusView.setText("当前版本：" + cur + "（已是最新版本 " + latest + "）"
+                        + (checkedAt.isEmpty() ? "" : "\n最近检查：" + checkedAt.replace("T", " ").replace("Z", " UTC")));
+            } else {
+                updateStatusView.setText("当前版本：" + (cur.isEmpty() ? "-" : cur) + " · 尚未检查更新");
+            }
+
+            if (hasUpdate && !notes.isEmpty()) {
+                updateNotesView.setText(notes.length() > 600 ? notes.substring(0, 600) + "…" : notes);
+                updateNotesView.setVisibility(View.VISIBLE);
+            } else {
+                updateNotesView.setVisibility(View.GONE);
+            }
+
+            if (hasUpdate && !assetUrl.isEmpty()) {
+                installUpdateBtn.setText("下载并安装 " + latest);
+                installUpdateBtn.setVisibility(View.VISIBLE);
+            } else {
+                installUpdateBtn.setVisibility(View.GONE);
+            }
+        } catch (Throwable t) {
+            updateStatusView.setText("解析更新状态失败：" + t.getMessage());
+        }
+    }
+
+    private void startDownloadAndInstallUpdate() {
+        if (updateBusy || !updateHasNew || updateAssetUrl.isEmpty()) return;
+        if (service == null || !service.isRunning()) {
+            Toast.makeText(this, "请先启动本机书库服务", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!UpdateInstaller.canInstallPackages(this)) {
+            pendingDownloadAfterPerm = true;
+            Toast.makeText(this, "请先开启「允许安装未知应用」，返回后将自动继续下载更新", Toast.LENGTH_LONG).show();
+            try {
+                UpdateInstaller.openInstallPermissionSettings(this);
+            } catch (Throwable t) {
+                pendingDownloadAfterPerm = false;
+                Toast.makeText(this, "无法打开安装权限设置：" + t.getMessage(), Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+
+        updateBusy = true;
+        checkUpdateBtn.setEnabled(false);
+        installUpdateBtn.setEnabled(false);
+        updateProgressBar.setVisibility(View.VISIBLE);
+        updateProgressBar.setIndeterminate(true);
+        updateProgressText.setVisibility(View.VISIBLE);
+        updateProgressText.setText("正在获取 SHA256SUMS 并准备下载 " + updateLatestVersion + "…");
+
+        service.downloadVerifiedUpdate((downloaded, total) -> {
+            if (isFinishing() || isDestroyed()) return;
+            if (total > 0) {
+                int pct = (int) Math.min(100, Math.max(0, (downloaded * 100L) / total));
+                updateProgressBar.setIndeterminate(false);
+                updateProgressBar.setProgress(pct);
+                updateProgressText.setText("正在下载更新包：" + formatMiB(downloaded) + " / " + formatMiB(total) + " (" + pct + "%)");
+            } else {
+                updateProgressBar.setIndeterminate(true);
+                updateProgressText.setText("正在下载更新包：已接收 " + formatMiB(downloaded));
+            }
+        }, (apkFile, error) -> {
+            if (isFinishing() || isDestroyed()) return;
+            updateBusy = false;
+            checkUpdateBtn.setEnabled(true);
+            installUpdateBtn.setEnabled(true);
+            if (error != null || apkFile == null) {
+                updateProgressBar.setVisibility(View.GONE);
+                updateProgressText.setText("下载或 SHA256 校验失败：" + (error != null ? error : "未知错误"));
+                Toast.makeText(this, "更新失败：" + (error != null ? error : "未知错误"), Toast.LENGTH_LONG).show();
+                return;
+            }
+            updateProgressBar.setIndeterminate(false);
+            updateProgressBar.setProgress(100);
+            updateProgressText.setText("SHA256 校验通过，正在拉起系统安装界面…");
+            launchApkInstaller(apkFile);
+        });
+    }
+
+    private void launchApkInstaller(File apkFile) {
+        if (!UpdateInstaller.canInstallPackages(this)) {
+            pendingInstallApk = apkFile;
+            Toast.makeText(this, "请授予安装未知应用权限后返回继续安装", Toast.LENGTH_LONG).show();
+            try { UpdateInstaller.openInstallPermissionSettings(this); } catch (Throwable ignored) {}
+            return;
+        }
+        try {
+            UpdateInstaller.installApk(this, apkFile);
+        } catch (Throwable t) {
+            DiagnosticsLog.append(this, "error", "android_update", "commit_session",
+                    t.getClass().getSimpleName(), t.getMessage());
+            updateProgressText.setText("启动系统安装失败：" + t.getMessage());
+            Toast.makeText(this, "启动安装失败：" + t.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private static String formatMiB(long bytes) {
+        if (bytes < 1024L * 1024L) {
+            return String.format(Locale.US, "%.1f KiB", bytes / 1024.0);
+        }
+        return String.format(Locale.US, "%.2f MiB", bytes / (1024.0 * 1024.0));
     }
 
     @Override protected void onDestroy() {

@@ -128,6 +128,8 @@ func (r *RemoteReaderAt) fetchBlock(ctx context.Context, index int64) ([]byte, e
 	end := min(start+r.blockSize-1, r.book.Size-1)
 	expected := end - start + 1
 	for attempt := 0; attempt < 2; attempt++ {
+		reportLoadProvider(ctx, database.Provider115)
+		reportLoadStage(ctx, "", "正在向 115 网盘请求直链并拉取数据分块…")
 		download, err := r.downloadURL(ctx, attempt > 0)
 		if err != nil {
 			return nil, err
@@ -160,7 +162,7 @@ func (r *RemoteReaderAt) fetchBlock(ctx context.Context, index int64) ([]byte, e
 			response.Body.Close()
 			return nil, fmt.Errorf("range request returned HTTP %d", response.StatusCode)
 		}
-		data, readErr := io.ReadAll(io.LimitReader(response.Body, expected+1))
+		data, readErr := readAllReporting(ctx, io.LimitReader(response.Body, expected+1))
 		response.Body.Close()
 		if readErr != nil {
 			return nil, readErr

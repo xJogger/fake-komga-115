@@ -33,6 +33,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/pipeline"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
+	"github.com/xJogger/fake-komga-115/internal/updater"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
 
@@ -52,6 +53,7 @@ type Server struct {
 	covers    *thumbnail.BatchManager
 	tasks     *maintenance.Manager
 	diag      *diagnostics.Recorder
+	updater   *updater.Service
 	logger    *slog.Logger
 	router    chi.Router
 	web       *template.Template
@@ -111,6 +113,13 @@ func (s *Server) WithPipeline(pipelineManager *pipeline.Manager) *Server {
 func (s *Server) WithDiagnostics(rec *diagnostics.Recorder) *Server {
 	if rec != nil {
 		s.diag = rec
+	}
+	return s
+}
+
+func (s *Server) WithUpdater(u *updater.Service) *Server {
+	if u != nil {
+		s.updater = u
 	}
 	return s
 }

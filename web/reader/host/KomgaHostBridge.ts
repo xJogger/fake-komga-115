@@ -184,6 +184,10 @@ class KomgaBridgeImpl {
         return this.mangaIdToSeries.get(mangaId);
     }
 
+    public getBookIdForChapter(chapterId: number): string | undefined {
+        return this.chaptersById.get(chapterId)?.bookId;
+    }
+
     private async ensureClientSettingsSynced(): Promise<void> {
         if (this.clientSettingsLoaded) return;
         this.clientSettingsLoaded = true;

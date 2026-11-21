@@ -28,10 +28,53 @@ import (
 )
 
 const (
-	DefaultArchiveMetaURL     = "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json"
-	archiveUserAgent          = "xJogger/fake-komga-115/2.0 (https://github.com/xJogger/fake-komga-115)"
-	currentTermsSchemaVersion = "3"
+	OfficialArchiveMetaURL      = "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json"
+	ChineseArchiveMetaURL       = "https://raw.githubusercontent.com/xJogger/bangumi-archive-zh/main/aux/latest.json"
+	DefaultArchiveMetaURL       = ChineseArchiveMetaURL
+	ArchiveSourceZH             = "zh_cn"
+	ArchiveSourceOfficial       = "official"
+	ArchiveSourceCustom         = "custom"
+	SettingArchiveSource        = "bangumi_archive_source"
+	SettingArchiveCustomMetaURL = "bangumi_archive_custom_url"
+	archiveUserAgent            = "xJogger/fake-komga-115/2.5 (https://github.com/xJogger/MangaAlpha)"
+	currentTermsSchemaVersion   = "3"
 )
+
+type ArchiveSourceConfig struct {
+	Source    string `json:"source"`
+	CustomURL string `json:"customUrl,omitempty"`
+	MetaURL   string `json:"metaUrl"`
+}
+
+func ResolveArchiveSource(source, customURL string) (ArchiveSourceConfig, error) {
+	norm := strings.ToLower(strings.TrimSpace(source))
+	custom := strings.TrimSpace(customURL)
+	switch norm {
+	case "", ArchiveSourceZH, "zh", "chinese":
+		return ArchiveSourceConfig{
+			Source:    ArchiveSourceZH,
+			CustomURL: custom,
+			MetaURL:   ChineseArchiveMetaURL,
+		}, nil
+	case ArchiveSourceOfficial, "upstream", "origin":
+		return ArchiveSourceConfig{
+			Source:    ArchiveSourceOfficial,
+			CustomURL: custom,
+			MetaURL:   OfficialArchiveMetaURL,
+		}, nil
+	case ArchiveSourceCustom:
+		if custom == "" || (!strings.HasPrefix(custom, "https://") && !strings.HasPrefix(custom, "http://")) {
+			return ArchiveSourceConfig{}, errors.New("custom archive source URL must start with https:// or http://")
+		}
+		return ArchiveSourceConfig{
+			Source:    ArchiveSourceCustom,
+			CustomURL: custom,
+			MetaURL:   custom,
+		}, nil
+	default:
+		return ArchiveSourceConfig{}, fmt.Errorf("unsupported archive source %q (use zh_cn, official, or custom)", source)
+	}
+}
 
 type ArchiveStatus struct {
 	Ready                 bool   `json:"ready"`
@@ -87,6 +130,25 @@ func NewArchiveIndex(dir string, logger *slog.Logger) (*ArchiveIndex, error) {
 	}
 	idx.openExistingIfPresent()
 	return idx, nil
+}
+
+func (a *ArchiveIndex) SetMetaURL(metaURL string) {
+	metaURL = strings.TrimSpace(metaURL)
+	if metaURL == "" {
+		metaURL = DefaultArchiveMetaURL
+	}
+	a.mu.Lock()
+	a.metaURL = metaURL
+	a.mu.Unlock()
+}
+
+func (a *ArchiveIndex) MetaURL() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if strings.TrimSpace(a.metaURL) == "" {
+		return DefaultArchiveMetaURL
+	}
+	return a.metaURL
 }
 
 func (a *ArchiveIndex) SetProxyURL(proxyURL string) error {
@@ -236,7 +298,7 @@ func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context, force bool) {
 		}
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.metaURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.MetaURL(), nil)
 	if err != nil {
 		finishErr = err
 		return

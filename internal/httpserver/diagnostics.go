@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
+	"github.com/xJogger/fake-komga-115/internal/buildinfo"
 	"github.com/xJogger/fake-komga-115/internal/diagnostics"
+	"github.com/xJogger/fake-komga-115/internal/updater"
 )
 
 const settingDiagnosticsVerbose = "diagnostics_verbose"
@@ -107,4 +109,78 @@ func (s *Server) putBangumiArchiveSchedule(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) getBangumiArchiveSource(w http.ResponseWriter, r *http.Request) {
+	if s.bangumi == nil {
+		cfg, _ := bangumi.ResolveArchiveSource(bangumi.ArchiveSourceZH, "")
+		writeJSON(w, http.StatusOK, cfg)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.bangumi.ArchiveSource(r.Context()))
+}
+
+func (s *Server) putBangumiArchiveSource(w http.ResponseWriter, r *http.Request) {
+	if s.bangumi == nil {
+		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
+		return
+	}
+	var req struct {
+		Source    string `json:"source"`
+		CustomURL string `json:"customUrl"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	cfg, err := s.bangumi.SetArchiveSource(r.Context(), req.Source, req.CustomURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARCHIVE_SOURCE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *Server) getUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	if s.updater == nil {
+		writeJSON(w, http.StatusOK, updater.Status{
+			CurrentVersion:   buildinfo.Version,
+			AutoCheckEnabled: true,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.updater.Status(r.Context()))
+}
+
+func (s *Server) postUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if s.updater == nil {
+		writeError(w, http.StatusServiceUnavailable, "UPDATER_UNAVAILABLE", "Update checker is not initialized.")
+		return
+	}
+	st, err := s.updater.CheckNow(r.Context())
+	if err != nil {
+		// Return 200 with structured status + lastError so UI can display clear feedback.
+		writeJSON(w, http.StatusOK, st)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) putUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	if s.updater == nil {
+		writeError(w, http.StatusServiceUnavailable, "UPDATER_UNAVAILABLE", "Update checker is not initialized.")
+		return
+	}
+	var req struct {
+		AutoCheckEnabled *bool   `json:"autoCheckEnabled"`
+		DismissVersion   *string `json:"dismissVersion"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	st, err := s.updater.UpdateConfig(r.Context(), req.AutoCheckEnabled, req.DismissVersion)
+	if err != nil {
+		s.writeDBError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
 }

@@ -89,6 +89,11 @@ WHERE status IN ('queued','running')`, now)
 			_ = liveClient.SetProxyURL(normalized)
 		}
 	}
+	savedSrc, _ := store.GetSetting(ctx, SettingArchiveSource)
+	savedCustom, _ := store.GetSetting(ctx, SettingArchiveCustomMetaURL)
+	if srcCfg, sErr := ResolveArchiveSource(savedSrc, savedCustom); sErr == nil {
+		archiveIdx.SetMetaURL(srcCfg.MetaURL)
+	}
 
 	svc := &Service{
 		store:     store,
@@ -207,6 +212,33 @@ func (s *Service) SetProxyURL(ctx context.Context, inputRaw string) (string, err
 	return RedactProxyURL(merged), nil
 }
 
+func (s *Service) ArchiveSource(ctx context.Context) ArchiveSourceConfig {
+	savedSrc, _ := s.store.GetSetting(ctx, SettingArchiveSource)
+	savedCustom, _ := s.store.GetSetting(ctx, SettingArchiveCustomMetaURL)
+	cfg, err := ResolveArchiveSource(savedSrc, savedCustom)
+	if err != nil {
+		cfg, _ = ResolveArchiveSource(ArchiveSourceZH, "")
+	}
+	return cfg
+}
+
+func (s *Service) SetArchiveSource(ctx context.Context, source, customURL string) (ArchiveSourceConfig, error) {
+	cfg, err := ResolveArchiveSource(source, customURL)
+	if err != nil {
+		return ArchiveSourceConfig{}, err
+	}
+	if err := s.store.SetSetting(ctx, SettingArchiveSource, cfg.Source); err != nil {
+		return ArchiveSourceConfig{}, err
+	}
+	if cfg.Source == ArchiveSourceCustom || strings.TrimSpace(customURL) != "" {
+		if err := s.store.SetSetting(ctx, SettingArchiveCustomMetaURL, cfg.CustomURL); err != nil {
+			return ArchiveSourceConfig{}, err
+		}
+	}
+	s.archive.SetMetaURL(cfg.MetaURL)
+	return cfg, nil
+}
+
 func (s *Service) TestConnectivity(ctx context.Context, candidateRaw *string) (ConnectivityReport, error) {
 	existing, _ := s.store.GetSetting(ctx, SettingProxyURL)
 	targetProxy := existing
@@ -217,7 +249,7 @@ func (s *Service) TestConnectivity(ctx context.Context, candidateRaw *string) (C
 		}
 		targetProxy = merged
 	}
-	return ProbeConnectivity(ctx, targetProxy, s.live.baseURL, s.archive.metaURL)
+	return ProbeConnectivity(ctx, targetProxy, s.live.baseURL, s.archive.MetaURL())
 }
 
 // SearchCandidates searches Bangumi for manual matching in the UI.
