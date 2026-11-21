@@ -265,4 +265,13 @@ func TestArchiveSkipUnchangedAndAutoIncrementalMetadataSync(t *testing.T) {
 	if metaU3.BgmRank == nil || *metaU3.BgmRank != 110 {
 		t.Fatalf("rank did not update in v3: %+v", metaU3.BgmRank)
 	}
+
+	// 5. Idempotency check: forcing a repeat sync against the exact same dump must write 0 rows.
+	repeatUpdated, err := svc.syncOfflineMetadata(context.Background(), true)
+	if err != nil {
+		t.Fatalf("repeat syncOfflineMetadata: %v", err)
+	}
+	if repeatUpdated != 0 {
+		t.Fatalf("expected 0 updated series on idempotent repeat sync, got %d", repeatUpdated)
+	}
 }

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"math"
-	"slices"
 	"strings"
 	"time"
 
@@ -282,6 +281,10 @@ func (s *Service) applyOfflineMetadataBatch(
 	}
 	defer tx.Rollback()
 
+	if _, err := tx.ExecContext(ctx, `UPDATE shelf_revision SET bulk_mode=1 WHERE id=1`); err != nil {
+		return 0, err
+	}
+
 	stmt, err := tx.PrepareContext(ctx, `
 UPDATE series_metadata SET
  bgm_score=?,bgm_rank=?,
@@ -295,6 +298,39 @@ WHERE series_id=?`)
 	}
 	defer stmt.Close()
 
+	delGenres, err := tx.PrepareContext(ctx, `DELETE FROM series_genres WHERE series_id=?`)
+	if err != nil {
+		return 0, err
+	}
+	defer delGenres.Close()
+	insGenres, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO series_genres(series_id,genre) VALUES(?,?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer insGenres.Close()
+
+	delTags, err := tx.PrepareContext(ctx, `DELETE FROM series_tags WHERE series_id=?`)
+	if err != nil {
+		return 0, err
+	}
+	defer delTags.Close()
+	insTags, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO series_tags(series_id,tag) VALUES(?,?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer insTags.Close()
+
+	delAuthors, err := tx.PrepareContext(ctx, `DELETE FROM series_authors WHERE series_id=?`)
+	if err != nil {
+		return 0, err
+	}
+	defer delAuthors.Close()
+	insAuthors, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO series_authors(series_id,name,role) VALUES(?,?,?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer insAuthors.Close()
+
 	for _, u := range updates {
 		if _, err := stmt.ExecContext(ctx,
 			u.bgmScore, u.bgmRank,
@@ -306,35 +342,38 @@ WHERE series_id=?`)
 			return 0, err
 		}
 		if u.genresChanged {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM series_genres WHERE series_id=?`, u.seriesID); err != nil {
+			if _, err := delGenres.ExecContext(ctx, u.seriesID); err != nil {
 				return 0, err
 			}
 			for _, g := range u.genres {
-				if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO series_genres(series_id,genre) VALUES(?,?)`, u.seriesID, g); err != nil {
+				if _, err := insGenres.ExecContext(ctx, u.seriesID, g); err != nil {
 					return 0, err
 				}
 			}
 		}
 		if u.tagsChanged {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM series_tags WHERE series_id=?`, u.seriesID); err != nil {
+			if _, err := delTags.ExecContext(ctx, u.seriesID); err != nil {
 				return 0, err
 			}
 			for _, tg := range u.tags {
-				if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO series_tags(series_id,tag) VALUES(?,?)`, u.seriesID, tg); err != nil {
+				if _, err := insTags.ExecContext(ctx, u.seriesID, tg); err != nil {
 					return 0, err
 				}
 			}
 		}
 		if u.authorsChanged {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM series_authors WHERE series_id=?`, u.seriesID); err != nil {
+			if _, err := delAuthors.ExecContext(ctx, u.seriesID); err != nil {
 				return 0, err
 			}
 			for _, au := range u.authors {
-				if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO series_authors(series_id,name,role) VALUES(?,?,?)`, u.seriesID, au.Name, au.Role); err != nil {
+				if _, err := insAuthors.ExecContext(ctx, u.seriesID, au.Name, au.Role); err != nil {
 					return 0, err
 				}
 			}
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE shelf_revision SET bulk_mode=0, catalog=catalog+1 WHERE id=1`); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -509,7 +548,6 @@ func cleanSyncStrings(values []string) []string {
 		seen[k] = true
 		out = append(out, v)
 	}
-	slices.Sort(out)
 	return out
 }
 
@@ -525,7 +563,7 @@ func cleanSyncAuthors(values []database.Author) []database.Author {
 		if role == "" {
 			role = "writer"
 		}
-		key := role + ":" + strings.ToLower(name)
+		key := strings.ToLower(name) + "\x00" + role
 		if seen[key] {
 			continue
 		}
@@ -547,7 +585,7 @@ func cleanSyncAltTitles(values []database.AlternateTitle) []database.AlternateTi
 		if label == "" {
 			label = "别名"
 		}
-		key := strings.ToLower(label) + ":" + strings.ToLower(title)
+		key := strings.ToLower(label) + "\x00" + strings.ToLower(title)
 		if seen[key] {
 			continue
 		}
