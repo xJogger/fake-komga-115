@@ -135,7 +135,9 @@ curl -fsS -X POST \
   - `incremental`：仅刮削新增未处理（`none`）系列
   - `retry_unmatched`：重新刮削 `unmatched` 与新增 `none` 系列（跳过已匹配系列）
   - `force`：全量重新自动匹配（仍保护手动绑定与已锁定字段）
-- `POST /api/agent/v1/bangumi/archive/update`：后台下载并更新官方 `bangumi/Archive` 本地离线索引包。
+- `POST /api/agent/v1/bangumi/archive/update`：后台检查并更新官方 `bangumi/Archive` 本地离线索引包（默认比对快照名称/摘要，未更新自动跳过下载；可选传 `{"force": true}` 强制重下；导入新版后自动本地增量同步已匹配作品的未锁定元数据）。
+- `GET /api/agent/v1/bangumi/archive/schedule` / `PUT /api/agent/v1/bangumi/archive/schedule`：读取或设置 Bangumi 离线库定时更新（支持 `weekly` / `monthly`，按服务器本机时区执行）。
+- `GET /api/agent/v1/diagnostics` / `PUT /api/agent/v1/diagnostics/config` / `GET /api/agent/v1/diagnostics/export` / `DELETE /api/agent/v1/diagnostics`：查看、切换详细模式、导出或清空全平台脱敏诊断日志。
 - `GET /api/agent/v1/jobs?limit=20`：汇总查看扫描任务、Bangumi 刮削任务、离线库更新状态、封面任务与维护任务。
 - `POST /api/agent/v1/jobs/{jobType}/{runID}/cancel`：取消任务（`jobType` 支持 `scan`、`bangumi`、`cover`）。
 - `GET /api/agent/v1/settings` / `PATCH /api/agent/v1/settings`：读取或修改系统参数（例如 `{"showNsfw": false}` 或 `{"show_nsfw": true}`）。

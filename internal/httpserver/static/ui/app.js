@@ -62,6 +62,15 @@
     });
   }
 
+  function syncAndroidSystemBars() {
+    try {
+      if (window.FK115AndroidBridge && typeof window.FK115AndroidBridge.setSystemBarTheme === 'function') {
+        const isLight = state.theme === 'light';
+        window.FK115AndroidBridge.setSystemBarTheme(isLight ? '#f4f6fa' : '#0f1117', isLight);
+      }
+    } catch (_) {}
+  }
+
   function setThemeMode(mode) {
     state.themeMode = (mode === 'light' || mode === 'dark') ? mode : 'auto';
     state.theme = resolveEffectiveTheme(state.themeMode);
@@ -69,6 +78,7 @@
     localStorage.setItem(THEME_MODE_KEY, state.themeMode);
     syncThemeButtons();
     syncBrandIcons();
+    syncAndroidSystemBars();
   }
 
   if (darkMediaQuery) {
@@ -77,6 +87,7 @@
         state.theme = resolveEffectiveTheme('auto');
         document.documentElement.setAttribute('data-theme', state.theme);
         syncBrandIcons();
+        syncAndroidSystemBars();
       }
     };
     if (typeof darkMediaQuery.addEventListener === 'function') {
@@ -93,6 +104,7 @@
       document.documentElement.setAttribute('data-theme', state.theme);
       syncThemeButtons();
       syncBrandIcons();
+      syncAndroidSystemBars();
     }
   });
   setThemeMode(state.themeMode);
@@ -431,7 +443,7 @@
           <div class="topbar-actions">
             <button type="button" class="btn btn-sm" id="theme-toggle-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
             ${state.auth.username ? `<span class="user-pill" title="当前登录账号">${esc(state.auth.username)}</span>` : ''}
-            ${activeNav === 'admin' && navigator.userAgent.includes('FK115Android/') ? '<a class="btn btn-sm" href="/__android/stop">停止服务</a>' : ''}
+            ${activeNav === 'admin' && navigator.userAgent.includes('FK115Android/') ? '<a class="btn btn-sm" href="/__android/settings">手机端设置</a><a class="btn btn-sm" href="/__android/stop">停止服务</a>' : ''}
             <button type="button" class="btn btn-sm" id="logout-btn">退出</button>
           </div>
         </div>
@@ -1184,7 +1196,7 @@
     });
 
     document.getElementById('btn-open-bgm').onclick = () => openBangumiMatchModal(seriesID, detail);
-    loadSeriesVersions(seriesID);
+    loadSeriesVersions(seriesID, bgmID);
     loadSeriesCollectionsBar(seriesID);
     document.getElementById('btn-edit-meta').onclick = () => openMetadataEditModal(seriesID, detail);
     document.getElementById('btn-series-collections').onclick = () => openAddSeriesToCollectionModal(seriesID, title, () => loadSeriesCollectionsBar(seriesID));
@@ -1260,28 +1272,62 @@
     }
   }
 
-  function loadSeriesVersions(seriesID) {
+  function loadSeriesVersions(seriesID, bgmID) {
+    if (!bgmID || Number(bgmID) <= 0) return;
     const qs = new URLSearchParams(location.search);
-    if (!mergedWorks() || qs.get('versions') !== '1') return;
     const scope = qs.get('library_id') || '';
+    const keepVersionsFlag = qs.get('versions') === '1';
     const seq = routeSeq;
     const box = document.getElementById('series-versions');
+    const targetURL = (id) => {
+      const params = new URLSearchParams();
+      if (keepVersionsFlag) params.set('versions', '1');
+      if (scope) params.set('library_id', scope);
+      const q = params.toString();
+      return `/series/${encodeURIComponent(id)}${q ? '?' + q : ''}`;
+    };
     api(`/admin/api/bookshelf/versions/${encodeURIComponent(seriesID)}?library_id=${encodeURIComponent(scope)}`)
       .then(({ versions, lastRead }) => {
         if (seq !== routeSeq || !box?.isConnected || (versions || []).length < 2) return;
+        const currentVer = versions.find((v) => v.id === seriesID) || versions[0];
         let resume = '';
         if (lastRead && !lastRead.completed) {
-          resume = `<a class="btn btn-primary btn-sm" href="/reader/series/${encodeURIComponent(lastRead.seriesId)}/book/${encodeURIComponent(lastRead.bookId)}?page=${Number(lastRead.page) || 1}">继续最近阅读</a>`;
+          resume = `<a class="btn btn-primary btn-sm" data-stop-toggle href="/reader/series/${encodeURIComponent(lastRead.seriesId)}/book/${encodeURIComponent(lastRead.bookId)}?page=${Number(lastRead.page) || 1}">继续最近阅读</a>`;
         } else if (lastRead && lastRead.seriesId !== seriesID) {
-          resume = `<a class="btn btn-sm" href="${seriesVersionURL(lastRead.seriesId, scope)}" data-nav>回到最近读的版本</a>`;
+          resume = `<a class="btn btn-sm" data-stop-toggle href="${targetURL(lastRead.seriesId)}" data-nav>回到最近读的版本</a>`;
         }
-        box.innerHTML = `<div class="chip-group"><label for="series-source-picker">版本 / 来源</label>
-          <select id="series-source-picker">
-            ${versions.map((v) => `<option value="${esc(v.id)}" ${v.id === seriesID ? 'selected' : ''}>
-              ${esc(v.library)} · ${esc(providerLabel(v.provider))} · ${esc(v.name)} (${Number(v.booksCount)} 册)
-            </option>`).join('')}
-          </select>${resume}</div>`;
-        box.querySelector('select').onchange = (e) => navigate(seriesVersionURL(e.target.value, scope));
+        box.innerHTML = `
+          <details class="series-versions-panel">
+            <summary class="series-versions-summary">
+              <span class="series-versions-title">
+                <span class="series-versions-caret">▶</span>
+                <span>多版本切换</span>
+                <span class="badge badge-accent">共 ${versions.length} 个版本</span>
+                <span class="series-versions-current">当前：${esc(currentVer.library)} · ${esc(providerLabel(currentVer.provider))} (${Number(currentVer.booksCount)} 册)</span>
+              </span>
+              ${resume ? `<span style="display:inline-flex;gap:6px;align-items:center">${resume}</span>` : ''}
+            </summary>
+            <div class="series-versions-list">
+              ${versions.map((v) => {
+                const isCur = v.id === seriesID;
+                const isLast = lastRead && lastRead.seriesId === v.id;
+                return `
+                  <a class="series-version-item ${isCur ? 'is-current' : ''}" href="${targetURL(v.id)}" data-nav>
+                    <span class="series-version-main">
+                      <span class="series-version-name" title="${esc(v.name)}">${esc(v.name)}</span>
+                      <span class="series-version-meta">${esc(v.library)} · ${esc(providerLabel(v.provider))} · ${Number(v.booksCount)} 册</span>
+                    </span>
+                    <span style="display:inline-flex;gap:6px;align-items:center;flex-shrink:0">
+                      ${isLast ? `<span class="badge">最近阅读</span>` : ''}
+                      ${isCur ? `<span class="badge badge-accent">当前</span>` : `<span class="btn btn-sm">切换</span>`}
+                    </span>
+                  </a>`;
+              }).join('')}
+            </div>
+          </details>`;
+        box.querySelectorAll('[data-stop-toggle]').forEach((el) => {
+          el.addEventListener('click', (ev) => ev.stopPropagation());
+        });
       }).catch(() => {});
   }
 
@@ -2826,12 +2872,35 @@
 
   function paintAdminBangumi(body, st, runs, libs) {
     const arch = st.archive || {};
+    const sched = st.archiveSchedule || { enabled: false, frequency: 'weekly', dayOfWeek: 3, dayOfMonth: 1, timeOfDay: '06:00' };
     const dlPct = arch.totalBytes > 0 ? Math.min(100, Math.round((arch.downloadedBytes / arch.totalBytes) * 100)) : 0;
     const prevInput = document.getElementById('bgm-proxy-url');
     const editingProxy = prevInput && document.activeElement === prevInput;
     const proxyInputVal = editingProxy ? prevInput.value : (st.proxyUrl || '');
     const selStart = editingProxy ? prevInput.selectionStart : null;
     const selEnd = editingProxy ? prevInput.selectionEnd : null;
+    const schedForm = document.getElementById('bgm-arch-sched-form');
+    const editingSched = schedForm && schedForm.contains(document.activeElement);
+    const schedState = editingSched ? {
+      enabled: document.getElementById('bgm-arch-sched-enabled')?.checked ?? !!sched.enabled,
+      frequency: document.getElementById('bgm-arch-sched-freq')?.value || sched.frequency || 'weekly',
+      dayOfWeek: Number(document.getElementById('bgm-arch-sched-dow')?.value ?? sched.dayOfWeek ?? 3),
+      dayOfMonth: Number(document.getElementById('bgm-arch-sched-dom')?.value ?? sched.dayOfMonth ?? 1),
+      timeOfDay: document.getElementById('bgm-arch-sched-time')?.value || sched.timeOfDay || '06:00',
+    } : {
+      enabled: !!sched.enabled,
+      frequency: sched.frequency || 'weekly',
+      dayOfWeek: Number(sched.dayOfWeek ?? 3),
+      dayOfMonth: Number(sched.dayOfMonth ?? 1),
+      timeOfDay: sched.timeOfDay || '06:00',
+    };
+    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    const checkResultLabel = (r) => ({
+      up_to_date: '已是最新（已跳过下载）',
+      updated: '已下载并更新离线库',
+      failed: '检查或更新失败',
+      canceled: '已取消',
+    }[r] || r || '');
 
     body.innerHTML = `
       <div class="stat-grid">
@@ -2882,17 +2951,47 @@
           <div style="font-size:13px;margin:12px 0;display:grid;gap:4px">
             <div>状态：${arch.ready ? `<span class="badge badge-success">已就绪 · ${Number(arch.subjectCount || 0).toLocaleString()} 条书籍条目</span>` : `<span class="badge badge-warn">尚未建立离线索引</span>`}</div>
             ${arch.dumpName ? `<div style="color:var(--text-muted);font-size:12px">快照版本：${esc(arch.dumpName)} · 导入于 ${fmtTime(arch.importedAt)}</div>` : ''}
+            ${(arch.lastCheckAt || sched.lastCheckedAt) ? `<div style="color:var(--text-muted);font-size:12px">最近检查：${fmtTime(arch.lastCheckAt || sched.lastCheckedAt)}${checkResultLabel(arch.lastCheckResult || sched.lastResult) ? ` · ${esc(checkResultLabel(arch.lastCheckResult || sched.lastResult))}` : ''}</div>` : ''}
+            ${arch.lastSyncAt ? `<div style="color:var(--text-muted);font-size:12px">最近元数据自动同步：${fmtTime(arch.lastSyncAt)} · 增量更新 ${Number(arch.lastSyncUpdatedSeries || 0).toLocaleString()} 部作品</div>` : ''}
             ${arch.updating ? `
               <div style="margin-top:6px">
                 <div style="font-size:12px;color:var(--accent);margin-bottom:4px">正在更新：${esc(arch.phase || '下载/解析中')} ${arch.totalBytes > 0 ? `(${fmtBytes(arch.downloadedBytes)} / ${fmtBytes(arch.totalBytes)} · ${dlPct}%)` : ''}</div>
                 <div class="progress-track"><span style="width:${dlPct || 35}%"></span></div>
               </div>` : ''}
             ${arch.lastError ? `<div style="color:var(--danger);font-size:12px">最近错误：${esc(arch.lastError)}</div>` : ''}
+            ${arch.lastSyncError ? `<div style="color:var(--danger);font-size:12px">最近同步错误：${esc(arch.lastSyncError)}</div>` : ''}
           </div>
-          <div style="display:flex;gap:8px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button type="button" class="btn btn-primary" id="bgm-arch-update" ${arch.updating ? 'disabled' : ''}>${arch.ready ? '检查并更新离线索引库' : '一键下载并构建离线索引库'}</button>
             ${arch.updating ? `<button type="button" class="btn btn-danger" id="bgm-arch-cancel">取消下载</button>` : ''}
           </div>
+
+          <form id="bgm-arch-sched-form" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+              <strong style="font-size:13px">定时检查更新（服务器本机时区）</strong>
+              <label class="check-row" style="font-size:12.5px">
+                <input type="checkbox" id="bgm-arch-sched-enabled" ${schedState.enabled ? 'checked' : ''}>
+                <span>启用定时更新</span>
+              </label>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <select id="bgm-arch-sched-freq" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+                <option value="weekly" ${schedState.frequency === 'weekly' ? 'selected' : ''}>每周</option>
+                <option value="monthly" ${schedState.frequency === 'monthly' ? 'selected' : ''}>每月</option>
+              </select>
+              <select id="bgm-arch-sched-dow" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text);display:${schedState.frequency === 'weekly' ? '' : 'none'}">
+                ${weekdays.map((lbl, idx) => `<option value="${idx}" ${schedState.dayOfWeek === idx ? 'selected' : ''}>${lbl}</option>`).join('')}
+              </select>
+              <select id="bgm-arch-sched-dom" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text);display:${schedState.frequency === 'monthly' ? '' : 'none'}">
+                ${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${schedState.dayOfMonth === d ? 'selected' : ''}>每月 ${d} 日</option>`).join('')}
+              </select>
+              <input type="time" id="bgm-arch-sched-time" value="${esc(schedState.timeOfDay)}" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+              <button type="submit" class="btn btn-sm btn-primary">保存定时</button>
+            </div>
+            <div style="margin-top:6px;font-size:11.5px;color:var(--text-muted);line-height:1.5">
+              ${sched.enabled && sched.nextRunAt ? `下次计划检查：<strong>${fmtTime(sched.nextRunAt)}</strong> · ` : ''}上游每周三约 05:04 发布新快照（推荐设周三 06:00）；快照未更新自动跳过下载，导入新版后自动本地增量同步已匹配作品的未锁定元数据（不重下封面、不覆盖手动锁定字段）。
+            </div>
+          </form>
         </div>
 
         <div class="card">
@@ -3034,11 +3133,41 @@
 
     document.getElementById('bgm-arch-update').onclick = async () => {
       try {
-        await api('/admin/api/bangumi/archive/update', { method: 'POST' });
-        toast('离线索引库后台下载构建已启动');
+        await api('/admin/api/bangumi/archive/update', { method: 'POST', body: { force: false } });
+        toast('已开始检查并更新离线索引库');
         renderAdminBangumi(body);
       } catch (err) { toast(err.message, 'error'); }
     };
+    const archSchedFreq = document.getElementById('bgm-arch-sched-freq');
+    if (archSchedFreq) {
+      archSchedFreq.onchange = () => {
+        const isWeekly = archSchedFreq.value === 'weekly';
+        const dow = document.getElementById('bgm-arch-sched-dow');
+        const dom = document.getElementById('bgm-arch-sched-dom');
+        if (dow) dow.style.display = isWeekly ? '' : 'none';
+        if (dom) dom.style.display = isWeekly ? 'none' : '';
+      };
+    }
+    const archSchedFormEl = document.getElementById('bgm-arch-sched-form');
+    if (archSchedFormEl) {
+      archSchedFormEl.onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+          await api('/admin/api/bangumi/archive/schedule', {
+            method: 'PUT',
+            body: {
+              enabled: !!document.getElementById('bgm-arch-sched-enabled')?.checked,
+              frequency: document.getElementById('bgm-arch-sched-freq')?.value || 'weekly',
+              dayOfWeek: Number(document.getElementById('bgm-arch-sched-dow')?.value ?? 3),
+              dayOfMonth: Number(document.getElementById('bgm-arch-sched-dom')?.value ?? 1),
+              timeOfDay: document.getElementById('bgm-arch-sched-time')?.value || '06:00',
+            },
+          });
+          toast('Bangumi 离线库定时更新配置已保存');
+          renderAdminBangumi(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
     const cancelArch = document.getElementById('bgm-arch-cancel');
     if (cancelArch) {
       cancelArch.onclick = async () => {
@@ -3247,15 +3376,32 @@
   // --- Admin Cache & Settings Tab ---
 
   async function renderAdminSettings(body) {
-    const [cache, settings] = await Promise.all([
+    const [cache, settings, diagData] = await Promise.all([
       api('/admin/api/cache'),
       api('/admin/api/settings'),
+      api('/admin/api/diagnostics?limit=80').catch(() => ({ status: {}, events: [] })),
     ]);
     const entries = cache.entries || {};
     const rangeStat = entries.range || {};
     const pageStat = entries.page || {};
     const thumbStat = cache.seriesThumbnails || {};
     const bgmThumb = cache.bangumiCovers || {};
+    const diagStatus = (diagData && diagData.status) || {};
+    const diagEvents = (diagData && diagData.events) || [];
+    const formatDiagLines = (events) => {
+      if (!events || events.length === 0) return '（暂无诊断事件记录）';
+      return events.slice().reverse().map((ev) => {
+        const ts = (ev.ts || '').replace('T', ' ').replace(/\.\d+Z$/, 'Z');
+        const parts = [`[${ts}]`, (ev.level || 'info').toUpperCase(), `${ev.component || 'core'}/${ev.stage || '-'}`];
+        if (ev.action) parts.push(ev.action);
+        if (ev.code) parts.push(`code=${ev.code}`);
+        if (ev.status) parts.push(`http=${ev.status}`);
+        if (ev.durationMs) parts.push(`${ev.durationMs}ms`);
+        if (ev.detail) parts.push(ev.detail);
+        if (ev.meta && Object.keys(ev.meta).length) parts.push(JSON.stringify(ev.meta));
+        return parts.join(' ');
+      }).join('\n');
+    };
 
     body.innerHTML = `
       <div class="card">
@@ -3311,6 +3457,30 @@
         <p style="margin:0 0 14px;font-size:12px;color:var(--text-muted)">定时扫库、Bangumi 刮削与自动补封面已迁移至「书库管理」中的单库/联合库「定时…」流水线配置。</p>
         <button type="submit" class="btn btn-primary">保存系统设置</button>
       </form>
+
+      <div class="card">
+        <div class="section-head" style="flex-wrap:wrap;gap:10px">
+          <div>
+            <h3 style="margin:0 0 4px">脱敏诊断日志与排障导出</h3>
+            <div style="font-size:12.5px;color:var(--text-secondary)">
+              仅按白名单记录启动、扫描、归档索引、单页读取、WebDAV/SAF 错误与耗时；自动脱敏凭据、Cookie、API Key、URL 与私人路径，本地限量轮转（上限约 2 MiB，不自动上传）。
+            </div>
+          </div>
+          <label class="check-row" style="font-weight:600;color:var(--text)">
+            <input type="checkbox" id="diag-verbose-toggle" ${diagStatus.verbose ? 'checked' : ''}>
+            <span>详细排障模式</span>
+          </label>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0 8px;font-size:12.5px;color:var(--text-muted)">
+          <span class="badge ${diagStatus.verbose ? 'badge-accent' : ''}">${diagStatus.verbose ? '详细模式' : '精简模式（默认）'}</span>
+          <span>已记录 ${Number(diagStatus.eventsCount || 0).toLocaleString()} 条 · 占用 ${fmtBytes(diagStatus.totalBytes || 0)}</span>
+          ${diagStatus.hasAndroidLog ? `<span class="badge badge-success">含 Android 原生事件</span>` : ''}
+          <button type="button" class="btn btn-sm" id="diag-refresh-btn">刷新预览</button>
+          <a class="btn btn-sm btn-primary" href="/admin/api/diagnostics/export" download>导出诊断报告 (.txt)</a>
+          <button type="button" class="btn btn-sm btn-danger" id="diag-clear-btn">清空日志</button>
+        </div>
+        <pre class="diag-log-view" id="diag-log-preview">${esc(formatDiagLines(diagEvents))}</pre>
+      </div>
     `;
 
     body.querySelectorAll('button[data-clear-cache]').forEach((btn) => {
@@ -3355,6 +3525,36 @@
         renderAdminSettings(body);
       } catch (err) { toast(err.message, 'error'); }
     };
+
+    const diagVerboseToggle = document.getElementById('diag-verbose-toggle');
+    if (diagVerboseToggle) {
+      diagVerboseToggle.onchange = async (e) => {
+        const verbose = e.target.checked;
+        try {
+          await api('/admin/api/diagnostics/config', { method: 'PUT', body: { verbose } });
+          toast(verbose ? '已开启详细诊断记录' : '已切换回精简诊断记录');
+          renderAdminSettings(body);
+        } catch (err) {
+          e.target.checked = !verbose;
+          toast(err.message, 'error');
+        }
+      };
+    }
+    const diagRefreshBtn = document.getElementById('diag-refresh-btn');
+    if (diagRefreshBtn) {
+      diagRefreshBtn.onclick = () => renderAdminSettings(body);
+    }
+    const diagClearBtn = document.getElementById('diag-clear-btn');
+    if (diagClearBtn) {
+      diagClearBtn.onclick = async () => {
+        if (!confirm('确认清空当前所有本地诊断日志？')) return;
+        try {
+          await api('/admin/api/diagnostics', { method: 'DELETE' });
+          toast('诊断日志已清空');
+          renderAdminSettings(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
   }
 
   // --- Admin Security & API Keys Tab ---

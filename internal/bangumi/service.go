@@ -51,10 +51,12 @@ type Service struct {
 	live    *LiveClient
 	logger  *slog.Logger
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	jobs     chan scrapeJob
-	rankDone chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	jobs      chan scrapeJob
+	rankDone  chan struct{}
+	schedDone chan struct{}
+	nowFunc   func() time.Time
 
 	mu          sync.Mutex
 	queued      map[string]string
@@ -89,27 +91,54 @@ WHERE status IN ('queued','running')`, now)
 	}
 
 	svc := &Service{
-		store:    store,
-		archive:  archiveIdx,
-		live:     liveClient,
-		logger:   logger,
-		ctx:      ctx,
-		cancel:   cancel,
-		jobs:     make(chan scrapeJob, 32),
-		queued:   make(map[string]string),
-		rankDone: make(chan struct{}),
+		store:     store,
+		archive:   archiveIdx,
+		live:      liveClient,
+		logger:    logger,
+		ctx:       ctx,
+		cancel:    cancel,
+		jobs:      make(chan scrapeJob, 32),
+		queued:    make(map[string]string),
+		rankDone:  make(chan struct{}),
+		schedDone: make(chan struct{}),
+		nowFunc:   time.Now,
 	}
-	ranksPending := make(chan struct{}, 1)
-	archiveIdx.onImport = func() {
+	syncPending := make(chan syncRequest, 1)
+	enqueueSync := func(force bool) {
 		select {
-		case ranksPending <- struct{}{}:
+		case syncPending <- syncRequest{force: force}:
 		default:
+			if force {
+				select {
+				case <-syncPending:
+				default:
+				}
+				select {
+				case syncPending <- syncRequest{force: true}:
+				default:
+				}
+			}
 		}
 	}
-	go svc.rankWorker(ranksPending)
-	archiveIdx.onImport()
+	archiveIdx.onImport = func() {
+		enqueueSync(true)
+	}
+	archiveIdx.onUpdateDone = func(result, dumpName, errMsg string) {
+		svc.recordArchiveUpdateOutcome(result, dumpName, errMsg)
+	}
+	go svc.rankWorker(syncPending)
+	// Startup check: only runs full-field sync if a newly present archive has not been synced yet.
+	enqueueSync(false)
+	go svc.archiveScheduleLoop()
 	go svc.worker()
 	return svc, nil
+}
+
+func (s *Service) now() time.Time {
+	if s != nil && s.nowFunc != nil {
+		return s.nowFunc()
+	}
+	return time.Now()
 }
 
 func (s *Service) Close() error {
@@ -119,6 +148,9 @@ func (s *Service) Close() error {
 		s.activeStop()
 	}
 	s.mu.Unlock()
+	if s.schedDone != nil {
+		<-s.schedDone
+	}
 	if s.rankDone != nil {
 		<-s.rankDone
 	}
@@ -130,7 +162,11 @@ func (s *Service) ArchiveStatus() ArchiveStatus {
 }
 
 func (s *Service) StartArchiveUpdate() (ArchiveStatus, error) {
-	return s.archive.StartOnlineUpdate()
+	return s.archive.StartOnlineUpdateWithOptions(false)
+}
+
+func (s *Service) StartArchiveUpdateWithOptions(force bool) (ArchiveStatus, error) {
+	return s.archive.StartOnlineUpdateWithOptions(force)
 }
 
 func (s *Service) CancelArchiveUpdate() bool {

@@ -34,6 +34,13 @@ func (s *Server) agentRoutes(r chi.Router) {
 
 	r.Post("/bangumi/scrape", s.startBangumiRun)
 	r.Post("/bangumi/archive/update", s.startBangumiArchiveUpdate)
+	r.Get("/bangumi/archive/schedule", s.getBangumiArchiveSchedule)
+	r.Put("/bangumi/archive/schedule", s.putBangumiArchiveSchedule)
+
+	r.Get("/diagnostics", s.getDiagnostics)
+	r.Put("/diagnostics/config", s.putDiagnosticsConfig)
+	r.Get("/diagnostics/export", s.exportDiagnostics)
+	r.Delete("/diagnostics", s.clearDiagnostics)
 
 	r.Get("/jobs", s.agentListJobs)
 	r.Post("/jobs/{jobType}/{runID}/cancel", s.agentCancelJob)
@@ -73,7 +80,13 @@ func (s *Server) agentManifest(w http.ResponseWriter, _ *http.Request) {
 			{"method": "GET", "path": "/api/agent/v1/series/{seriesID}/bangumi/candidates", "summary": "Search Bangumi candidates or subject ID for a series (?q=...)"},
 			{"method": "POST", "path": "/api/agent/v1/series/batch", "summary": "Batch bind_bangumi, patch_metadata, auto_scrape, or clear_bangumi (up to 200 items)"},
 			{"method": "POST", "path": "/api/agent/v1/bangumi/scrape", "summary": "Start batch Bangumi scrape (mode: incremental | retry_unmatched | force)"},
-			{"method": "POST", "path": "/api/agent/v1/bangumi/archive/update", "summary": "Trigger online update of local Bangumi offline archive index"},
+			{"method": "POST", "path": "/api/agent/v1/bangumi/archive/update", "summary": "Trigger online update check of local Bangumi offline archive index (optional {\"force\":true})"},
+			{"method": "GET", "path": "/api/agent/v1/bangumi/archive/schedule", "summary": "Read scheduled Bangumi offline archive update config and last check status"},
+			{"method": "PUT", "path": "/api/agent/v1/bangumi/archive/schedule", "summary": "Update scheduled Bangumi offline archive update config (weekly/monthly, local timezone)"},
+			{"method": "GET", "path": "/api/agent/v1/diagnostics", "summary": "Preview sanitized diagnostic events and logging mode"},
+			{"method": "PUT", "path": "/api/agent/v1/diagnostics/config", "summary": "Toggle verbose sanitized diagnostic logging"},
+			{"method": "GET", "path": "/api/agent/v1/diagnostics/export", "summary": "Download sanitized diagnostic log report"},
+			{"method": "DELETE", "path": "/api/agent/v1/diagnostics", "summary": "Clear stored diagnostic log files"},
 			{"method": "GET", "path": "/api/agent/v1/jobs", "summary": "Unified view of scan, Bangumi scrape, cover, and maintenance jobs"},
 			{"method": "POST", "path": "/api/agent/v1/jobs/{jobType}/{runID}/cancel", "summary": "Cancel a queued/running job (jobType: scan | bangumi | cover)"},
 			{"method": "GET", "path": "/api/agent/v1/settings", "summary": "Read runtime settings"},

@@ -20,9 +20,13 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
 
-const UserAgent = "fake-komga-115/2.0"
+const (
+	UserAgent          = "fake-komga-115/2.0"
+	defaultMaxAttempts = 3
+)
 
 var (
 	ErrRangeNotSupported = errors.New("WebDAV server did not return 206 Partial Content")
@@ -164,6 +168,55 @@ func (m *Manager) ListDirectory(
 	return out, nil
 }
 
+func (m *Manager) StatFileSize(
+	ctx context.Context,
+	account database.WebDAVAccountSecret,
+	libraryRootPath string,
+	fileRelPath string,
+) (int64, error) {
+	rt, err := m.runtimeFor(account)
+	if err != nil {
+		return 0, err
+	}
+	fullRemotePath := JoinRemotePath(libraryRootPath, fileRelPath)
+	targetURL, _, err := buildTargetURL(account.BaseURL, fullRemotePath, false)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := m.doWithRetry(ctx, rt, "stat", func() (*http.Request, error) {
+		req, rErr := http.NewRequestWithContext(ctx, http.MethodHead, targetURL, nil)
+		if rErr != nil {
+			return nil, rErr
+		}
+		req.Header.Set("User-Agent", UserAgent)
+		if account.Username != "" || account.Password != "" {
+			req.SetBasicAuth(account.Username, account.Password)
+		}
+		return req, nil
+	})
+	if err == nil {
+		cl := resp.ContentLength
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && cl > 0 {
+			return cl, nil
+		}
+	}
+	// Fallback to PROPFIND Depth: 0 (some WebDAV servers omit Content-Length on HEAD).
+	entries, pErr := m.propfind(ctx, account, fullRemotePath, "0")
+	if pErr != nil {
+		if err != nil {
+			return 0, err
+		}
+		return 0, pErr
+	}
+	for _, entry := range entries {
+		if !entry.IsDir && entry.Size > 0 {
+			return entry.Size, nil
+		}
+	}
+	return 0, errors.New("WebDAV server did not report file size")
+}
+
 func (m *Manager) FetchRange(
 	ctx context.Context,
 	account database.WebDAVAccountSecret,
@@ -179,49 +232,158 @@ func (m *Manager) FetchRange(
 	if err != nil {
 		return nil, err
 	}
-	if err := rt.limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
 	fullRemotePath := JoinRemotePath(libraryRootPath, fileRelPath)
 	targetURL, _, err := buildTargetURL(account.BaseURL, fullRemotePath, false)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	started := time.Now()
+	resp, err := m.doWithRetry(ctx, rt, "range", func() (*http.Request, error) {
+		req, rErr := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if rErr != nil {
+			return nil, rErr
+		}
+		req.Header.Set("User-Agent", UserAgent)
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+		req.Header.Set("Accept-Encoding", "identity")
+		if account.Username != "" || account.Password != "" {
+			req.SetBasicAuth(account.Username, account.Password)
+		}
+		return req, nil
+	})
 	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", UserAgent)
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-	req.Header.Set("Accept-Encoding", "identity")
-	if account.Username != "" || account.Password != "" {
-		req.SetBasicAuth(account.Username, account.Password)
-	}
-	resp, err := rt.http.Do(req)
-	if err != nil {
-		return nil, errors.New("WebDAV range request failed")
+		code := diagnostics.ClassifyError(err)
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "range",
+			Action:     "fetch",
+			Code:       code,
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     err.Error(),
+			Meta:       map[string]any{"provider": database.ProviderWebDAV, "sizeBytes": expected},
+		})
+		return nil, fmt.Errorf("WebDAV range request failed (%s): %w", code, err)
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "range",
+			Action:     "fetch",
+			Status:     resp.StatusCode,
+			Code:       "RANGE_NOT_SUPPORTED",
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     "WebDAV server returned HTTP 200 instead of 206 Partial Content",
+			Meta:       map[string]any{"provider": database.ProviderWebDAV},
+		})
 		return nil, ErrRangeNotSupported
 	case http.StatusUnauthorized, http.StatusForbidden:
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "range",
+			Action:     "fetch",
+			Status:     resp.StatusCode,
+			Code:       "AUTH_FAILED",
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     fmt.Sprintf("WebDAV range returned HTTP %d", resp.StatusCode),
+			Meta:       map[string]any{"provider": database.ProviderWebDAV},
+		})
 		return nil, ErrAuthFailed
 	case http.StatusNotFound:
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "range",
+			Action:     "fetch",
+			Status:     resp.StatusCode,
+			Code:       "NOT_FOUND",
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     "WebDAV range target not found",
+			Meta:       map[string]any{"provider": database.ProviderWebDAV},
+		})
 		return nil, ErrNotFound
 	case http.StatusPartialContent:
 		data, err := io.ReadAll(io.LimitReader(resp.Body, expected+1))
 		if err != nil {
-			return nil, err
+			code := diagnostics.ClassifyError(err)
+			diagnostics.Default().Record(diagnostics.Event{
+				Level:      diagnostics.LevelError,
+				Component:  "webdav",
+				Stage:      "range",
+				Action:     "read_body",
+				Status:     resp.StatusCode,
+				Code:       code,
+				DurationMs: time.Since(started).Milliseconds(),
+				Detail:     err.Error(),
+				Meta:       map[string]any{"provider": database.ProviderWebDAV},
+			})
+			return nil, fmt.Errorf("WebDAV range body read failed (%s): %w", code, err)
 		}
 		if int64(len(data)) != expected {
+			// Accept a clean tail read if Content-Range reports the file ended earlier than requested.
+			if total, ok := parseContentRangeTotal(resp.Header.Get("Content-Range")); ok &&
+				total > start && start+int64(len(data)) == total && int64(len(data)) < expected {
+				return data, nil
+			}
+			diagnostics.Default().Record(diagnostics.Event{
+				Level:      diagnostics.LevelError,
+				Component:  "webdav",
+				Stage:      "range",
+				Action:     "short_read",
+				Status:     resp.StatusCode,
+				Code:       "RANGE_SHORT_READ",
+				DurationMs: time.Since(started).Milliseconds(),
+				Detail:     fmt.Sprintf("WebDAV range returned %d bytes, expected %d", len(data), expected),
+				Meta:       map[string]any{"provider": database.ProviderWebDAV, "sizeBytes": expected, "actualBytes": len(data)},
+			})
 			return nil, fmt.Errorf("WebDAV range returned %d bytes, expected %d", len(data), expected)
 		}
+		diagnostics.Default().RecordVerbose(diagnostics.Event{
+			Level:      diagnostics.LevelDebug,
+			Component:  "webdav",
+			Stage:      "range",
+			Action:     "fetch",
+			Status:     resp.StatusCode,
+			DurationMs: time.Since(started).Milliseconds(),
+			Meta:       map[string]any{"provider": database.ProviderWebDAV, "sizeBytes": len(data)},
+		})
 		return data, nil
 	default:
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "range",
+			Action:     "fetch",
+			Status:     resp.StatusCode,
+			Code:       fmt.Sprintf("HTTP_%d", resp.StatusCode),
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     fmt.Sprintf("WebDAV range returned HTTP %d", resp.StatusCode),
+			Meta:       map[string]any{"provider": database.ProviderWebDAV},
+		})
 		return nil, fmt.Errorf("WebDAV range returned HTTP %d", resp.StatusCode)
 	}
+}
+
+func parseContentRangeTotal(header string) (int64, bool) {
+	header = strings.TrimSpace(header)
+	slash := strings.LastIndexByte(header, '/')
+	if slash < 0 || slash+1 >= len(header) {
+		return 0, false
+	}
+	totalStr := strings.TrimSpace(header[slash+1:])
+	if totalStr == "*" || totalStr == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(totalStr, 10, 64)
+	if err != nil || v <= 0 {
+		return 0, false
+	}
+	return v, true
 }
 
 var propfindBody = []byte(`<?xml version="1.0" encoding="utf-8"?>
@@ -245,37 +407,81 @@ func (m *Manager) propfind(
 	if err != nil {
 		return nil, err
 	}
-	if err := rt.limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
 	cleanDir := CleanRemotePath(remoteDir)
 	targetURL, expectedSelfPath, err := buildTargetURL(account.BaseURL, cleanDir, true)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "PROPFIND", targetURL, bytes.NewReader(propfindBody))
+	started := time.Now()
+	resp, err := m.doWithRetry(ctx, rt, "propfind", func() (*http.Request, error) {
+		req, rErr := http.NewRequestWithContext(ctx, "PROPFIND", targetURL, bytes.NewReader(propfindBody))
+		if rErr != nil {
+			return nil, rErr
+		}
+		req.Header.Set("User-Agent", UserAgent)
+		req.Header.Set("Depth", depth)
+		req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+		if account.Username != "" || account.Password != "" {
+			req.SetBasicAuth(account.Username, account.Password)
+		}
+		return req, nil
+	})
 	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", UserAgent)
-	req.Header.Set("Depth", depth)
-	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
-	if account.Username != "" || account.Password != "" {
-		req.SetBasicAuth(account.Username, account.Password)
-	}
-	resp, err := rt.http.Do(req)
-	if err != nil {
-		return nil, errors.New("failed to connect to WebDAV server")
+		code := diagnostics.ClassifyError(err)
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "propfind",
+			Action:     "list",
+			Code:       code,
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     err.Error(),
+			Meta:       map[string]any{"provider": database.ProviderWebDAV},
+		})
+		return nil, fmt.Errorf("failed to connect to WebDAV server (%s): %w", code, err)
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "propfind",
+			Action:     "list",
+			Status:     resp.StatusCode,
+			Code:       "AUTH_FAILED",
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     fmt.Sprintf("WebDAV PROPFIND returned HTTP %d", resp.StatusCode),
+			Meta:       map[string]any{"provider": database.ProviderWebDAV},
+		})
 		return nil, ErrAuthFailed
 	case http.StatusNotFound:
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "propfind",
+			Action:     "list",
+			Status:     resp.StatusCode,
+			Code:       "NOT_FOUND",
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     "WebDAV directory not found",
+			Meta:       map[string]any{"provider": database.ProviderWebDAV},
+		})
 		return nil, ErrNotFound
 	}
 	if resp.StatusCode != http.StatusMultiStatus && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "propfind",
+			Action:     "list",
+			Status:     resp.StatusCode,
+			Code:       fmt.Sprintf("HTTP_%d", resp.StatusCode),
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     fmt.Sprintf("WebDAV PROPFIND returned HTTP %d", resp.StatusCode),
+			Meta:       map[string]any{"provider": database.ProviderWebDAV},
+		})
 		return nil, fmt.Errorf("WebDAV PROPFIND returned HTTP %d", resp.StatusCode)
 	}
 	rawXML, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
@@ -287,7 +493,153 @@ func (m *Manager) propfind(
 		return nil, err
 	}
 	basePrefix := strings.TrimRight(decodeURLPath(baseParsed.EscapedPath()), "/")
-	return parseMultiStatus(rawXML, basePrefix, expectedSelfPath, cleanDir, depth == "0")
+	entries, parseErr := parseMultiStatus(rawXML, basePrefix, expectedSelfPath, cleanDir, depth == "0")
+	if parseErr != nil {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      diagnostics.LevelError,
+			Component:  "webdav",
+			Stage:      "propfind",
+			Action:     "parse_xml",
+			Status:     resp.StatusCode,
+			Code:       "XML_PARSE_ERROR",
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     parseErr.Error(),
+			Meta:       map[string]any{"provider": database.ProviderWebDAV},
+		})
+		return nil, parseErr
+	}
+	diagnostics.Default().RecordVerbose(diagnostics.Event{
+		Level:      diagnostics.LevelDebug,
+		Component:  "webdav",
+		Stage:      "propfind",
+		Action:     "list",
+		Status:     resp.StatusCode,
+		DurationMs: time.Since(started).Milliseconds(),
+		Meta:       map[string]any{"provider": database.ProviderWebDAV, "files": len(entries)},
+	})
+	return entries, nil
+}
+
+func (m *Manager) doWithRetry(
+	ctx context.Context,
+	rt *accountRuntime,
+	stage string,
+	buildReq func() (*http.Request, error),
+) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= defaultMaxAttempts; attempt++ {
+		if err := rt.limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		req, err := buildReq()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := rt.http.Do(req)
+		if err == nil {
+			if !isRetryableHTTPStatus(resp.StatusCode) || attempt == defaultMaxAttempts {
+				return resp, nil
+			}
+			delay := retryDelay(attempt, resp.Header.Get("Retry-After"))
+			status := resp.StatusCode
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			diagnostics.Default().Record(diagnostics.Event{
+				Level:     diagnostics.LevelWarn,
+				Component: "webdav",
+				Stage:     stage,
+				Action:    "retry_http",
+				Status:    status,
+				Code:      fmt.Sprintf("HTTP_%d", status),
+				Detail:    fmt.Sprintf("retrying WebDAV %s after HTTP %d", stage, status),
+				Meta: map[string]any{
+					"provider":     database.ProviderWebDAV,
+					"attempt":      attempt,
+					"maxAttempts":  defaultMaxAttempts,
+					"retryAfterMs": delay.Milliseconds(),
+				},
+			})
+			if !sleepWithContext(ctx, delay) {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		lastErr = err
+		if ctx.Err() != nil || !isRetryableNetError(err) || attempt == defaultMaxAttempts {
+			return nil, err
+		}
+		delay := retryDelay(attempt, "")
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:     diagnostics.LevelWarn,
+			Component: "webdav",
+			Stage:     stage,
+			Action:    "retry_net",
+			Code:      diagnostics.ClassifyError(err),
+			Detail:    err.Error(),
+			Meta: map[string]any{
+				"provider":     database.ProviderWebDAV,
+				"attempt":      attempt,
+				"maxAttempts":  defaultMaxAttempts,
+				"retryAfterMs": delay.Milliseconds(),
+			},
+		})
+		if !sleepWithContext(ctx, delay) {
+			return nil, ctx.Err()
+		}
+	}
+	return nil, lastErr
+}
+
+func isRetryableHTTPStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetryableNetError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "x509:") || strings.Contains(msg, "tls:") || strings.Contains(msg, "unsupported protocol") {
+		return false
+	}
+	return true
+}
+
+func retryDelay(attempt int, retryAfter string) time.Duration {
+	if s := strings.TrimSpace(retryAfter); s != "" {
+		if secs, err := strconv.Atoi(s); err == nil && secs > 0 {
+			d := time.Duration(secs) * time.Second
+			if d > 3*time.Second {
+				d = 3 * time.Second
+			}
+			return d
+		}
+	}
+	switch attempt {
+	case 1:
+		return 250 * time.Millisecond
+	case 2:
+		return 750 * time.Millisecond
+	default:
+		return 1500 * time.Millisecond
+	}
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 type xmlMultiStatus struct {
@@ -517,6 +869,7 @@ func (m *Manager) runtimeFor(account database.WebDAVAccountSecret) (*accountRunt
 		return existing, nil
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 45 * time.Second
 	if account.InsecureTLS {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit opt-in for LAN self-signed NAS WebDAV
 	}
@@ -525,6 +878,32 @@ func (m *Manager) runtimeFor(account database.WebDAVAccountSecret) (*accountRunt
 		http: &http.Client{
 			Timeout:   90 * time.Second,
 			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return errors.New("stopped after 10 redirects")
+				}
+				if len(via) > 0 {
+					orig := via[0]
+					if rng := orig.Header.Get("Range"); rng != "" && req.Header.Get("Range") == "" {
+						req.Header.Set("Range", rng)
+					}
+					if ae := orig.Header.Get("Accept-Encoding"); ae != "" && req.Header.Get("Accept-Encoding") == "" {
+						req.Header.Set("Accept-Encoding", ae)
+					}
+					if ua := orig.Header.Get("User-Agent"); ua != "" && req.Header.Get("User-Agent") == "" {
+						req.Header.Set("User-Agent", ua)
+					}
+					// Keep Basic Auth only when staying on the same scheme+host; drop on cross-host cloud redirects.
+					if strings.EqualFold(orig.URL.Scheme, req.URL.Scheme) && strings.EqualFold(orig.URL.Host, req.URL.Host) {
+						if auth := orig.Header.Get("Authorization"); auth != "" && req.Header.Get("Authorization") == "" {
+							req.Header.Set("Authorization", auth)
+						}
+					} else {
+						req.Header.Del("Authorization")
+					}
+				}
+				return nil
+			},
 		},
 		limiter: rate.NewLimiter(rate.Limit(rps), max(1, int(rps))),
 	}

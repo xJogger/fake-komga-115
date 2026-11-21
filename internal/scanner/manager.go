@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	"github.com/xJogger/fake-komga-115/internal/id"
 	"github.com/xJogger/fake-komga-115/internal/localfs"
 	"github.com/xJogger/fake-komga-115/internal/natsort"
@@ -334,30 +335,92 @@ UPDATE scan_runs SET status='running',started_at=? WHERE id=?;
 UPDATE libraries SET last_scan_status='running',last_scan_started_at=?,last_scan_error='' WHERE id=?`,
 		now, item.library.ID)
 
+	startedAt := time.Now()
+	provider := item.library.EffectiveProvider()
 	m.logger.Info("scan started", "run", item.runID, "library", item.library.Name)
+	diagnostics.Default().Record(diagnostics.Event{
+		Level:         diagnostics.LevelInfo,
+		Component:     "scanner",
+		Stage:         "scan_start",
+		Action:        "start",
+		CorrelationID: item.runID,
+		Meta:          map[string]any{"provider": provider},
+	})
 	conversion, err := m.needsModeConversion(ctx, item)
 	if err != nil {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:         diagnostics.LevelError,
+			Component:     "scanner",
+			Stage:         "scan_done",
+			Action:        "mode_check",
+			Code:          diagnostics.ClassifyError(err),
+			DurationMs:    time.Since(startedAt).Milliseconds(),
+			CorrelationID: item.runID,
+			Detail:        err.Error(),
+			Meta:          map[string]any{"provider": provider},
+		})
 		m.finish(item, "failed", counters{}, err.Error())
 		return
 	}
 	counts, err := m.scan(ctx, item, conversion)
 	if errors.Is(err, context.Canceled) {
 		m.discardStaging(item, conversion)
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:         diagnostics.LevelWarn,
+			Component:     "scanner",
+			Stage:         "scan_done",
+			Action:        "canceled",
+			Code:          "CANCELED",
+			DurationMs:    time.Since(startedAt).Milliseconds(),
+			CorrelationID: item.runID,
+			Meta:          map[string]any{"provider": provider, "directories": counts.directories, "files": counts.files},
+		})
 		m.finish(item, "canceled", counts, "scan canceled")
 		return
 	}
 	if err != nil {
 		m.discardStaging(item, conversion)
 		m.logger.Error("scan failed", "run", item.runID, "library", item.library.Name, "error", err)
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:         diagnostics.LevelError,
+			Component:     "scanner",
+			Stage:         "scan_done",
+			Action:        "failed",
+			Code:          diagnostics.ClassifyError(err),
+			DurationMs:    time.Since(startedAt).Milliseconds(),
+			CorrelationID: item.runID,
+			Detail:        err.Error(),
+			Meta:          map[string]any{"provider": provider, "directories": counts.directories, "files": counts.files, "series": counts.series, "books": counts.books},
+		})
 		m.finish(item, "failed", counts, err.Error())
 		return
 	}
 	if err := m.commitSuccessfulScan(context.Background(), item, conversion); err != nil {
 		m.discardStaging(item, conversion)
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:         diagnostics.LevelError,
+			Component:     "scanner",
+			Stage:         "scan_done",
+			Action:        "commit",
+			Code:          diagnostics.ClassifyError(err),
+			DurationMs:    time.Since(startedAt).Milliseconds(),
+			CorrelationID: item.runID,
+			Detail:        err.Error(),
+			Meta:          map[string]any{"provider": provider},
+		})
 		m.finish(item, "failed", counts, err.Error())
 		return
 	}
 	m.finish(item, "success", counts, "")
+	diagnostics.Default().Record(diagnostics.Event{
+		Level:         diagnostics.LevelInfo,
+		Component:     "scanner",
+		Stage:         "scan_done",
+		Action:        "success",
+		DurationMs:    time.Since(startedAt).Milliseconds(),
+		CorrelationID: item.runID,
+		Meta:          map[string]any{"provider": provider, "directories": counts.directories, "files": counts.files, "series": counts.series, "books": counts.books},
+	})
 	m.logger.Info("scan completed", "run", item.runID, "library", item.library.Name,
 		"directories", counts.directories, "files", counts.files, "series", counts.series, "books", counts.books)
 }

@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -84,6 +85,12 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/cache", s.cacheStats)
 	r.Delete("/cache/{cacheType}", s.clearCache)
 
+	// Sanitized diagnostics log preview, verbose toggle, export & clear
+	r.Get("/diagnostics", s.getDiagnostics)
+	r.Put("/diagnostics/config", s.putDiagnosticsConfig)
+	r.Get("/diagnostics/export", s.exportDiagnostics)
+	r.Delete("/diagnostics", s.clearDiagnostics)
+
 	// Rich detail endpoints for built-in Bookshelf & WebView
 	r.Get("/series/{seriesID}/detail", s.seriesRichDetail)
 	r.Get("/books/{bookID}/detail", s.bookRichDetail)
@@ -94,6 +101,8 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Put("/bangumi/config", s.putBangumiConfig)
 	r.Post("/bangumi/proxy/test", s.testBangumiProxy)
 	r.Get("/bangumi/subjects/{subjectID}/cover", s.bangumiSubjectCover)
+	r.Get("/bangumi/archive/schedule", s.getBangumiArchiveSchedule)
+	r.Put("/bangumi/archive/schedule", s.putBangumiArchiveSchedule)
 	r.Post("/bangumi/archive/update", s.startBangumiArchiveUpdate)
 	r.Post("/bangumi/archive/cancel", s.cancelBangumiArchiveUpdate)
 	r.Get("/bangumi/runs", s.listBangumiRuns)
@@ -1371,20 +1380,25 @@ func (s *Server) bangumiStatus(w http.ResponseWriter, r *http.Request) {
 	nsfwCount, _ := s.store.NSFWSeriesCount(r.Context())
 	showNSFW := s.store.ShowNSFW(r.Context())
 	var arch bangumi.ArchiveStatus
+	var archSched bangumi.ArchiveSchedule
 	proxyURL := ""
 	if s.bangumi != nil {
 		arch = s.bangumi.ArchiveStatus()
+		archSched = s.bangumi.ArchiveSchedule(r.Context())
 		proxyURL = s.bangumi.RedactedProxyURL(r.Context())
+	} else {
+		archSched = bangumi.DefaultArchiveSchedule()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"archive":        arch,
-		"proxyUrl":       proxyURL,
-		"showNsfw":       showNSFW,
-		"nsfwCount":      nsfwCount,
-		"matchedCount":   matched,
-		"unmatchedCount": unmatched,
-		"pendingCount":   max(int64(0), total-matched-unmatched),
-		"totalSeries":    total,
+		"archive":         arch,
+		"archiveSchedule": archSched,
+		"proxyUrl":        proxyURL,
+		"showNsfw":        showNSFW,
+		"nsfwCount":       nsfwCount,
+		"matchedCount":    matched,
+		"unmatchedCount":  unmatched,
+		"pendingCount":    max(int64(0), total-matched-unmatched),
+		"totalSeries":     total,
 	})
 }
 
@@ -1465,12 +1479,18 @@ func (s *Server) bangumiSubjectCover(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data.Bytes)
 }
 
-func (s *Server) startBangumiArchiveUpdate(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) startBangumiArchiveUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.bangumi == nil {
 		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
 		return
 	}
-	st, err := s.bangumi.StartArchiveUpdate()
+	var req struct {
+		Force bool `json:"force"`
+	}
+	if r != nil && r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	st, err := s.bangumi.StartArchiveUpdateWithOptions(req.Force)
 	if err != nil {
 		writeError(w, http.StatusConflict, "ARCHIVE_UPDATE_ACTIVE", err.Error())
 		return

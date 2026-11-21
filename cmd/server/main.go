@@ -19,6 +19,7 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/app"
 	"github.com/xJogger/fake-komga-115/internal/buildinfo"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
 
 func main() {
@@ -51,6 +52,7 @@ func main() {
 		Logger:  logger,
 	})
 	if err != nil {
+		diagnostics.WriteStartupFailure(*dataDir, "server", "startup", err)
 		logger.Error("initialize application", "error", err)
 		os.Exit(1)
 	}
@@ -58,6 +60,7 @@ func main() {
 
 	errCh, err := a.Start()
 	if err != nil {
+		diagnostics.WriteStartupFailure(*dataDir, "server", "startup", err)
 		logger.Error("start server", "error", err)
 		_ = a.Close()
 		os.Exit(1)

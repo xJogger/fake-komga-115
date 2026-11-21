@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	"github.com/xJogger/fake-komga-115/internal/localfs"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
@@ -36,13 +38,51 @@ func openBookReaderAt(
 	logger *slog.Logger,
 	blockSize int64,
 ) (ReaderAtCloser, error) {
+	reader, _, err := openBookReaderAtWithSize(ctx, book, store, client115, webdavMgr, cacheManager, logger, blockSize)
+	return reader, err
+}
+
+func openBookReaderAtWithSize(
+	ctx context.Context,
+	book database.Book,
+	store *database.Store,
+	client115 *oneonefive.Client,
+	webdavMgr *webdav.Manager,
+	cacheManager *cache.Manager,
+	logger *slog.Logger,
+	blockSize int64,
+) (ReaderAtCloser, int64, error) {
 	library, err := store.LibraryBasic(ctx, book.LibraryID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	actualSize := book.Size
 	switch library.EffectiveProvider() {
 	case database.ProviderLocal:
-		return localfs.OpenBook(library.RootPath, book.FileID)
+		file, err := localfs.OpenBook(library.RootPath, book.FileID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if detected := detectFileSize(file); detected > 0 {
+			if actualSize != detected {
+				diagnostics.Default().Record(diagnostics.Event{
+					Level:         diagnostics.LevelWarn,
+					Component:     "archive",
+					Stage:         "size_calibrate",
+					Action:        "local_fd",
+					CorrelationID: book.ID,
+					Detail:        "calibrated local/SAF archive size from file descriptor",
+					Meta: map[string]any{
+						"provider":    database.ProviderLocal,
+						"sizeBytes":   actualSize,
+						"actualBytes": detected,
+					},
+				})
+				actualSize = detected
+				persistCalibratedBookSize(ctx, store, book.ID, detected)
+			}
+		}
+		return file, actualSize, nil
 
 	case database.ProviderWebDAV:
 		if webdavMgr == nil {
@@ -50,17 +90,63 @@ func openBookReaderAt(
 		}
 		account, err := store.WebDAVAccountSecret(ctx, library.WebDAVAccountID)
 		if err != nil {
-			return nil, fmt.Errorf("load WebDAV account: %w", err)
+			return nil, 0, fmt.Errorf("load WebDAV account: %w", err)
+		}
+		if actualSize <= 0 {
+			if detected, statErr := webdavMgr.StatFileSize(ctx, account, library.RootPath, book.FileID); statErr == nil && detected > 0 {
+				diagnostics.Default().Record(diagnostics.Event{
+					Level:         diagnostics.LevelWarn,
+					Component:     "archive",
+					Stage:         "size_calibrate",
+					Action:        "webdav_stat",
+					CorrelationID: book.ID,
+					Detail:        "calibrated missing WebDAV archive size",
+					Meta: map[string]any{
+						"provider":    database.ProviderWebDAV,
+						"sizeBytes":   actualSize,
+						"actualBytes": detected,
+					},
+				})
+				actualSize = detected
+				book.Size = detected
+				persistCalibratedBookSize(ctx, store, book.ID, detected)
+			}
 		}
 		return noopCloseReaderAt{NewWebDAVReaderAt(
 			ctx, book, library, account, store, webdavMgr, cacheManager, logger, blockSize,
-		)}, nil
+		)}, actualSize, nil
 
 	default:
 		return noopCloseReaderAt{NewRemoteReaderAtWithBlockSize(
 			ctx, book, store, client115, cacheManager, logger, blockSize,
-		)}, nil
+		)}, actualSize, nil
 	}
+}
+
+func detectFileSize(file *os.File) int64 {
+	if file == nil {
+		return 0
+	}
+	if info, err := file.Stat(); err == nil && info.Size() > 0 {
+		return info.Size()
+	}
+	cur, err := file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0
+	}
+	end, err := file.Seek(0, io.SeekEnd)
+	_, _ = file.Seek(cur, io.SeekStart)
+	if err != nil || end <= 0 {
+		return 0
+	}
+	return end
+}
+
+func persistCalibratedBookSize(ctx context.Context, store *database.Store, bookID string, size int64) {
+	if store == nil || bookID == "" || size <= 0 {
+		return
+	}
+	_, _ = store.DB().ExecContext(ctx, `UPDATE books SET size=? WHERE id=? AND size<>?`, size, bookID, size)
 }
 
 type WebDAVReaderAt struct {

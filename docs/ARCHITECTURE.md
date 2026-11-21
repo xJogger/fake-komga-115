@@ -69,6 +69,8 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1
 - **书架查询缓存**：`internal/database/shelf_cache.go` 缓存常用首屏与分类查询（内存、固定容量，不缓存任意搜索组合）。SQLite 触发器在同一写入事务里递增目录、阅读进度版本；读缓存前核对版本，扫描、刮削、隐藏/NSFW 开关和阅读进度提交后不复用旧结果。启动与变更后预热只查询数据库，不读取漫画归档。
 - **Bangumi 排名与版本**：快照可按已有 Subject ID 回填正整数排名，不重新绑定。网页版的 `/admin/api/bookshelf/*` 先筛选可见版本、按正数 Subject ID 分组，再排序分页；One-Shot 独立。合并不修改真实 ID、书籍或阅读进度，Komga v1/v2 API 不自动合并。
 
-## 6. 纯 Go 构建与 Android 预览
+## 6. 脱敏诊断、纯 Go 构建与 Android 独立版
 
-服务端保持 `100% CGO_ENABLED=0`。独立 Android 试用版通过 `gomobile bind` 封装 `internal/app.App`，仅 APK 构建需要 NDK 与 cgo。手机目录经 Android SAF 获取只读随机访问句柄；手机数据库独立，服务仅对应用内 WebView 开放。详见 [Android 预览版](ANDROID.md)。
+- **全平台脱敏诊断（`internal/diagnostics`）**：白名单结构化事件本地轮转存储在 `<DataDir>/diagnostics/`（自动脱敏 URL、凭据、Token、Cookie、API Key 与私人路径），支持精简/详细模式切换与后台/原生导出，启动失败时同样直接落盘便于排障。
+- **Bangumi 离线库定时更新与自动增量同步**：支持每周/每月按服务器本机时区定时检查 `aux/latest.json`（摘要/名称未变则跳过下载）；导入新版快照后通过本地批查与字段级 diff 自动增量更新已绑定 `bgm_subject_id` 作品的所有未锁定元数据（文本与数组字段非空才覆盖，不重下封面）。
+- **纯 Go 构建与 Android 独立版**：服务端保持 `100% CGO_ENABLED=0`。独立 Android 版通过 `gomobile bind` 封装 `internal/app.App`，仅 APK 构建需要 NDK 与 cgo。手机目录经 Android SAF 获取只读随机访问句柄（带文档 ID 缓存、FD 大小校准与魔数格式回退）；应用内 WebView 保持 `127.0.0.1` 回环与 Cookie 守卫隔离，同时支持用户在原生「手机端设置」页按需开启独立的 `0.0.0.0:<端口>` 局域网服务（强制管理员鉴权）。详见 [Android 独立版](ANDROID.md)。

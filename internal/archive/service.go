@@ -1,9 +1,12 @@
 package archive
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
@@ -97,26 +101,159 @@ func shouldFallbackReplica(err error) bool {
 	return true
 }
 
-func (s *Service) listPagesDirect(ctx context.Context, book database.Book) ([]PageEntry, error) {
-	switch archiveFormat(book.Name) {
-	case formatZIP:
-		return s.zip.ListPages(ctx, book)
-	case formatRAR:
-		return s.rar.ListPages(ctx, book)
+func (s *Service) cachedArchiveFormat(ctx context.Context, book database.Book) string {
+	if s.store == nil {
+		return ""
+	}
+	raw, ok, err := s.store.ArchiveIndexRawForVersion(ctx, book.ID, bookVersion(book))
+	if err != nil || !ok {
+		return ""
+	}
+	var pages []PageEntry
+	if json.Unmarshal([]byte(raw), &pages) != nil || len(pages) == 0 {
+		return ""
+	}
+	switch pages[0].Format {
+	case formatZIP, formatRAR:
+		return pages[0].Format
 	default:
-		return nil, ErrUnsupportedArchive
+		return ""
 	}
 }
 
-func (s *Service) readPageDirect(ctx context.Context, book database.Book, pageNumber int) (PageData, error) {
-	switch archiveFormat(book.Name) {
+func (s *Service) detectMagicFormat(ctx context.Context, book database.Book) string {
+	readerAt, actualSize, err := openBookReaderAtWithSize(
+		ctx, book, s.store, s.zip.client, s.zip.webdav, s.zip.cache, s.logger, 64<<10,
+	)
+	if err != nil || actualSize < 4 {
+		if readerAt != nil {
+			_ = readerAt.Close()
+		}
+		return ""
+	}
+	defer readerAt.Close()
+	var header [8]byte
+	n, err := readerAt.ReadAt(header[:], 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	sig := header[:n]
+	switch {
+	case len(sig) >= 7 && bytes.HasPrefix(sig, []byte{'R', 'a', 'r', '!', 0x1a, 0x07}):
+		return formatRAR
+	case len(sig) >= 4 && (bytes.HasPrefix(sig, []byte{'P', 'K', 0x03, 0x04}) ||
+		bytes.HasPrefix(sig, []byte{'P', 'K', 0x05, 0x06}) ||
+		bytes.HasPrefix(sig, []byte{'P', 'K', 0x07, 0x08})):
+		return formatZIP
+	default:
+		return ""
+	}
+}
+
+func (s *Service) effectiveFormat(ctx context.Context, book database.Book) string {
+	if cached := s.cachedArchiveFormat(ctx, book); cached != "" {
+		return cached
+	}
+	return archiveFormat(book.Name)
+}
+
+func (s *Service) listPagesDirect(ctx context.Context, book database.Book) ([]PageEntry, error) {
+	primary := s.effectiveFormat(ctx, book)
+	var (
+		pages []PageEntry
+		err   error
+	)
+	switch primary {
 	case formatZIP:
-		return s.zip.ReadPage(ctx, book, pageNumber)
+		pages, err = s.zip.ListPages(ctx, book)
 	case formatRAR:
-		return s.rar.ReadPage(ctx, book, pageNumber)
+		pages, err = s.rar.ListPages(ctx, book)
+	default:
+		return nil, ErrUnsupportedArchive
+	}
+	if err == nil {
+		return pages, nil
+	}
+	if (primary == formatZIP && errors.Is(err, ErrInvalidZIP)) || (primary == formatRAR && errors.Is(err, ErrInvalidRAR)) {
+		if detected := s.detectMagicFormat(ctx, book); detected != "" && detected != primary {
+			diagnostics.Default().Record(diagnostics.Event{
+				Level:         diagnostics.LevelWarn,
+				Component:     "archive",
+				Stage:         "archive_fallback",
+				Action:        "magic_detect",
+				CorrelationID: book.ID,
+				Detail:        "archive file header differs from extension; falling back by magic bytes",
+				Meta:          map[string]any{"format": primary, "fallbackFormat": detected},
+			})
+			switch detected {
+			case formatZIP:
+				return s.zip.ListPages(ctx, book)
+			case formatRAR:
+				return s.rar.ListPages(ctx, book)
+			}
+		}
+	}
+	return nil, err
+}
+
+func (s *Service) readPageDirect(ctx context.Context, book database.Book, pageNumber int) (PageData, error) {
+	started := time.Now()
+	primary := s.effectiveFormat(ctx, book)
+	var (
+		page PageData
+		err  error
+	)
+	switch primary {
+	case formatZIP:
+		page, err = s.zip.ReadPage(ctx, book, pageNumber)
+	case formatRAR:
+		page, err = s.rar.ReadPage(ctx, book, pageNumber)
 	default:
 		return PageData{}, ErrUnsupportedArchive
 	}
+	if err != nil && ((primary == formatZIP && errors.Is(err, ErrInvalidZIP)) || (primary == formatRAR && errors.Is(err, ErrInvalidRAR))) {
+		if detected := s.detectMagicFormat(ctx, book); detected != "" && detected != primary {
+			diagnostics.Default().Record(diagnostics.Event{
+				Level:         diagnostics.LevelWarn,
+				Component:     "archive",
+				Stage:         "archive_fallback",
+				Action:        "magic_detect",
+				CorrelationID: book.ID,
+				Detail:        "archive file header differs from extension during page read; falling back by magic bytes",
+				Meta:          map[string]any{"format": primary, "fallbackFormat": detected, "pageNumber": pageNumber},
+			})
+			switch detected {
+			case formatZIP:
+				page, err = s.zip.ReadPage(ctx, book, pageNumber)
+			case formatRAR:
+				page, err = s.rar.ReadPage(ctx, book, pageNumber)
+			}
+		}
+	}
+	if err != nil {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:         diagnostics.LevelError,
+			Component:     "archive",
+			Stage:         "page_read",
+			Action:        "read",
+			Code:          diagnostics.ClassifyError(err),
+			DurationMs:    time.Since(started).Milliseconds(),
+			CorrelationID: book.ID,
+			Detail:        err.Error(),
+			Meta:          map[string]any{"format": primary, "pageNumber": pageNumber},
+		})
+		return PageData{}, err
+	}
+	diagnostics.Default().RecordVerbose(diagnostics.Event{
+		Level:         diagnostics.LevelDebug,
+		Component:     "archive",
+		Stage:         "page_read",
+		Action:        "read",
+		DurationMs:    time.Since(started).Milliseconds(),
+		CorrelationID: book.ID,
+		Meta:          map[string]any{"format": page.Entry.Format, "pageNumber": pageNumber, "sizeBytes": len(page.Data)},
+	})
+	return page, nil
 }
 
 func (s *Service) syncUnionIndexSummary(ctx context.Context, unionBook database.Book, pageCount int, duration time.Duration) {
@@ -200,7 +337,7 @@ func (s *Service) Prefetch(book database.Book, afterPage, count int) {
 			return
 		}
 	}
-	switch archiveFormat(book.Name) {
+	switch s.effectiveFormat(context.Background(), book) {
 	case formatZIP:
 		s.zip.Prefetch(book, afterPage, count)
 	case formatRAR:

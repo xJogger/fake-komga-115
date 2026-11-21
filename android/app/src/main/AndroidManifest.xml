@@ -14,6 +14,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".SettingsActivity" android:exported="false" android:label="手机端设置" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden" />
         <service android:name=".ReaderService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-started embedded manga reader server; continues active scan and cover tasks when the app is backgrounded, with a persistent stop action." />

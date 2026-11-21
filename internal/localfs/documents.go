@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
 
 // DocumentBackend is supplied only by the embedded Android app. List returns
@@ -66,6 +68,15 @@ func listDocuments(root, rel string) ([]Entry, error) {
 	}
 	raw, err := b.List(root, rel)
 	if err != nil {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:     diagnostics.LevelError,
+			Component: "localfs",
+			Stage:     "saf_list",
+			Action:    "list",
+			Code:      diagnostics.ClassifyError(err),
+			Detail:    err.Error(),
+			Meta:      map[string]any{"provider": "local"},
+		})
 		return nil, err
 	}
 	var rows []struct {
@@ -118,15 +129,51 @@ func OpenBook(root, rel string) (*os.File, error) {
 	}
 	fd, err := b.Open(root, rel)
 	if err != nil {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:     diagnostics.LevelError,
+			Component: "localfs",
+			Stage:     "saf_open",
+			Action:    "open",
+			Code:      diagnostics.ClassifyError(err),
+			Detail:    err.Error(),
+			Meta:      map[string]any{"provider": "local"},
+		})
 		return nil, err
 	}
 	if fd < 0 {
-		return nil, errors.New("Android document provider returned an invalid descriptor")
+		err := errors.New("Android document provider returned an invalid descriptor")
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:     diagnostics.LevelError,
+			Component: "localfs",
+			Stage:     "saf_open",
+			Action:    "invalid_fd",
+			Code:      "SAF_INVALID_FD",
+			Detail:    err.Error(),
+			Meta:      map[string]any{"provider": "local"},
+		})
+		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), "android-document")
 	if _, err := file.Seek(0, io.SeekCurrent); err != nil {
 		file.Close()
-		return nil, errors.New("Android document provider does not support random access to this archive")
+		outErr := errors.New("Android document provider does not support random access to this archive")
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:     diagnostics.LevelError,
+			Component: "localfs",
+			Stage:     "saf_open",
+			Action:    "seek_check",
+			Code:      "SAF_NON_SEEKABLE",
+			Detail:    outErr.Error(),
+			Meta:      map[string]any{"provider": "local", "seekable": false},
+		})
+		return nil, outErr
 	}
+	diagnostics.Default().RecordVerbose(diagnostics.Event{
+		Level:     diagnostics.LevelDebug,
+		Component: "localfs",
+		Stage:     "saf_open",
+		Action:    "open",
+		Meta:      map[string]any{"provider": "local", "seekable": true},
+	})
 	return file, nil
 }

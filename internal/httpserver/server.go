@@ -27,6 +27,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/pipeline"
@@ -50,6 +51,7 @@ type Server struct {
 	thumbs    *thumbnail.Service
 	covers    *thumbnail.BatchManager
 	tasks     *maintenance.Manager
+	diag      *diagnostics.Recorder
 	logger    *slog.Logger
 	router    chi.Router
 	web       *template.Template
@@ -102,6 +104,13 @@ func (s *Server) WithServices(webdavManager *webdav.Manager, bangumiService *ban
 func (s *Server) WithPipeline(pipelineManager *pipeline.Manager) *Server {
 	if pipelineManager != nil {
 		s.pipelines = pipelineManager
+	}
+	return s
+}
+
+func (s *Server) WithDiagnostics(rec *diagnostics.Recorder) *Server {
+	if rec != nil {
+		s.diag = rec
 	}
 	return s
 }

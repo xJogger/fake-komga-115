@@ -2,20 +2,47 @@ name: Android APK preview
 
 on:
   push:
-    branches: ["feat/v2.1"]
+    branches: ["feat/v*"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version-name: ${{ steps.calc.outputs.name }}
+      version-code: ${{ steps.calc.outputs.code }}
+    steps:
+      - name: Compute preview Android version
+        id: calc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF_NAME}"
+          major=2
+          minor=4
+          patch=0
+          if [[ "${ref}" =~ ^feat/v([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
+            major="${BASH_REMATCH[1]}"
+            minor="${BASH_REMATCH[2]}"
+            patch="${BASH_REMATCH[4]:-0}"
+          fi
+          # Reserve 1..98 for previews; formal vMAJOR.MINOR.PATCH uses ...99.
+          seq=$(( GITHUB_RUN_NUMBER % 98 + 1 ))
+          code=$(( major * 1000000 + minor * 10000 + patch * 100 + seq ))
+          name="${major}.${minor}.${patch}-preview.${GITHUB_RUN_NUMBER}"
+          printf 'name=%s\ncode=%s\n' "${name}" "${code}" >> "${GITHUB_OUTPUT}"
+
   android:
-    if: github.ref == 'refs/heads/feat/v2.1'
+    needs: version
+    if: startsWith(github.ref, 'refs/heads/feat/v')
     uses: ./.github/workflows/android-package.yml
     # Pass only these two names; the protected signing job resolves their values.
     secrets:
       ANDROID_SIGNING_KEYSTORE_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_B64 }}
       ANDROID_SIGNING_STOREPASS: ${{ secrets.ANDROID_SIGNING_STOREPASS }}
     with:
-      version-name: "2.1.0-preview.3"
-      version-code: 2010002
+      version-name: ${{ needs.version.outputs.version-name }}
+      version-code: ${{ fromJSON(needs.version.outputs.version-code) }}

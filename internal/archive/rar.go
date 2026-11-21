@@ -19,6 +19,7 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	"github.com/xJogger/fake-komga-115/internal/natsort"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
@@ -69,16 +70,47 @@ func (r *RARService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	started := time.Now()
 	files, _, err := r.listFiles(ctx, book)
 	if err != nil {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:         diagnostics.LevelError,
+			Component:     "archive",
+			Stage:         "archive_index",
+			Action:        "parse_rar",
+			Code:          diagnostics.ClassifyError(err),
+			DurationMs:    time.Since(started).Milliseconds(),
+			CorrelationID: book.ID,
+			Detail:        err.Error(),
+			Meta:          map[string]any{"format": formatRAR, "sizeBytes": book.Size},
+		})
 		return nil, err
 	}
 
 	pages, err := rarPageEntries(files)
 	if err != nil {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:         diagnostics.LevelError,
+			Component:     "archive",
+			Stage:         "archive_index",
+			Action:        "validate_rar",
+			Code:          diagnostics.ClassifyError(err),
+			DurationMs:    time.Since(started).Milliseconds(),
+			CorrelationID: book.ID,
+			Detail:        err.Error(),
+			Meta:          map[string]any{"format": formatRAR},
+		})
 		return nil, err
 	}
 	if err := r.saveIndex(ctx, book, pages, time.Since(started)); err != nil {
 		return nil, err
 	}
+	diagnostics.Default().RecordVerbose(diagnostics.Event{
+		Level:         diagnostics.LevelDebug,
+		Component:     "archive",
+		Stage:         "archive_index",
+		Action:        "parse_rar",
+		DurationMs:    time.Since(started).Milliseconds(),
+		CorrelationID: book.ID,
+		Meta:          map[string]any{"format": formatRAR, "pages": len(pages)},
+	})
 	r.logger.Info("rar index parsed", "book", book.ID, "pages", len(pages))
 	return pages, nil
 }
@@ -341,14 +373,14 @@ func (r *remoteArchiveFS) Open(name string) (fs.File, error) {
 	if r.dataMode.Load() {
 		blockSize = r.dataSize
 	}
-	reader, err := openBookReaderAt(
+	reader, actualSize, err := openBookReaderAtWithSize(
 		r.ctx, r.book, r.store, r.client, r.webdav, r.cache, r.logger, blockSize,
 	)
 	if err != nil {
 		r.lastOpenErr = err
 		return nil, err
 	}
-	return &remoteArchiveFile{reader: reader, size: r.book.Size, name: remoteRARName}, nil
+	return &remoteArchiveFile{reader: reader, size: actualSize, name: remoteRARName}, nil
 }
 
 type remoteArchiveFile struct {

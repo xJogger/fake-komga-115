@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	"github.com/xJogger/fake-komga-115/internal/httpserver"
 	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
@@ -26,6 +29,8 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
 )
+
+const SettingDiagnosticsVerbose = "diagnostics_verbose"
 
 type Options struct {
 	Host          string
@@ -37,6 +42,7 @@ type Options struct {
 
 type App struct {
 	server     *http.Server
+	rawHandler http.Handler
 	store      *database.Store
 	scanner    *scanner.Manager
 	pipelines  *pipeline.Manager
@@ -44,10 +50,17 @@ type App struct {
 	tasks      *maintenance.Manager
 	archive    *archive.Service
 	bangumi    *bangumi.Service
+	diag       *diagnostics.Recorder
 	logger     *slog.Logger
 	listenAddr atomic.Value
 	warmCancel context.CancelFunc
 	warmDone   chan struct{}
+
+	lanMu     sync.Mutex
+	lanServer *http.Server
+	lanPort   int
+	lanAddr   string
+	lanErr    string
 }
 
 func New(_ context.Context, options Options) (*App, error) {
@@ -65,9 +78,28 @@ func New(_ context.Context, options Options) (*App, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
+	diagRecorder, err := diagnostics.New(dataDir, false)
+	if err != nil {
+		return nil, fmt.Errorf("init diagnostics: %w", err)
+	}
+	diagnostics.SetDefault(diagRecorder)
+
 	store, err := database.Open(filepath.Join(dataDir, "fake-komga-115.db"))
 	if err != nil {
+		diagRecorder.Record(diagnostics.Event{
+			Level:     diagnostics.LevelError,
+			Component: "app",
+			Stage:     "startup",
+			Action:    "open_db",
+			Code:      diagnostics.ClassifyError(err),
+			Detail:    err.Error(),
+		})
 		return nil, err
+	}
+	if rawVerbose, sErr := store.GetSetting(context.Background(), SettingDiagnosticsVerbose); sErr == nil {
+		if parsed, pErr := strconv.ParseBool(strings.TrimSpace(rawVerbose)); pErr == nil {
+			diagRecorder.SetVerbose(parsed)
+		}
 	}
 	cacheManager, err := cache.New(store, filepath.Join(dataDir, "cache"))
 	if err != nil {
@@ -136,9 +168,10 @@ func New(_ context.Context, options Options) (*App, error) {
 			Host:    options.Host,
 			Port:    options.Port,
 		}, options.Logger,
-	).WithServices(webdavManager, bangumiService).WithPipeline(pipelineManager)
+	).WithServices(webdavManager, bangumiService).WithPipeline(pipelineManager).WithDiagnostics(diagRecorder)
 
-	var routes http.Handler = handler.Handler()
+	rawHandler := handler.Handler()
+	var routes http.Handler = rawHandler
 	if options.LoopbackToken != "" {
 		routes = loopbackGuard(options.LoopbackToken, routes)
 	}
@@ -149,10 +182,175 @@ func New(_ context.Context, options Options) (*App, error) {
 		IdleTimeout:       2 * time.Minute,
 	}
 	return &App{
-		server: server, store: store, scanner: scanManager, pipelines: pipelineManager,
+		server: server, rawHandler: rawHandler, store: store, scanner: scanManager, pipelines: pipelineManager,
 		covers: coverManager, tasks: maintenanceManager, archive: archiveService, bangumi: bangumiService,
-		logger: options.Logger,
+		diag: diagRecorder, logger: options.Logger,
 	}, nil
+}
+
+func (a *App) Diagnostics() *diagnostics.Recorder { return a.diag }
+
+func (a *App) HasAdmin(ctx context.Context) (bool, error) {
+	return a.store.HasAdmin(ctx)
+}
+
+func (a *App) SetDiagnosticsVerbose(ctx context.Context, verbose bool) error {
+	if err := a.store.SetSetting(ctx, SettingDiagnosticsVerbose, strconv.FormatBool(verbose)); err != nil {
+		return err
+	}
+	a.diag.SetVerbose(verbose)
+	return nil
+}
+
+// StartLANServer starts an auxiliary 0.0.0.0:<port> HTTP listener sharing the
+// standard authenticated MangaAlpha handler (without the Android WebView
+// loopback cookie guard) so LAN devices and Komga clients can connect.
+// Requires an initialized administrator password before binding.
+func (a *App) StartLANServer(port int) (string, error) {
+	if port < 1024 || port > 65535 {
+		err := errors.New("LAN port must be between 1024 and 65535")
+		a.setLANError(err.Error())
+		return "", err
+	}
+	claimed, err := a.store.HasAdmin(context.Background())
+	if err != nil {
+		a.setLANError(err.Error())
+		return "", err
+	}
+	if !claimed {
+		err := errors.New("administrator password must be configured before enabling LAN server")
+		a.setLANError(err.Error())
+		a.diag.Record(diagnostics.Event{
+			Level:     diagnostics.LevelWarn,
+			Component: "app",
+			Stage:     "lan_server",
+			Action:    "start_blocked",
+			Code:      "ADMIN_REQUIRED",
+			Detail:    err.Error(),
+			Meta:      map[string]any{"port": port, "lanEnabled": false},
+		})
+		return "", err
+	}
+
+	a.lanMu.Lock()
+	if a.lanServer != nil && a.lanPort == port {
+		addr := a.lanAddr
+		a.lanMu.Unlock()
+		return addr, nil
+	}
+	prev := a.lanServer
+	a.lanServer = nil
+	a.lanPort = 0
+	a.lanAddr = ""
+	a.lanErr = ""
+	a.lanMu.Unlock()
+
+	if prev != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = prev.Shutdown(ctx)
+		cancel()
+	}
+
+	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		a.setLANError(err.Error())
+		a.diag.Record(diagnostics.Event{
+			Level:     diagnostics.LevelError,
+			Component: "app",
+			Stage:     "lan_server",
+			Action:    "bind_failed",
+			Code:      diagnostics.ClassifyError(err),
+			Detail:    err.Error(),
+			Meta:      map[string]any{"port": port, "lanEnabled": false},
+		})
+		return "", err
+	}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           a.rawHandler,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	bound := listener.Addr().String()
+	a.lanMu.Lock()
+	a.lanServer = srv
+	a.lanPort = port
+	a.lanAddr = bound
+	a.lanErr = ""
+	a.lanMu.Unlock()
+
+	a.logger.Info("LAN server listening", "address", bound)
+	a.diag.Record(diagnostics.Event{
+		Level:     diagnostics.LevelInfo,
+		Component: "app",
+		Stage:     "lan_server",
+		Action:    "started",
+		Detail:    "auxiliary LAN listener started",
+		Meta:      map[string]any{"port": port, "lanEnabled": true},
+	})
+	go func() {
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			a.logger.Warn("LAN server stopped with error", "error", err)
+			a.lanMu.Lock()
+			if a.lanServer == srv {
+				a.lanServer = nil
+				a.lanPort = 0
+				a.lanAddr = ""
+				a.lanErr = err.Error()
+			}
+			a.lanMu.Unlock()
+			a.diag.Record(diagnostics.Event{
+				Level:     diagnostics.LevelError,
+				Component: "app",
+				Stage:     "lan_server",
+				Action:    "serve_error",
+				Code:      diagnostics.ClassifyError(err),
+				Detail:    err.Error(),
+				Meta:      map[string]any{"port": port, "lanEnabled": false},
+			})
+		}
+	}()
+	return bound, nil
+}
+
+func (a *App) StopLANServer() error {
+	a.lanMu.Lock()
+	srv := a.lanServer
+	port := a.lanPort
+	a.lanServer = nil
+	a.lanPort = 0
+	a.lanAddr = ""
+	a.lanErr = ""
+	a.lanMu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := srv.Shutdown(ctx)
+	a.logger.Info("LAN server stopped", "port", port)
+	a.diag.Record(diagnostics.Event{
+		Level:     diagnostics.LevelInfo,
+		Component: "app",
+		Stage:     "lan_server",
+		Action:    "stopped",
+		Detail:    "auxiliary LAN listener stopped",
+		Meta:      map[string]any{"port": port, "lanEnabled": false},
+	})
+	return err
+}
+
+func (a *App) LANStatus() (active bool, port int, lastErr string) {
+	a.lanMu.Lock()
+	defer a.lanMu.Unlock()
+	return a.lanServer != nil, a.lanPort, a.lanErr
+}
+
+func (a *App) setLANError(msg string) {
+	a.lanMu.Lock()
+	a.lanErr = msg
+	a.lanMu.Unlock()
 }
 
 func (a *App) Run() error {
@@ -181,6 +379,13 @@ func (a *App) Start() (<-chan error, error) {
 	addr := listener.Addr().String()
 	a.listenAddr.Store(addr)
 	a.logger.Info("server listening", "address", addr)
+	a.diag.Record(diagnostics.Event{
+		Level:     diagnostics.LevelInfo,
+		Component: "app",
+		Stage:     "startup",
+		Action:    "listening",
+		Detail:    "HTTP server started",
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	a.warmCancel, a.warmDone = cancel, make(chan struct{})
 	go func() {
@@ -199,9 +404,20 @@ func (a *App) Start() (<-chan error, error) {
 	return errCh, nil
 }
 
-func (a *App) Shutdown(ctx context.Context) error { return a.server.Shutdown(ctx) }
+func (a *App) Shutdown(ctx context.Context) error {
+	a.diag.Record(diagnostics.Event{
+		Level:     diagnostics.LevelInfo,
+		Component: "app",
+		Stage:     "shutdown",
+		Action:    "stop",
+		Detail:    "HTTP server shutting down",
+	})
+	_ = a.StopLANServer()
+	return a.server.Shutdown(ctx)
+}
 
 func (a *App) Close() error {
+	_ = a.StopLANServer()
 	if a.warmCancel != nil {
 		a.warmCancel()
 		<-a.warmDone

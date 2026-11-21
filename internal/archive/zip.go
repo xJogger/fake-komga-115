@@ -18,6 +18,7 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	"github.com/xJogger/fake-komga-115/internal/natsort"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/webdav"
@@ -65,13 +66,35 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 
 	started := time.Now()
 	blockSize := z.store.Int64Setting(ctx, "range_block_size", 1<<20)
-	readerAt, err := openBookReaderAt(ctx, book, z.store, z.client, z.webdav, z.cache, z.logger, blockSize)
+	readerAt, actualSize, err := openBookReaderAtWithSize(ctx, book, z.store, z.client, z.webdav, z.cache, z.logger, blockSize)
 	if err != nil {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:         diagnostics.LevelError,
+			Component:     "archive",
+			Stage:         "archive_index",
+			Action:        "open",
+			Code:          diagnostics.ClassifyError(err),
+			DurationMs:    time.Since(started).Milliseconds(),
+			CorrelationID: book.ID,
+			Detail:        err.Error(),
+			Meta:          map[string]any{"format": formatZIP},
+		})
 		return nil, err
 	}
 	defer readerAt.Close()
-	reader, err := zip.NewReader(readerAt, book.Size)
+	reader, err := zip.NewReader(readerAt, actualSize)
 	if err != nil {
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:         diagnostics.LevelError,
+			Component:     "archive",
+			Stage:         "archive_index",
+			Action:        "parse_zip",
+			Code:          "ZIP_ERROR",
+			DurationMs:    time.Since(started).Milliseconds(),
+			CorrelationID: book.ID,
+			Detail:        err.Error(),
+			Meta:          map[string]any{"format": formatZIP, "sizeBytes": actualSize},
+		})
 		return nil, fmt.Errorf("%w: %v", ErrInvalidZIP, err)
 	}
 	var pages []PageEntry
@@ -122,6 +145,15 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	); err != nil {
 		return nil, err
 	}
+	diagnostics.Default().RecordVerbose(diagnostics.Event{
+		Level:         diagnostics.LevelDebug,
+		Component:     "archive",
+		Stage:         "archive_index",
+		Action:        "parse_zip",
+		DurationMs:    time.Since(started).Milliseconds(),
+		CorrelationID: book.ID,
+		Meta:          map[string]any{"format": formatZIP, "pages": len(pages)},
+	})
 	z.logger.Info("zip index parsed", "book", book.ID, "pages", len(pages))
 	return pages, nil
 }

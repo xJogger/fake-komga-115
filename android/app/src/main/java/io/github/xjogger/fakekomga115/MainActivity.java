@@ -9,20 +9,29 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
+import android.graphics.Color;
+import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.view.WindowInsets;
+import android.view.Gravity;
 import android.view.View;
-import android.widget.FrameLayout;
-import android.graphics.Insets;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -31,7 +40,12 @@ import mobile.Instance;
 
 public final class MainActivity extends Activity {
     private static final int FOLDER = 11;
+    private static final int COLOR_LIGHT_BG = 0xFFF4F6FA;
+    private static final int COLOR_DARK_BG = 0xFF0F1117;
+    private static final int COLOR_READER_BG = 0xFF000000;
+
     private WebView web;
+    private LinearLayout statusPane;
     private TextView status;
     private FrameLayout frame;
     private ReaderService.LocalBinder service;
@@ -51,13 +65,45 @@ public final class MainActivity extends Activity {
         }
     };
 
+    private final class AndroidBridge {
+        @JavascriptInterface
+        public void setSystemBarTheme(String bgHex, boolean lightIcons) {
+            runOnUiThread(() -> {
+                if (web == null || web.getUrl() == null || !inside(Uri.parse(web.getUrl()))) return;
+                int parsed = lightIcons ? COLOR_LIGHT_BG : COLOR_DARK_BG;
+                if (bgHex != null && bgHex.matches("^#[0-9a-fA-F]{6}$")) {
+                    try { parsed = Color.parseColor(bgHex); } catch (IllegalArgumentException ignored) {}
+                }
+                applySystemBarStyle(parsed, lightIcons);
+            });
+        }
+    }
+
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        boolean sysDark = isSystemNightMode();
+        statusPane = new LinearLayout(this);
+        statusPane.setOrientation(LinearLayout.VERTICAL);
+        statusPane.setGravity(Gravity.CENTER_HORIZONTAL);
+        statusPane.setPadding(64, 140, 64, 48);
+
         status = new TextView(this);
-        status.setPadding(48, 72, 48, 24);
+        status.setTextSize(16f);
+        status.setTextColor(sysDark ? 0xFFEEF1F7 : 0xFF141923);
         status.setText("正在启动本机书库…");
+        statusPane.addView(status);
+
+        Button settingsBtn = new Button(this);
+        settingsBtn.setText("手机端设置与诊断日志");
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = 36;
+        settingsBtn.setLayoutParams(lp);
+        settingsBtn.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+        statusPane.addView(settingsBtn);
+
         frame = new FrameLayout(this);
-        frame.addView(status);
+        frame.addView(statusPane);
         if (Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
             frame.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -68,6 +114,8 @@ public final class MainActivity extends Activity {
             });
         }
         setContentView(frame);
+        applySystemBarStyle(sysDark ? COLOR_DARK_BG : COLOR_LIGHT_BG, !sysDark);
+
         Intent intent = new Intent(this, ReaderService.class);
         startForegroundService(intent);
         bound = bindService(intent, connection, Context.BIND_AUTO_CREATE);
@@ -78,12 +126,76 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private boolean isSystemNightMode() {
+        int mask = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        return mask == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applySystemBarStyle(int bgColor, boolean lightIcons) {
+        if (frame != null) {
+            frame.setBackgroundColor(bgColor);
+        }
+        Window window = getWindow();
+        if (window == null) return;
+        if (Build.VERSION.SDK_INT < 35) {
+            window.setStatusBarColor(bgColor);
+            window.setNavigationBarColor(bgColor);
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController ctrl = window.getInsetsController();
+            if (ctrl != null) {
+                int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                ctrl.setSystemBarsAppearance(lightIcons ? mask : 0, mask);
+            }
+        } else {
+            View decor = window.getDecorView();
+            int flags = decor.getSystemUiVisibility();
+            if (lightIcons) {
+                flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                if (Build.VERSION.SDK_INT >= 27) {
+                    flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                }
+            } else {
+                flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                if (Build.VERSION.SDK_INT >= 27) {
+                    flags &= ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                }
+            }
+            decor.setSystemUiVisibility(flags);
+        }
+    }
+
+    private void syncSystemBarsFromPage(WebView view, String url) {
+        if (view == null || url == null) return;
+        Uri uri = Uri.parse(url);
+        if (!inside(uri)) return;
+        String path = uri.getPath();
+        if (path != null && path.startsWith("/reader")) {
+            applySystemBarStyle(COLOR_READER_BG, false);
+            return;
+        }
+        view.evaluateJavascript(
+            "(function(){return document.documentElement.getAttribute('data-theme')||'';})()",
+            result -> {
+                if (result == null) return;
+                String clean = result.replace("\"", "").trim();
+                if ("light".equals(clean)) {
+                    applySystemBarStyle(COLOR_LIGHT_BG, true);
+                } else if ("dark".equals(clean)) {
+                    applySystemBarStyle(COLOR_DARK_BG, false);
+                }
+            }
+        );
+    }
+
     private void update(Instance instance, String message) {
         if (instance == null) {
             status.setText(message);
             if (web != null) {
                 origin = "";
-                show(status);
+                show(statusPane);
                 web.destroy();
                 web = null;
             }
@@ -99,6 +211,7 @@ public final class MainActivity extends Activity {
         web.getSettings().setAllowContentAccess(false);
         web.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         web.getSettings().setUserAgentString(web.getSettings().getUserAgentString() + " FK115Android/1");
+        web.addJavascriptInterface(new AndroidBridge(), "FK115AndroidBridge");
         web.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
@@ -106,6 +219,10 @@ public final class MainActivity extends Activity {
                 if (inside(uri)) {
                     if ("/__android/pick-folder".equals(uri.getPath()) && request.hasGesture()) {
                         pickFolder();
+                        return true;
+                    }
+                    if ("/__android/settings".equals(uri.getPath()) && request.hasGesture()) {
+                        startActivity(new Intent(MainActivity.this, SettingsActivity.class));
                         return true;
                     }
                     if ("/__android/stop".equals(uri.getPath()) && request.hasGesture()) {
@@ -129,7 +246,22 @@ public final class MainActivity extends Activity {
                 return new WebResourceResponse("text/plain", "UTF-8", null);
             }
             @Override public void onPageFinished(WebView view, String url) {
-                if (inside(Uri.parse(url))) showPickedFolder();
+                if (url != null && inside(Uri.parse(url))) {
+                    showPickedFolder();
+                    syncSystemBarsFromPage(view, url);
+                }
+            }
+            @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request != null && request.isForMainFrame()) {
+                    DiagnosticsLog.append(MainActivity.this, "error", "android_webview", "main_frame_error",
+                            "WEBVIEW_" + error.getErrorCode(), String.valueOf(error.getDescription()));
+                }
+            }
+            @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
+                if (request != null && request.isForMainFrame() && errorResponse != null && errorResponse.getStatusCode() >= 500) {
+                    DiagnosticsLog.append(MainActivity.this, "error", "android_webview", "http_error",
+                            "HTTP_" + errorResponse.getStatusCode(), "main frame returned HTTP " + errorResponse.getStatusCode());
+                }
             }
         });
         show(web);
@@ -165,6 +297,7 @@ public final class MainActivity extends Activity {
             pendingFolder = tree.toString();
             showPickedFolder();
         } catch (SecurityException e) {
+            DiagnosticsLog.append(this, "error", "android_saf", "take_permission", "SECURITY_EXCEPTION", e.getMessage());
             Toast.makeText(this, "未能保存目录读取权限", Toast.LENGTH_LONG).show();
         }
     }

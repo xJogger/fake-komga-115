@@ -24,6 +24,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
 
 const (
@@ -33,16 +34,23 @@ const (
 )
 
 type ArchiveStatus struct {
-	Ready         bool   `json:"ready"`
-	DumpName      string `json:"dumpName"`
-	DumpCreatedAt string `json:"dumpCreatedAt"`
-	ImportedAt    string `json:"importedAt"`
-	SubjectCount  int64  `json:"subjectCount"`
-	Updating      bool   `json:"updating"`
-	Phase         string `json:"phase"`
-	Downloaded    int64  `json:"downloadedBytes"`
-	TotalBytes    int64  `json:"totalBytes"`
-	LastError     string `json:"lastError"`
+	Ready                 bool   `json:"ready"`
+	DumpName              string `json:"dumpName"`
+	DumpCreatedAt         string `json:"dumpCreatedAt"`
+	DumpDigest            string `json:"dumpDigest"`
+	ImportedAt            string `json:"importedAt"`
+	SubjectCount          int64  `json:"subjectCount"`
+	Updating              bool   `json:"updating"`
+	Phase                 string `json:"phase"`
+	Downloaded            int64  `json:"downloadedBytes"`
+	TotalBytes            int64  `json:"totalBytes"`
+	LastError             string `json:"lastError"`
+	LastCheckAt           string `json:"lastCheckAt"`
+	LastCheckResult       string `json:"lastCheckResult"`
+	LastSyncAt            string `json:"lastSyncAt"`
+	LastSyncDump          string `json:"lastSyncDump"`
+	LastSyncUpdatedSeries int    `json:"lastSyncUpdatedSeries"`
+	LastSyncError         string `json:"lastSyncError"`
 }
 
 type ArchiveIndex struct {
@@ -55,11 +63,12 @@ type ArchiveIndex struct {
 	httpClient *http.Client
 	proxyRaw   string
 
-	mu       sync.RWMutex
-	db       *sql.DB
-	status   ArchiveStatus
-	cancel   context.CancelFunc
-	onImport func()
+	mu           sync.RWMutex
+	db           *sql.DB
+	status       ArchiveStatus
+	cancel       context.CancelFunc
+	onImport     func()
+	onUpdateDone func(result, dumpName, errMsg string)
 }
 
 func NewArchiveIndex(dir string, logger *slog.Logger) (*ArchiveIndex, error) {
@@ -127,6 +136,10 @@ func (a *ArchiveIndex) Ready() bool {
 }
 
 func (a *ArchiveIndex) StartOnlineUpdate() (ArchiveStatus, error) {
+	return a.StartOnlineUpdateWithOptions(false)
+}
+
+func (a *ArchiveIndex) StartOnlineUpdateWithOptions(force bool) (ArchiveStatus, error) {
 	a.mu.Lock()
 	if a.status.Updating {
 		st := a.status
@@ -143,7 +156,7 @@ func (a *ArchiveIndex) StartOnlineUpdate() (ArchiveStatus, error) {
 	st := a.status
 	a.mu.Unlock()
 
-	go a.runOnlineUpdate(ctx)
+	go a.runOnlineUpdate(ctx, force)
 	return st, nil
 }
 
@@ -165,26 +178,62 @@ type latestDumpMeta struct {
 	Size               int64  `json:"size"`
 }
 
-func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context) {
+func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context, force bool) {
 	client, proxyRaw := a.clientAndProxy()
-	var finishErr error
+	started := time.Now()
+	var (
+		finishErr  error
+		resultCode = "updated"
+		dumpName   string
+	)
 	defer func() {
+		nowStr := time.Now().UTC().Format(time.RFC3339)
 		a.mu.Lock()
 		a.status.Updating = false
 		a.cancel = nil
+		a.status.LastCheckAt = nowStr
+		cb := a.onUpdateDone
+		errText := ""
 		if finishErr != nil {
 			if errors.Is(finishErr, context.Canceled) {
 				a.status.Phase = "canceled"
 				a.status.LastError = "更新已取消"
+				resultCode = "canceled"
+				errText = a.status.LastError
 			} else {
 				a.status.Phase = "failed"
 				a.status.LastError = SanitizeProxyError(finishErr, proxyRaw)
+				resultCode = "failed"
+				errText = a.status.LastError
 			}
+		} else if resultCode == "up_to_date" {
+			a.status.Phase = "up_to_date"
+			a.status.LastError = ""
 		} else {
 			a.status.Phase = "idle"
 			a.status.LastError = ""
 		}
+		a.status.LastCheckResult = resultCode
 		a.mu.Unlock()
+
+		level := diagnostics.LevelInfo
+		if resultCode == "failed" {
+			level = diagnostics.LevelError
+		} else if resultCode == "canceled" {
+			level = diagnostics.LevelWarn
+		}
+		diagnostics.Default().Record(diagnostics.Event{
+			Level:      level,
+			Component:  "bangumi",
+			Stage:      "bangumi_archive",
+			Action:     resultCode,
+			DurationMs: time.Since(started).Milliseconds(),
+			Detail:     errText,
+			Meta:       map[string]any{"dump": dumpName, "skipped": resultCode == "up_to_date"},
+		})
+		if cb != nil {
+			cb(resultCode, dumpName, errText)
+		}
 	}()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.metaURL, nil)
@@ -216,6 +265,25 @@ func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context) {
 	if meta.BrowserDownloadURL == "" {
 		finishErr = errors.New("latest.json missing browser_download_url")
 		return
+	}
+	dumpName = strings.TrimSpace(meta.Name)
+	remoteDigest := strings.ToLower(strings.TrimSpace(meta.Digest))
+
+	if !force {
+		a.mu.RLock()
+		curReady := a.status.Ready
+		curName := strings.TrimSpace(a.status.DumpName)
+		curDigest := strings.ToLower(strings.TrimSpace(a.status.DumpDigest))
+		a.mu.RUnlock()
+		sameDigest := remoteDigest != "" && curDigest != "" && remoteDigest == curDigest
+		sameName := dumpName != "" && curName != "" && dumpName == curName
+		if curReady && (sameDigest || (curDigest == "" && sameName)) {
+			resultCode = "up_to_date"
+			if a.logger != nil {
+				a.logger.Info("Bangumi offline archive already up to date", "dump", dumpName)
+			}
+			return
+		}
 	}
 
 	a.mu.Lock()
@@ -295,7 +363,7 @@ func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context) {
 	a.status.Phase = "indexing"
 	a.mu.Unlock()
 
-	if err := a.ImportFromZipFile(ctx, zipTemp, meta.Name, meta.CreatedAt); err != nil {
+	if err := a.ImportFromZipFileWithDigest(ctx, zipTemp, meta.Name, meta.CreatedAt, remoteDigest); err != nil {
 		finishErr = err
 		return
 	}
@@ -342,6 +410,13 @@ type archivePersonLine struct {
 func (a *ArchiveIndex) ImportFromZipFile(
 	ctx context.Context,
 	zipPath, dumpName, dumpCreatedAt string,
+) error {
+	return a.ImportFromZipFileWithDigest(ctx, zipPath, dumpName, dumpCreatedAt, "")
+}
+
+func (a *ArchiveIndex) ImportFromZipFileWithDigest(
+	ctx context.Context,
+	zipPath, dumpName, dumpCreatedAt, dumpDigest string,
 ) error {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -589,6 +664,7 @@ ON CONFLICT(term_key,subject_id) DO UPDATE SET is_primary=MAX(bgm_terms.is_prima
 	for k, v := range map[string]string{
 		"dump_name":            dumpName,
 		"dump_created_at":      dumpCreatedAt,
+		"dump_digest":          strings.ToLower(strings.TrimSpace(dumpDigest)),
 		"imported_at":          importedAt,
 		"subject_count":        fmt.Sprintf("%d", importedCount),
 		"terms_schema_version": currentTermsSchemaVersion,
@@ -834,6 +910,7 @@ func (a *ArchiveIndex) openExistingIfPresent() {
 	a.status.Ready = count > 0
 	a.status.DumpName = meta["dump_name"]
 	a.status.DumpCreatedAt = meta["dump_created_at"]
+	a.status.DumpDigest = meta["dump_digest"]
 	a.status.ImportedAt = meta["imported_at"]
 	a.status.SubjectCount = count
 	if !a.status.Updating {

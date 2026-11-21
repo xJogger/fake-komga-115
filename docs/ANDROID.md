@@ -1,29 +1,31 @@
-# Android 独立预览版
+# Android 独立版
 
-这是可独立运行的 Android 应用，不依赖家里的服务端，不同步书库或阅读进度，也不是 Mihon 插件。应用内通过 WebView 使用同一套网页书架、管理界面和阅读器。
+这是可独立运行的 Android 应用，不依赖家里的服务端，不同步书库或阅读进度，也不是 Mihon 插件。应用内通过 WebView 使用同一套网页书架、管理界面和阅读器，并可选作为局域网漫画服务器向同局域网设备提供访问。
 
 ## 下载与安装
 
-1. 从 [GitHub Releases](https://github.com/xJogger/MangaAlpha/releases) 下载随服务端版本发布的 Android 预览包 `mangaalpha-arm64.apk`。分支上的签名预览则从 **Android APK preview** 的 `mangaalpha-android-signed` 工件解压取得；不要下载或尝试安装 unsigned 工件。
+1. 从 [GitHub Releases](https://github.com/xJogger/MangaAlpha/releases) 下载随服务端版本发布的 Android 正式包 `mangaalpha-arm64.apk`。开发分支上的签名预览则从 **Android APK preview** 的 `mangaalpha-android-signed` 工件解压取得；不要下载或尝试安装 unsigned 工件。
 2. 安装目标为 Android 8.0+ 的 ARM64 手机。MangaAlpha 使用 `io.github.xjogger.mangaalpha`，与旧的 Fake Komga 115 调试版是两个独立应用，不共用数据。后续同包名、同证书的签名包可以覆盖更新（无需卸载）；卸载会删除该应用的数据库、缓存和设置。
 3. 第一次打开先设管理员。可以添加 115、WebDAV，或在「管理后台 → 书库 → 本地」点「选择手机目录」并允许读取。应用只保存系统授权的 URI，无需全盘权限或 Shizuku。权限撤销后，用系统选择器重新选择同一个目录即可重新授权；不必删除书库。
 
-## 运行约束和验证清单
+## 手机端设置、局域网服务与脱敏诊断日志
 
-- 手机书库是只读的。扫描仅读目录、文件大小与时间；读取时通过系统文件描述符随机访问。不能随机访问的文件提供方不会触发整包复制，请改用支持随机读的本机目录或 WebDAV。
+- **原生「手机端设置」页**：可从常驻通知的「手机端设置」按钮、管理后台顶部「手机端设置」按钮，或启动页直接进入。即使 WebView 白屏或内嵌服务启动失败，也能在原生设置页查看状态、重启/停止服务并导出脱敏诊断日志。
+- **手机充当局域网服务器（默认关闭）**：
+  - 默认状态下，APK 内的 Go 服务仅监听设备回环地址（`127.0.0.1`），并由应用内部凭据 Cookie 隔离，防止其他本机应用访问。
+  - 在原生「手机端设置」页可手动开启「局域网访问」（前提：已完成管理员密码初始化）并自定义端口（默认 `25600`）。开启后额外监听 `0.0.0.0:<端口>`，同局域网浏览器及 Komga / Mihon / Koharia 客户端可按管理员账号密码或 API Key 访问，应用内 WebView 仍独立走回环地址保护。
+  - 重启应用会记住局域网开关与端口配置；若局域网端口冲突，仅局域网监听提示错误，不会影响本机书架与阅读器启动。
+- **脱敏诊断日志**：与桌面/服务端共用白名单脱敏诊断引擎，默认记录精简关键事件（本地限量轮转，不自动上传），排障时可在原生设置页或网页后台切换「详细排障模式」，并一键保存或分享脱敏日志报告。绝不记录密码、Token、Cookie、API Key、真实下载链接、完整 WebDAV URL 或私人文件路径。
+- **系统状态栏与安全区**：随书架浅色/深色模式以及进入 `/reader/*` 阅读器自动调整系统栏配色、图标明暗与异形屏/导航栏安全区。
+
+## 运行约束和归档兼容性
+
+- 手机书库是只读的。扫描仅读目录、文件大小与时间；读取时通过系统文件描述符随机访问，并缓存文件文档 ID、对 `EXTRA_LOADING` 瞬态做短暂重试、从真实文件描述符校准大小并支持 ZIP/RAR 常见误标扩展名的魔数回退。不能随机访问的文件提供方不会触发整包复制，请改用支持随机读的本机目录或 WebDAV。
+- WebDAV（含同机 CloudDrive2 / OpenList）已支持瞬断与 `429`/`5xx` 有限退避重试、重定向 Range 保留与跨主机脱敏、`Size=0` 校准以及分类诊断事件记录。
 - 数据库、封面、Range 和页面缓存各自保存在应用私有目录，与服务器部署完全独立。SQLite 临时文件也写入应用私有缓存目录，不移动主数据库。请按手机余量调整缓存上限。锁屏、离开界面时可借助前台服务继续任务；从通知或管理后台可手动停止，也可在系统应用设置中停止。系统或设备厂商仍可能结束进程；不随开机启动。
-- APK 内的 Go 服务只监听设备回环地址，另有应用内部凭据防止其他本机应用直接访问，不用它向局域网或外部漫画客户端提供服务。
-- 安装试用时至少检查：首次设密、选目录并扫描、重启后目录授权仍有效、撤销权限后不会清空旧书库、从本地/115/WebDAV 各打开一卷、切到后台和通知停止、系统 16 KB 内存页设备能启动。CI 会校验签名、APK ZIP 对齐与 ARM64 Go 库 ELF 对齐，但不代替这些真机验证。
-
-## 2.1 预览版已知问题
-
-- 手机连接同机的 CloudDrive2 WebDAV 时，曾出现扫库中途停止、已有条目能刮削但阅读器加载不出页面。
-- 手机本地目录（SAF）曾出现授权、扫库和刮削正常，但部分归档打不开。
-
-这两种情况仍待分别排查，尚未确定是否有关联。当前 APK 不提供应用内诊断日志导出。
 
 ## 开发与签名
 
-推送到 `feat/v2.1` 触发签名预览；正式版由 Release 工作流调用同一打包流程，共用固定的签名证书。先构建无签名 APK，再由使用 `android-signing` 环境的独立任务自动签名。只允许可信维护者推送该环境允许的开发分支和发布标签，不把签名密钥设为全仓库密钥。环境变量 `ANDROID_SIGNING_CERT_SHA256` 是公开证书摘要，`ANDROID_SIGNING_KEYSTORE_B64` 和 `ANDROID_SIGNING_STOREPASS` 是仅签名任务可访问的环境密钥。签名库与密码必须在 Git 仓库之外保留备份；更新时不要重新生成私钥。预览的版本代码低于同版本正式包。
+推送到 `feat/v*` 开发分支会触发 **Android APK preview** 自动构建并签名预览包（预览版 `versionCode` 低于同版本正式包 `...99`，安装正式版可无缝覆盖升级）；正式版由 `v*` 标签触发 Release 工作流共用同一打包流程与签名证书。先构建无签名 APK，再由使用 `android-signing` 保护环境的独立任务自动签名。环境变量 `ANDROID_SIGNING_CERT_SHA256` 是公开证书摘要，`ANDROID_SIGNING_KEYSTORE_B64` 和 `ANDROID_SIGNING_STOREPASS` 是仅签名任务可访问的环境密钥。签名库与密码必须在 Git 仓库之外保留备份；更新时不要重新生成私钥。
 
-构建顺序见 [Android 打包流程](../.github/workflows/android-package.yml)：构建 `/reader` 静态包，使用 Android NDK + Go `gomobile bind` 生成 `android/app/libs/fk115.aar`，再由 Gradle 打包。`mobile/bridge.go` 持有应用实例；`android/` 负责系统目录授权、生命周期与 WebView；`internal/localfs` 中的 Android 适配只在嵌入服务启动后注册。服务器二进制与镜像仍使用 `CGO_ENABLED=0`，不需要 Android 工具链。
+构建顺序见 [Android 打包流程](../.github/workflows/android-package.yml)：构建 `/reader` 静态包，使用 Android NDK + Go `gomobile bind` 生成 `android/app/libs/fk115.aar`，再由 Gradle 打包。`mobile/bridge.go` 持有应用实例与双监听局域网控制；`android/` 负责系统目录授权、生命周期、原生设置页、状态栏与 WebView；`internal/localfs` 中的 Android 适配只在嵌入服务启动后注册。服务器二进制与镜像仍使用 `CGO_ENABLED=0`，不需要 Android 工具链。
