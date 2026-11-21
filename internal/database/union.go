@@ -1866,8 +1866,9 @@ WHERE sm.bgm_subject_id=? AND ul.union_library_id IS NULL`
 		query += ` AND sm.is_nsfw=0`
 	}
 	query += `
-ORDER BY CASE WHEN l.provider_type='union' THEN 0 ELSE 1 END ASC,
- s.books_count DESC, l.name COLLATE NOCASE ASC, s.id ASC`
+ORDER BY s.books_count DESC,
+ CASE WHEN l.provider_type='union' THEN 0 ELSE 1 END ASC,
+ l.name COLLATE NOCASE ASC, s.name COLLATE NOCASE ASC, s.id ASC`
 	rows, err := s.db.QueryContext(ctx, query, subjectID)
 	if err != nil {
 		return nil, err

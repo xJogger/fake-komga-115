@@ -1299,13 +1299,15 @@
         box.innerHTML = `
           <details class="series-versions-panel">
             <summary class="series-versions-summary">
-              <span class="series-versions-title">
-                <span class="series-versions-caret">▶</span>
-                <span>多版本切换</span>
-                <span class="badge badge-accent">共 ${versions.length} 个版本</span>
-                <span class="series-versions-current">当前：${esc(currentVer.library)} · ${esc(providerLabel(currentVer.provider))} (${Number(currentVer.booksCount)} 册)</span>
-              </span>
-              ${resume ? `<span style="display:inline-flex;gap:6px;align-items:center">${resume}</span>` : ''}
+              <div class="series-versions-head">
+                <span class="series-versions-title">
+                  <span class="series-versions-caret">▶</span>
+                  <span class="series-versions-label">多版本切换</span>
+                  <span class="badge badge-accent series-versions-count">共 ${versions.length} 个版本</span>
+                </span>
+                ${resume ? `<span class="series-versions-resume">${resume}</span>` : ''}
+              </div>
+              <div class="series-versions-current">当前：${esc(currentVer.library)} · ${esc(providerLabel(currentVer.provider))}（${Number(currentVer.booksCount)} 册）</div>
             </summary>
             <div class="series-versions-list">
               ${versions.map((v) => {
@@ -1317,7 +1319,7 @@
                       <span class="series-version-name" title="${esc(v.name)}">${esc(v.name)}</span>
                       <span class="series-version-meta">${esc(v.library)} · ${esc(providerLabel(v.provider))} · ${Number(v.booksCount)} 册</span>
                     </span>
-                    <span style="display:inline-flex;gap:6px;align-items:center;flex-shrink:0">
+                    <span class="series-version-actions">
                       ${isLast ? `<span class="badge">最近阅读</span>` : ''}
                       ${isCur ? `<span class="badge badge-accent">当前</span>` : `<span class="btn btn-sm">切换</span>`}
                     </span>

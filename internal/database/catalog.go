@@ -136,7 +136,6 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 	dir := sortDirection(sortValue)
 	primary := `COALESCE(NULLIF((SELECT sm.title_sort FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) COLLATE NOCASE`
 	ties := " " + dir + ",s.id " + dir
-	groupOrder := ""
 	var orderArgs []any
 	// Search CTE path uses a single LEFT JOIN series_metadata sm instead of repeated correlated subqueries.
 	searchJoinSM := true
@@ -175,48 +174,64 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 	case strings.HasPrefix(sortValue, "lastmodifieddate"):
 		primary = `s.sort_modified_at`
 		ties = " " + dir + ",s.name COLLATE NOCASE ASC,s.id ASC"
-		groupOrder = "MAX(s.sort_modified_at)"
 		searchJoinSM = false
 		searchPrimary, searchTies = primary, ties
 	case strings.HasPrefix(sortValue, "createddate"):
 		primary = `s.sort_created_at`
 		ties = " " + dir + ",s.name COLLATE NOCASE ASC,s.id ASC"
-		groupOrder = "MAX(s.sort_created_at)"
 		searchJoinSM = false
 		searchPrimary, searchTies = primary, ties
 	case strings.HasPrefix(sortValue, "bgmrank"):
 		primary = `(SELECT sm.bgm_rank FROM series_metadata sm WHERE sm.series_id=s.id AND sm.bgm_rank>0)`
 		ties = " " + dir + " NULLS LAST,s.name COLLATE NOCASE ASC,s.id ASC"
-		groupOrder = "MIN(CASE WHEN gm.bgm_rank>0 THEN gm.bgm_rank END)"
 		searchPrimary = `CASE WHEN sm.bgm_rank>0 THEN sm.bgm_rank END`
 		searchTies = ties
 	case strings.HasPrefix(sortValue, "bgmscore"):
 		primary = `COALESCE((SELECT sm.bgm_score FROM series_metadata sm WHERE sm.series_id=s.id), -1)`
 		ties = " " + dir + ",s.name COLLATE NOCASE ASC,s.id ASC"
-		groupOrder = "COALESCE(MAX(gm.bgm_score),-1)"
 		searchPrimary = `COALESCE(sm.bgm_score, -1)`
 		searchTies = ties
 	}
 
 	var total int64
 	if q.GroupBangumi {
-		// Apply visibility and other filters before grouping/pagination. Keep
-		// a stable real ID as anchor, with date/rank/score from eligible versions.
-		from := " FROM series s LEFT JOIN series_metadata gm ON gm.series_id=s.id" + where +
-			" GROUP BY CASE WHEN s.one_shot=0 AND gm.bgm_subject_id>0 THEN 'bgm:'||gm.bgm_subject_id ELSE 'series:'||s.id END"
-		groupCount := "SELECT count(*) FROM (SELECT 1" + from + ")"
+		// Apply visibility and other filters before grouping/pagination. Pick the
+		// edition with the most volumes (books_count DESC, then union library,
+		// library name, series name, id) as the representative anchor while keeping
+		// group-level date/rank/score rollups from all eligible versions.
+		groupKey := "CASE WHEN s.one_shot=0 AND gm.bgm_subject_id>0 THEN 'bgm:'||gm.bgm_subject_id ELSE 'series:'||s.id END"
+		baseFrom := " FROM series s JOIN libraries gl ON gl.id=s.library_id LEFT JOIN series_metadata gm ON gm.series_id=s.id" + where
+		groupCount := "SELECT count(*) FROM (SELECT 1" + baseFrom + " GROUP BY " + groupKey + ")"
 		if err := s.db.QueryRowContext(ctx, groupCount, args...).Scan(&total); err != nil {
 			return nil, 0, err
 		}
 		if total == 0 {
 			return []Series{}, 0, nil
 		}
-		columns := "SELECT MIN(s.id) AS id"
-		if groupOrder != "" {
-			columns += "," + groupOrder + " AS sort_value"
+		sortExpr := ""
+		switch {
+		case strings.HasPrefix(sortValue, "lastmodifieddate"):
+			sortExpr = ", MAX(s.sort_modified_at) OVER (PARTITION BY " + groupKey + ") AS sort_value"
+			primary = "grouped.sort_value"
+		case strings.HasPrefix(sortValue, "createddate"):
+			sortExpr = ", MAX(s.sort_created_at) OVER (PARTITION BY " + groupKey + ") AS sort_value"
+			primary = "grouped.sort_value"
+		case strings.HasPrefix(sortValue, "bgmrank"):
+			sortExpr = ", MIN(CASE WHEN gm.bgm_rank>0 THEN gm.bgm_rank END) OVER (PARTITION BY " + groupKey + ") AS sort_value"
+			primary = "grouped.sort_value"
+		case strings.HasPrefix(sortValue, "bgmscore"):
+			sortExpr = ", COALESCE(MAX(gm.bgm_score), -1) OVER (PARTITION BY " + groupKey + ") AS sort_value"
 			primary = "grouped.sort_value"
 		}
-		source = " FROM series s JOIN (" + columns + from + ") grouped ON grouped.id=s.id"
+		rankedSelect := "SELECT s.id AS id, ROW_NUMBER() OVER (" +
+			"PARTITION BY " + groupKey +
+			" ORDER BY s.books_count DESC, CASE WHEN gl.provider_type='union' THEN 0 ELSE 1 END ASC, gl.name COLLATE NOCASE ASC, s.name COLLATE NOCASE ASC, s.id ASC" +
+			") AS _rn" + sortExpr + baseFrom
+		groupedCols := "id"
+		if sortExpr != "" {
+			groupedCols += ", sort_value"
+		}
+		source = " FROM series s JOIN (SELECT " + groupedCols + " FROM (" + rankedSelect + ") WHERE _rn=1) grouped ON grouped.id=s.id"
 		sourceArgs = nil
 		where = ""
 	} else if strings.TrimSpace(q.Search) != "" {

@@ -99,7 +99,8 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         lp.topMargin = 36;
         settingsBtn.setLayoutParams(lp);
-        settingsBtn.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+        settingsBtn.setOnClickListener(v -> startActivity(
+                new Intent(this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)));
         statusPane.addView(settingsBtn);
 
         frame = new FrameLayout(this);
@@ -222,7 +223,8 @@ public final class MainActivity extends Activity {
                         return true;
                     }
                     if ("/__android/settings".equals(uri.getPath()) && request.hasGesture()) {
-                        startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+                        startActivity(new Intent(MainActivity.this, SettingsActivity.class)
+                                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP));
                         return true;
                     }
                     if ("/__android/stop".equals(uri.getPath()) && request.hasGesture()) {

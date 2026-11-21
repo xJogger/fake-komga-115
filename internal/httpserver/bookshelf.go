@@ -40,8 +40,10 @@ func (s *Server) bookshelfVersions(w http.ResponseWriter, r *http.Request) {
 		args = append(args, scope)
 	}
 	joins := " FROM series s JOIN series_metadata gm ON gm.series_id=s.id JOIN libraries l ON l.id=s.library_id"
-	rows, err := s.store.DB().QueryContext(ctx, "SELECT s.id,s.name,l.name,l.provider_type,"+
-		"(SELECT count(*) FROM books b WHERE b.series_id=s.id)"+joins+where+" ORDER BY l.name,s.name,s.id", args...)
+	rows, err := s.store.DB().QueryContext(ctx, "SELECT s.id,s.name,l.name,l.provider_type,s.books_count"+
+		joins+where+
+		" ORDER BY s.books_count DESC, CASE WHEN l.provider_type='union' THEN 0 ELSE 1 END ASC, l.name COLLATE NOCASE ASC, s.name COLLATE NOCASE ASC, s.id ASC",
+		args...)
 	if err != nil {
 		s.writeDBErrorMessage(w, r, err, "Could not load versions.")
 		return

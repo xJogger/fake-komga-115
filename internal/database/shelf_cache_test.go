@@ -69,6 +69,83 @@ VALUES ('a-anchor',100,NULL,''),('b-edition',100,1,''),('c-ranked',200,20,'')`)
 	check(q, 3, "c-ranked", "a-anchor", "d-unknown")
 }
 
+func TestGroupBangumiPrefersMostBooksAndUnionTieBreak(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "group_most_books.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	unionLib := Library{ID: "lib-union", Name: "AAA Union", ProviderType: ProviderUnion, RootCID: "union:lib-union", Enabled: true}
+	normalLib := Library{ID: "lib-normal", Name: "ZZZ Normal", ProviderType: ProviderLocal, RootCID: "local:/fixture", RootPath: "/fixture", Enabled: true}
+	for _, lib := range []Library{unionLib, normalLib} {
+		if err := s.UpsertLibrary(ctx, lib); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Same bgm_subject_id=500: normal library has MORE books (3 vs 1) -> must beat union library.
+	insertCatalogSeries(t, s, unionLib.ID, "a-union-short", "Short Union", []catalogBookTime{
+		{modified: "2025-05-01T00:00:00Z"},
+	})
+	insertCatalogSeries(t, s, normalLib.ID, "z-normal-full", "Full Normal", []catalogBookTime{
+		{modified: "2024-01-01T00:00:00Z"},
+		{modified: "2024-01-02T00:00:00Z"},
+		{modified: "2024-01-03T00:00:00Z"},
+	})
+
+	// Same bgm_subject_id=600: equal book counts (2 vs 2) -> union library wins tie-break.
+	insertCatalogSeries(t, s, normalLib.ID, "a-normal-tie", "Tie Normal", []catalogBookTime{
+		{modified: "2024-02-01T00:00:00Z"},
+		{modified: "2024-02-02T00:00:00Z"},
+	})
+	insertCatalogSeries(t, s, unionLib.ID, "z-union-tie", "Tie Union", []catalogBookTime{
+		{modified: "2024-03-01T00:00:00Z"},
+		{modified: "2024-03-02T00:00:00Z"},
+	})
+
+	if _, err := s.DB().Exec(`INSERT INTO series_metadata(series_id,bgm_subject_id,bgm_rank,updated_at) VALUES
+		('a-union-short',500,5,''),
+		('z-normal-full',500,NULL,''),
+		('a-normal-tie',600,20,''),
+		('z-union-tie',600,20,'')`); err != nil {
+		t.Fatal(err)
+	}
+
+	items, total, err := s.SeriesPage(ctx, SeriesQuery{Size: 20, Sort: "bgmRank,asc", GroupBangumi: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("total=%d len=%d, want 2", total, len(items))
+	}
+	// Group 500 still gets group-level bgm_rank=5 from a-union-short, but picks z-normal-full (3 books).
+	if items[0].ID != "z-normal-full" || items[0].BooksCount != 3 {
+		t.Fatalf("items[0] = %s (books=%d), want z-normal-full (books=3)", items[0].ID, items[0].BooksCount)
+	}
+	// Group 600 tie-breaks 2 vs 2 to union edition z-union-tie.
+	if items[1].ID != "z-union-tie" || items[1].BooksCount != 2 {
+		t.Fatalf("items[1] = %s (books=%d), want z-union-tie (books=2)", items[1].ID, items[1].BooksCount)
+	}
+
+	// Bangumi lookup must follow the exact same order (books_count DESC, then union).
+	matches500, err := s.LookupSeriesByBangumiSubject(ctx, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches500) != 2 || matches500[0].SeriesID != "z-normal-full" || matches500[1].SeriesID != "a-union-short" {
+		t.Fatalf("LookupSeriesByBangumiSubject(500) = %+v, want z-normal-full first", matches500)
+	}
+	matches600, err := s.LookupSeriesByBangumiSubject(ctx, 600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches600) != 2 || matches600[0].SeriesID != "z-union-tie" || matches600[1].SeriesID != "a-normal-tie" {
+		t.Fatalf("LookupSeriesByBangumiSubject(600) = %+v, want z-union-tie first", matches600)
+	}
+}
+
 func TestShelfCacheContinueReadingInvalidatedOnCommit(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "shelf.db"))

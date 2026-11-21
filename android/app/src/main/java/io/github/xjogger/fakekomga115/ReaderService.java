@@ -228,17 +228,21 @@ public final class ReaderService extends Service {
         if (nm != null) {
             nm.createNotificationChannel(new NotificationChannel(CHANNEL, "本机书库", NotificationManager.IMPORTANCE_LOW));
         }
-        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class),
+        Intent openIntent = new Intent(this, MainActivity.class)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        Intent settingsIntent = new Intent(this, SettingsActivity.class)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent open = PendingIntent.getActivity(this, 0, openIntent,
             PendingIntent.FLAG_IMMUTABLE);
-        PendingIntent settings = PendingIntent.getActivity(this, 2, new Intent(this, SettingsActivity.class),
+        PendingIntent settings = PendingIntent.getActivity(this, 2, settingsIntent,
             PendingIntent.FLAG_IMMUTABLE);
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, ReaderService.class).setAction(STOP),
             PendingIntent.FLAG_IMMUTABLE);
 
-        String contentText = "仅在本机提供书架与阅读器";
+        String contentText = "仅本机运行 · 下拉或长按展开设置/停止";
         Instance s = server;
         if (!stopping && s != null && s.lanActive()) {
-            contentText = "本机运行中 · 局域网服务已开启 (端口 " + s.lanPort() + ")";
+            contentText = "局域网已开 (端口 " + s.lanPort() + ") · 下拉或长按展开按钮";
         }
         return new Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_menu_agenda)

@@ -39,11 +39,15 @@ import java.util.Date;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import mobile.Instance;
 
 public final class SettingsActivity extends Activity {
     private static final int EXPORT_DOCUMENT = 21;
+    private static final int MAX_SHARE_CHARS = 100_000;
     private static final int COLOR_LIGHT_BG = 0xFFF4F6FA;
     private static final int COLOR_DARK_BG = 0xFF0F1117;
 
@@ -57,6 +61,9 @@ public final class SettingsActivity extends Activity {
     private Switch verboseSwitch;
     private TextView diagPreviewView;
 
+    private final ExecutorService diagExecutor = Executors.newSingleThreadExecutor();
+    private final AtomicInteger diagSeq = new AtomicInteger();
+
     private ReaderService.LocalBinder service;
     private boolean bound;
     private boolean updatingUi;
@@ -68,7 +75,6 @@ public final class SettingsActivity extends Activity {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
             service = (ReaderService.LocalBinder) binder;
             service.watch(observer);
-            refreshUi();
         }
         @Override public void onServiceDisconnected(ComponentName name) {
             service = null;
@@ -96,7 +102,6 @@ public final class SettingsActivity extends Activity {
                 return WindowInsets.CONSUMED;
             });
         }
-        applySystemBars(bgColor, !dark);
 
         LinearLayout container = new LinearLayout(this);
         container.setOrientation(LinearLayout.VERTICAL);
@@ -112,7 +117,7 @@ public final class SettingsActivity extends Activity {
         container.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("即使网页白屏或本机服务异常，仍可在此查看状态、控制局域网服务与导出脱敏诊断日志。");
+        subtitle.setText("即使网页白屏或本机服务异常，仍可在此查看状态、控制局域网服务与导出脱敏诊断日志。提示：在小米等系统通知栏中，下拉或长按常驻通知可展开「手机端设置 / 停止」快捷按钮。");
         subtitle.setTextSize(12.5f);
         subtitle.setTextColor(mutedColor);
         subtitle.setPadding(0, dp(4), 0, dp(14));
@@ -134,15 +139,26 @@ public final class SettingsActivity extends Activity {
         Button startBtn = new Button(this);
         startBtn.setText("启动服务");
         startBtn.setOnClickListener(v -> {
-            startForegroundService(new Intent(this, ReaderService.class));
-            if (service != null) service.startIfStopped();
+            try {
+                startForegroundService(new Intent(this, ReaderService.class));
+                if (service != null) service.startIfStopped();
+            } catch (Throwable t) {
+                DiagnosticsLog.append(this, "error", "android_service", "manual_start",
+                        t.getClass().getSimpleName(), t.getMessage());
+                Toast.makeText(this, "启动服务失败，请查看诊断日志", Toast.LENGTH_LONG).show();
+            }
             refreshUi();
         });
         Button stopBtn = new Button(this);
         stopBtn.setText("停止服务");
         stopBtn.setOnClickListener(v -> {
-            if (service != null) service.stopNow();
-            else startService(new Intent(this, ReaderService.class).setAction(ReaderService.STOP));
+            try {
+                if (service != null) service.stopNow();
+                else startService(new Intent(this, ReaderService.class).setAction(ReaderService.STOP));
+            } catch (Throwable t) {
+                DiagnosticsLog.append(this, "error", "android_service", "manual_stop",
+                        t.getClass().getSimpleName(), t.getMessage());
+            }
             refreshUi();
         });
         serviceActions.addView(backBtn);
@@ -280,31 +296,38 @@ public final class SettingsActivity extends Activity {
         container.addView(diagCard);
 
         setContentView(rootScroll);
+        applySystemBars(bgColor, !dark);
         bound = bindService(new Intent(this, ReaderService.class), connection, Context.BIND_AUTO_CREATE);
         refreshUi();
     }
 
     @SuppressWarnings("deprecation")
     private void applySystemBars(int bgColor, boolean lightIcons) {
-        Window window = getWindow();
-        if (window == null) return;
-        if (Build.VERSION.SDK_INT < 35) {
-            window.setStatusBarColor(bgColor);
-            window.setNavigationBarColor(bgColor);
-        }
-        if (Build.VERSION.SDK_INT >= 30) {
-            WindowInsetsController ctrl = window.getInsetsController();
-            if (ctrl != null) {
-                int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
-                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
-                ctrl.setSystemBarsAppearance(lightIcons ? mask : 0, mask);
-            }
-        } else {
+        try {
+            Window window = getWindow();
+            if (window == null) return;
             View decor = window.getDecorView();
-            int flags = decor.getSystemUiVisibility();
-            if (lightIcons) flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-            else flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-            decor.setSystemUiVisibility(flags);
+            if (decor == null) return;
+            if (Build.VERSION.SDK_INT < 35) {
+                window.setStatusBarColor(bgColor);
+                window.setNavigationBarColor(bgColor);
+            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                WindowInsetsController ctrl = window.getInsetsController();
+                if (ctrl != null) {
+                    int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    ctrl.setSystemBarsAppearance(lightIcons ? mask : 0, mask);
+                }
+            } else {
+                int flags = decor.getSystemUiVisibility();
+                if (lightIcons) flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                else flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                decor.setSystemUiVisibility(flags);
+            }
+        } catch (Throwable t) {
+            DiagnosticsLog.append(this, "warn", "android_ui", "system_bars",
+                    t.getClass().getSimpleName(), t.getMessage());
         }
     }
 
@@ -331,6 +354,7 @@ public final class SettingsActivity extends Activity {
     }
 
     private void refreshUi() {
+        if (isFinishing() || isDestroyed()) return;
         updatingUi = true;
         try {
             SharedPreferences prefs = getSharedPreferences(ReaderService.PREFS, MODE_PRIVATE);
@@ -386,6 +410,9 @@ public final class SettingsActivity extends Activity {
 
             Instance inst = service != null ? service.getInstance() : null;
             verboseSwitch.setChecked(inst != null && inst.diagnosticsVerbose());
+        } catch (Throwable t) {
+            DiagnosticsLog.append(this, "error", "android_ui", "refresh_settings",
+                    t.getClass().getSimpleName(), t.getMessage());
         } finally {
             updatingUi = false;
         }
@@ -393,38 +420,82 @@ public final class SettingsActivity extends Activity {
     }
 
     private void refreshDiagnosticsPreview() {
-        Instance inst = service != null ? service.getInstance() : null;
-        String text = DiagnosticsLog.buildExportText(this, inst);
-        if (text.length() > 8000) {
-            diagPreviewView.setText(text.substring(text.length() - 8000));
-        } else {
-            diagPreviewView.setText(text);
-        }
+        if (isFinishing() || isDestroyed() || diagExecutor.isShutdown()) return;
+        final int seq = diagSeq.incrementAndGet();
+        final Instance inst = service != null ? service.getInstance() : null;
+        final Context appCtx = getApplicationContext();
+        try {
+            diagExecutor.execute(() -> {
+                String text;
+                try {
+                    text = DiagnosticsLog.buildExportText(appCtx, inst);
+                } catch (Throwable t) {
+                    DiagnosticsLog.append(appCtx, "error", "android_diag", "preview",
+                            t.getClass().getSimpleName(), t.getMessage());
+                    text = "# 诊断日志加载失败\n" + t.getClass().getSimpleName();
+                }
+                final String shown = text.length() > 8000 ? text.substring(text.length() - 8000) : text;
+                runOnUiThread(() -> {
+                    if (seq != diagSeq.get() || isFinishing() || isDestroyed()) return;
+                    diagPreviewView.setText(shown);
+                });
+            });
+        } catch (RuntimeException ignored) {}
     }
 
     private void startSaveDiagnosticsDocument() {
-        Instance inst = service != null ? service.getInstance() : null;
-        pendingExportText = DiagnosticsLog.buildExportText(this, inst);
-        String ts = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
-        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("text/plain");
-        intent.putExtra(Intent.EXTRA_TITLE, "mangaalpha-android-diagnostics-" + ts + ".txt");
+        if (isFinishing() || isDestroyed() || diagExecutor.isShutdown()) return;
+        final Instance inst = service != null ? service.getInstance() : null;
+        final Context appCtx = getApplicationContext();
         try {
-            startActivityForResult(intent, EXPORT_DOCUMENT);
-        } catch (Exception e) {
-            shareDiagnosticsText();
-        }
+            diagExecutor.execute(() -> {
+                final String text = DiagnosticsLog.buildExportText(appCtx, inst);
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    pendingExportText = text;
+                    String ts = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
+                    Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("text/plain");
+                    intent.putExtra(Intent.EXTRA_TITLE, "mangaalpha-android-diagnostics-" + ts + ".txt");
+                    try {
+                        startActivityForResult(intent, EXPORT_DOCUMENT);
+                    } catch (Throwable e) {
+                        shareDiagnosticsText();
+                    }
+                });
+            });
+        } catch (RuntimeException ignored) {}
     }
 
     private void shareDiagnosticsText() {
-        Instance inst = service != null ? service.getInstance() : null;
-        String text = DiagnosticsLog.buildExportText(this, inst);
-        Intent send = new Intent(Intent.ACTION_SEND);
-        send.setType("text/plain");
-        send.putExtra(Intent.EXTRA_SUBJECT, "MangaAlpha Android Diagnostics");
-        send.putExtra(Intent.EXTRA_TEXT, text);
-        startActivity(Intent.createChooser(send, "分享脱敏诊断日志"));
+        if (isFinishing() || isDestroyed() || diagExecutor.isShutdown()) return;
+        final Instance inst = service != null ? service.getInstance() : null;
+        final Context appCtx = getApplicationContext();
+        try {
+            diagExecutor.execute(() -> {
+                String text = DiagnosticsLog.buildExportText(appCtx, inst);
+                if (text.length() > MAX_SHARE_CHARS) {
+                    text = "# 提示：日志较长，分享仅包含末尾 " + MAX_SHARE_CHARS + " 字符，完整内容请使用「保存文件」。\n\n"
+                            + text.substring(text.length() - MAX_SHARE_CHARS);
+                }
+                final String shareBody = text;
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    Intent send = new Intent(Intent.ACTION_SEND);
+                    send.setType("text/plain");
+                    send.putExtra(Intent.EXTRA_SUBJECT, "MangaAlpha Android Diagnostics");
+                    send.putExtra(Intent.EXTRA_TEXT, shareBody);
+                    try {
+                        startActivity(Intent.createChooser(send, "分享脱敏诊断日志"));
+                    } catch (Throwable e) {
+                        DiagnosticsLog.append(this, "error", "android_diag", "share",
+                                e.getClass().getSimpleName(), e.getMessage());
+                        Toast.makeText(this, "无法打开分享面板，请改用「保存文件」", Toast.LENGTH_LONG).show();
+                    }
+                });
+            });
+        } catch (RuntimeException ignored) {}
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -495,6 +566,7 @@ public final class SettingsActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        diagExecutor.shutdownNow();
         if (service != null) service.unwatch(observer);
         if (bound) unbindService(connection);
         super.onDestroy();
